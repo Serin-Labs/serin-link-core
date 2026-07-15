@@ -22,7 +22,7 @@ esp32:
 external_components:
   - source:
       type: local
-      path: ../esphome/components   # in-repo; or github://Serin-Labs/serin-link-core@v0.1.0
+      path: ../esphome/components   # in-repo; or github://Serin-Labs/serin-link-core@v0.1.1
     components: [serin_link]
 
 wifi:

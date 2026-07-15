@@ -23,7 +23,7 @@ esp32:
 
 external_components:
   - source: github://echavet/MitsubishiCN105ESPHome
-  - source: github://Serin-Labs/serin-link-core@v0.1.0   # or: {type: local, path: ../esphome/components}
+  - source: github://Serin-Labs/serin-link-core@v0.1.1   # or: {type: local, path: ../esphome/components}
     components: [serin_link]
 
 wifi:

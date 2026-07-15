@@ -89,5 +89,9 @@ async def to_code(config):
         sel = await cg.get_variable(config[CONF_VANE_H_SELECT])
         cg.add(var.set_vane_h_select(sel))
     # Ed25519 + X25519 + HMAC-SHA256 all come from libsodium (mbedTLS has no
-    # EdDSA). Registry component; pin per ESPHome/IDF release as needed.
-    add_idf_component(name="espressif/libsodium", ref="1.0.20~4")
+    # EdDSA). Caret range, not an exact pin: arduino-on-IDF builds carry
+    # arduino-esp32's own `espressif/libsodium ^1.0.21` dependency, and an
+    # exact pin here makes IDF version solving fail for the whole project.
+    # setup() registers an esp_random-backed RNG before sodium_init(), so any
+    # 1.x resolution is safe.
+    add_idf_component(name="espressif/libsodium", ref="^1.0.20")

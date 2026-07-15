@@ -31,7 +31,7 @@ esp32:
     type: esp-idf   # required: raw nvs_*, esp_now encrypted peers, libsodium
 
 external_components:
-  - source: github://Serin-Labs/serin-link-core@v0.1.0
+  - source: github://Serin-Labs/serin-link-core@v0.1.1
     components: [serin_link]
 
 climate:
