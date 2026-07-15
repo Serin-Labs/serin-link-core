@@ -32,6 +32,7 @@ CONF_CLIMATE_ID = "climate_id"
 CONF_HVAC_LINK = "hvac_link"
 CONF_VANE_V_SELECT = "vane_v_select"
 CONF_VANE_H_SELECT = "vane_h_select"
+CONF_CMD_DEBOUNCE = "cmd_debounce"
 
 # esp-idf framework required (raw nvs_*, esp_now encrypted peers, libsodium);
 # it is ESPHome's ESP32 default. (cv.only_with_esp_idf was removed in 2026.x.)
@@ -52,6 +53,13 @@ CONFIG_SCHEMA = cv.Schema(
         # "swing" (case-insensitive) become the wire AUTO/SWING codes.
         cv.Optional(CONF_VANE_V_SELECT): cv.use_id(select.Select),
         cv.Optional(CONF_VANE_H_SELECT): cv.use_id(select.Select),
+        # Trailing quiet window before a burst of dial edits is applied to the
+        # climate entity as a single ClimateCall (0s = apply each CMD
+        # immediately). The STATE echoed to dials reflects the commanded
+        # values either way (optimistic overlay until the entity confirms).
+        cv.Optional(
+            CONF_CMD_DEBOUNCE, default="300ms"
+        ): cv.positive_time_period_milliseconds,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -88,6 +96,7 @@ async def to_code(config):
     if CONF_VANE_H_SELECT in config:
         sel = await cg.get_variable(config[CONF_VANE_H_SELECT])
         cg.add(var.set_vane_h_select(sel))
+    cg.add(var.set_cmd_debounce(config[CONF_CMD_DEBOUNCE].total_milliseconds))
     # Ed25519 + X25519 + HMAC-SHA256 all come from libsodium (mbedTLS has no
     # EdDSA). Caret range, not an exact pin: arduino-on-IDF builds carry
     # arduino-esp32's own `espressif/libsodium ^1.0.21` dependency, and an

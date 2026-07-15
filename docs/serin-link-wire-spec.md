@@ -371,7 +371,11 @@ enum {
 
 Apply-masked-fields-only; echo STATE to **all** bonded dials immediately after
 applying. The dial debounces edits (250 ms) and holds its local value against
-the echo for 3 s. Controllers MUST validate wire values before applying them
+the echo for 3 s. Controllers whose HVAC backend applies asynchronously or
+expensively MAY coalesce a CMD burst and defer the actual apply, provided the
+echoed STATE already reflects the accepted values (optimistic overlay until
+the backend confirms them or a safety timeout expires — a stale echo snaps
+the dial back mid-adjustment once its 3 s hold runs out). Controllers MUST validate wire values before applying them
 (range-clamp temperatures/humidity, ignore undeclared presets/modes — a CMD
 field the controller didn't declare in CAPS is a no-op, and the dial shouldn't
 offer it).

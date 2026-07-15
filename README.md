@@ -142,6 +142,13 @@ Notes:
 - Wire input is validated before it reaches the entity: setpoints clamp to
   the entity's visual range, out-of-range humidity is ignored, unknown
   modes/presets are no-ops.
+- Dial edits are debounced: a CMD burst (e.g. scrolling through setpoints)
+  merges into one `ClimateCall`, applied after `cmd_debounce:` (default
+  `300ms`, `0s` = apply immediately) of quiet. The STATE echoed to dials
+  reflects the commanded values from the first CMD on — an optimistic
+  overlay masks each field until the entity publishes it back (or a 10 s
+  safety timeout lets the truth through), so async platforms like CN105
+  can't snap the dial back with a stale echo mid-adjustment.
 - The component vendors flattened copies of the core (ESPHome compiles all
   sources in a component dir). Never edit those copies directly: edit the
   canonical files (`include/serin_link/`, `src/`), re-run

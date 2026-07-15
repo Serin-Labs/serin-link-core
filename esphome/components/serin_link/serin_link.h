@@ -37,6 +37,9 @@ class SerinLinkComponent : public Component {
 
   void set_zone_name(const std::string &name) { zone_name_ = name; }
   void set_climate(climate::Climate *c) { climate_ = c; }
+  /* cmd_debounce: — trailing quiet window before a dial CMD burst is applied
+   * to the entity as one ClimateCall (0 = apply immediately). */
+  void set_cmd_debounce(uint32_t ms) { cmd_debounce_ms_ = ms; }
   /* hvac_link: — platform-specific device-link health (a generic climate
    * entity exists whether or not the device behind it answers). Unset, the
    * NaN-room-temp heuristic applies (sl2_hvac_link_infer). */
@@ -70,6 +73,15 @@ class SerinLinkComponent : public Component {
   /* wire setpoints clamp to the entity's visual range (not every platform
    * clamps in its own control()) */
   float clamp_setpoint_(float c);
+  /* Dial CMDs are staged, not applied inline: a burst of detent edits merges
+   * into hold_ (latest wins) and one ClimateCall goes out after cmd_debounce_
+   * of quiet. The same staged values overlay hvac_get_state until the entity
+   * confirms each field — the immediate post-CMD STATE echo would otherwise
+   * carry the entity's pre-command state on async platforms (cn105 confirms
+   * over serial), and the stale echo snaps the dial back mid-adjustment. */
+  void stage_(uint16_t bit);
+  void apply_pending_();
+  void apply_overlay_(sl2_hvac_state_t *out, bool two_point);
   sl2_link_t link_{};
   sl2_port_t port_{};
   sl2_crypto_t crypto_{};
@@ -84,6 +96,13 @@ class SerinLinkComponent : public Component {
   bool fan_has_auto_{false};
   bool use_f_{false};                    /* per-controller display pref (CM_UNITS) */
   ESPPreferenceObject use_f_pref_;
+  /* staged CMD fields, wire format, normalized to what the entity will report
+   * back once it confirms (clamped temps, canonical fan percents) */
+  struct sl2_cmd_pkt hold_ {};
+  uint16_t pending_mask_{0};             /* staged, not yet applied to the entity */
+  uint16_t overlay_mask_{0};             /* still masking STATE (confirm/timeout clears) */
+  uint32_t overlay_since_ms_{0};
+  uint32_t cmd_debounce_ms_{300};
   uint32_t last_ps_check_ms_{0};
   bool started_{false};
 };

@@ -330,7 +330,7 @@ static void test_pin_mismatch(void) {
 
     /* same MAC, new identity key: must be refused, no RESP sent */
     fdial_t evil;
-    dial_make(&evil, 0xD1);            /* same mac, different keys */
+    dial_make(&evil, 0xD1);
     int resp_before = count_sends_of(SL2_PKT_PAIR_RESP, NULL);
     sl2_link_pair_start(&l, 60000);
     struct sl2_pair_req_pkt req;

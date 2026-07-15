@@ -353,6 +353,8 @@ bool SerinLinkComponent::hvac_get_state(sl2_hvac_state_t *out) {
   if (traits.has_feature_flags(climate::CLIMATE_SUPPORTS_TARGET_HUMIDITY) &&
       !std::isnan(climate_->target_humidity))
     out->hum_set_pct = static_cast<uint8_t>(climate_->target_humidity);
+  apply_overlay_(out, traits.has_feature_flags(
+                          climate::CLIMATE_SUPPORTS_TWO_POINT_TARGET_TEMPERATURE));
   return true;
 }
 
@@ -384,25 +386,101 @@ bool SerinLinkComponent::hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd
     ESP_LOGI(TAG, "CMD from dial: mask=0x%04x mode=%u fan=%u set=%.1fC", mask,
              cmd->mode, cmd->fan, sl2_dc_to_c(cmd->set_dc));
   }
-  auto call = climate_->make_call();
+  /* Stage, don't apply: fields merge into hold_ (normalized to what the
+   * entity will report back once it confirms, so the overlay's per-field
+   * confirmation compare can match exactly) and one ClimateCall goes out
+   * after cmd_debounce_ms_ of quiet. Returning true still echoes STATE
+   * immediately — apply_overlay_ makes that echo read back the staged
+   * values instead of the entity's pre-command state. */
   bool any = (mask & SL2_CM_UNITS) != 0;
-  if (mask & SL2_CM_MODE) { call.set_mode(mode_from_sl2(cmd->mode)); any = true; }
+  if (mask & SL2_CM_MODE) {
+    hold_.mode = mode_to_sl2(mode_from_sl2(cmd->mode));
+    stage_(SL2_CM_MODE); any = true;
+  }
   if (mask & SL2_CM_TEMP) {
-    call.set_target_temperature(clamp_setpoint_(sl2_dc_to_c(cmd->set_dc)));
-    any = true;
+    hold_.set_dc = sl2_c_to_dc(clamp_setpoint_(sl2_dc_to_c(cmd->set_dc)));
+    stage_(SL2_CM_TEMP); any = true;
   }
   if (mask & SL2_CM_TEMP_BAND) {
-    if (cmd->set_low_dc != SL2_DC_NA)
-      call.set_target_temperature_low(clamp_setpoint_(sl2_dc_to_c(cmd->set_low_dc)));
-    if (cmd->set_high_dc != SL2_DC_NA)
-      call.set_target_temperature_high(clamp_setpoint_(sl2_dc_to_c(cmd->set_high_dc)));
-    any = true;
+    hold_.set_low_dc = cmd->set_low_dc != SL2_DC_NA
+        ? sl2_c_to_dc(clamp_setpoint_(sl2_dc_to_c(cmd->set_low_dc))) : SL2_DC_NA;
+    hold_.set_high_dc = cmd->set_high_dc != SL2_DC_NA
+        ? sl2_c_to_dc(clamp_setpoint_(sl2_dc_to_c(cmd->set_high_dc))) : SL2_DC_NA;
+    stage_(SL2_CM_TEMP_BAND); any = true;
   }
   if ((mask & SL2_CM_FAN) && !fan_detents_.empty()) {
     if (cmd->fan == SL2_FAN_AUTO) {
-      if (fan_has_auto_) call.set_fan_mode(climate::CLIMATE_FAN_AUTO);
+      if (fan_has_auto_) { hold_.fan = SL2_FAN_AUTO; stage_(SL2_CM_FAN); any = true; }
     } else {
-      size_t idx = (static_cast<size_t>(cmd->fan) * fan_detents_.size() + 50) / 100;
+      const size_t n = fan_detents_.size();
+      size_t idx = (static_cast<size_t>(cmd->fan) * n + 50) / 100;
+      if (idx < 1) idx = 1;
+      if (idx > n) idx = n;
+      hold_.fan = static_cast<uint8_t>((idx * 100 + n / 2) / n);  /* canonical pct */
+      stage_(SL2_CM_FAN); any = true;
+    }
+  }
+  if (mask & SL2_CM_PRESET) {
+    climate::ClimatePreset p;
+    if (preset_from_sl2(cmd->preset, &p)) {
+      hold_.preset = cmd->preset;
+      stage_(SL2_CM_PRESET); any = true;
+    }
+  }
+  /* wire range 0-100; anything else (incl. the 0xFF n/a sentinel) is ignored,
+   * matching the unknown-mode/preset policy */
+  if ((mask & SL2_CM_HUM) && cmd->hum_set_pct <= 100) {
+    hold_.hum_set_pct = cmd->hum_set_pct;
+    stage_(SL2_CM_HUM); any = true;
+  }
+  if ((mask & SL2_CM_VANEV) && vane_v_sel_) {
+    hold_.vane_v = cmd->vane_v;
+    stage_(SL2_CM_VANEV); any = true;
+  }
+  if ((mask & SL2_CM_VANEH) && vane_h_sel_) {
+    hold_.vane_h = cmd->vane_h;
+    stage_(SL2_CM_VANEH); any = true;
+  }
+  if (pending_mask_ != 0) {
+    if (cmd_debounce_ms_ == 0) {
+      apply_pending_();
+    } else {
+      /* named timeout: each CMD in a burst re-arms it (trailing debounce) */
+      this->set_timeout("sl2_cmd", cmd_debounce_ms_, [this]() { this->apply_pending_(); });
+    }
+  }
+  return any;
+}
+
+void SerinLinkComponent::stage_(uint16_t bit) {
+  pending_mask_ |= bit;
+  overlay_mask_ |= bit;
+  overlay_since_ms_ = millis();
+}
+
+void SerinLinkComponent::apply_pending_() {
+  const uint16_t mask = pending_mask_;
+  pending_mask_ = 0;
+  if (climate_ == nullptr || mask == 0) return;
+  auto call = climate_->make_call();
+  bool any = false;
+  if (mask & SL2_CM_MODE) { call.set_mode(mode_from_sl2(hold_.mode)); any = true; }
+  if (mask & SL2_CM_TEMP) {
+    call.set_target_temperature(sl2_dc_to_c(hold_.set_dc));
+    any = true;
+  }
+  if (mask & SL2_CM_TEMP_BAND) {
+    if (hold_.set_low_dc != SL2_DC_NA)
+      call.set_target_temperature_low(sl2_dc_to_c(hold_.set_low_dc));
+    if (hold_.set_high_dc != SL2_DC_NA)
+      call.set_target_temperature_high(sl2_dc_to_c(hold_.set_high_dc));
+    any = true;
+  }
+  if ((mask & SL2_CM_FAN) && !fan_detents_.empty()) {
+    if (hold_.fan == SL2_FAN_AUTO) {
+      call.set_fan_mode(climate::CLIMATE_FAN_AUTO);
+    } else {
+      size_t idx = (static_cast<size_t>(hold_.fan) * fan_detents_.size() + 50) / 100;
       if (idx < 1) idx = 1;
       if (idx > fan_detents_.size()) idx = fan_detents_.size();
       call.set_fan_mode(fan_detents_[idx - 1]);
@@ -411,19 +489,72 @@ bool SerinLinkComponent::hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd
   }
   if (mask & SL2_CM_PRESET) {
     climate::ClimatePreset p;
-    if (preset_from_sl2(cmd->preset, &p)) { call.set_preset(p); any = true; }
+    if (preset_from_sl2(hold_.preset, &p)) { call.set_preset(p); any = true; }
   }
-  /* wire range 0-100; anything else (incl. the 0xFF n/a sentinel) is ignored,
-   * matching the unknown-mode/preset policy */
-  if ((mask & SL2_CM_HUM) && cmd->hum_set_pct <= 100) {
-    call.set_target_humidity(static_cast<float>(cmd->hum_set_pct));
+  if (mask & SL2_CM_HUM) {
+    call.set_target_humidity(static_cast<float>(hold_.hum_set_pct));
     any = true;
   }
   if (any) call.perform();
   /* Vanes live outside the ClimateCall: they route to the bound selects. */
-  if ((mask & SL2_CM_VANEV) && vane_v_sel_) { vane_apply(vane_v_sel_, cmd->vane_v); any = true; }
-  if ((mask & SL2_CM_VANEH) && vane_h_sel_) { vane_apply(vane_h_sel_, cmd->vane_h); any = true; }
-  return any;
+  if ((mask & SL2_CM_VANEV) && vane_v_sel_) vane_apply(vane_v_sel_, hold_.vane_v);
+  if ((mask & SL2_CM_VANEH) && vane_h_sel_) vane_apply(vane_h_sel_, hold_.vane_h);
+}
+
+/* Staged values mask the entity's published state until the entity reports
+ * them back (per-field) or the safety window expires — the cn105-homekit
+ * "wanted settings" pattern. Timeout means the entity rejected or dropped
+ * the command; the next STATE then carries the truth and the dial reverts,
+ * which is the correct user-visible outcome. */
+void SerinLinkComponent::apply_overlay_(sl2_hvac_state_t *out, bool two_point) {
+  if (overlay_mask_ == 0) return;
+  static const uint32_t ECHO_HOLD_MS = 10000;
+  if (millis() - overlay_since_ms_ > ECHO_HOLD_MS) {
+    overlay_mask_ = 0;
+    return;
+  }
+  if (overlay_mask_ & SL2_CM_MODE) {
+    if (out->mode == hold_.mode) overlay_mask_ &= ~SL2_CM_MODE;
+    else out->mode = hold_.mode;
+  }
+  if (overlay_mask_ & SL2_CM_TEMP) {
+    if (out->set_dc == hold_.set_dc) overlay_mask_ &= ~SL2_CM_TEMP;
+    else out->set_dc = hold_.set_dc;
+  }
+  if (overlay_mask_ & SL2_CM_TEMP_BAND) {
+    bool confirmed = true;
+    if (hold_.set_low_dc != SL2_DC_NA && out->set_low_dc != hold_.set_low_dc) {
+      out->set_low_dc = hold_.set_low_dc;
+      confirmed = false;
+    }
+    if (hold_.set_high_dc != SL2_DC_NA && out->set_high_dc != hold_.set_high_dc) {
+      out->set_high_dc = hold_.set_high_dc;
+      confirmed = false;
+    }
+    if (confirmed) overlay_mask_ &= ~SL2_CM_TEMP_BAND;
+    /* keep the single-setpoint mirror consistent with the overlaid band */
+    if (two_point) out->set_dc = out->set_low_dc != SL2_DC_NA ? out->set_low_dc : 0;
+  }
+  if (overlay_mask_ & SL2_CM_FAN) {
+    if (out->fan == hold_.fan) overlay_mask_ &= ~SL2_CM_FAN;
+    else out->fan = hold_.fan;
+  }
+  if (overlay_mask_ & SL2_CM_VANEV) {
+    if (out->vane_v == hold_.vane_v) overlay_mask_ &= ~SL2_CM_VANEV;
+    else out->vane_v = hold_.vane_v;
+  }
+  if (overlay_mask_ & SL2_CM_VANEH) {
+    if (out->vane_h == hold_.vane_h) overlay_mask_ &= ~SL2_CM_VANEH;
+    else out->vane_h = hold_.vane_h;
+  }
+  if (overlay_mask_ & SL2_CM_PRESET) {
+    if (out->preset == hold_.preset) overlay_mask_ &= ~SL2_CM_PRESET;
+    else out->preset = hold_.preset;
+  }
+  if (overlay_mask_ & SL2_CM_HUM) {
+    if (out->hum_set_pct == hold_.hum_set_pct) overlay_mask_ &= ~SL2_CM_HUM;
+    else out->hum_set_pct = hold_.hum_set_pct;
+  }
 }
 
 bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
@@ -639,6 +770,7 @@ void SerinLinkComponent::dump_config() {
   copy_zone_name(name, sizeof name);
   ESP_LOGCONFIG(TAG, "  zone name: '%s'", name);
   ESP_LOGCONFIG(TAG, "  climate: %s", climate_ ? "bound" : "none (spike mode)");
+  ESP_LOGCONFIG(TAG, "  cmd debounce: %" PRIu32 " ms", cmd_debounce_ms_);
   if (vane_v_sel_ || vane_h_sel_)
     ESP_LOGCONFIG(TAG, "  vanes: V=%02X H=%02X (VANECAP npos|auto|swing)",
                   vane_v_sel_ ? vane_caps_byte(vane_v_sel_) : 0,
