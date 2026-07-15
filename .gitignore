@@ -1,0 +1,4 @@
+*.o
+/build/
+__pycache__/
+secrets.yaml

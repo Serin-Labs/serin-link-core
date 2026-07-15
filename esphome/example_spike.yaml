@@ -1,0 +1,67 @@
+# Serin Link coexistence spike.
+#
+# Purpose: prove that serin_link's raw ESP-NOW (encrypted peers + broadcast
+# pairing) coexists with ESPHome's Wi-Fi STA + native API on real hardware,
+# and that a real Serin dial can pair with it and lock on.
+#
+# Flash to any spare ESP32-S3 (adjust `board:`). Then on a Serin dial:
+# open pairing on the dial while pressing the "Pair Serin Dial" button here.
+#
+# NOTE: no `espnow:` block — serin_link owns the radio and the config
+# validator rejects the built-in component (it has no link-layer encryption).
+
+esphome:
+  name: serin-spike
+  friendly_name: Serin Link Spike
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers, libsodium
+
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components   # in-repo; or github://Serin-Labs/serin-link-core@v0.1.0
+    components: [serin_link]
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+
+serin_link:
+  id: serin
+  zone_name: "Spike Bench"
+
+button:
+  - platform: template
+    name: "Pair Serin Dial"
+    on_press:
+      - lambda: 'id(serin).pair_start(60000);'
+  - platform: template
+    name: "Cancel Pairing"
+    on_press:
+      - lambda: 'id(serin).pair_cancel();'
+  - platform: template
+    name: "Forget All Dials"
+    on_press:
+      - lambda: 'id(serin).forget_all_dials();'
+
+binary_sensor:
+  - platform: template
+    name: "Serin Dial Linked"
+    lambda: 'return id(serin).any_dial_live();'
+
+text_sensor:
+  - platform: template
+    name: "Pair Result"
+    update_interval: 2s
+    lambda: 'return std::string(id(serin).pair_result());'

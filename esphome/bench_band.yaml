@@ -1,0 +1,176 @@
+# BAND BENCH: a real two-point (HEAT_COOL) zone for exercising the Serin dial's
+# dual-setpoint band UI. Uses ESPHome's core `thermostat` platform — no heat
+# pump, no CN105, no echavet. Both heat AND cool actions plus a preset with low
+# AND high targets make ESPHome set supports_two_point_target_temperature, which
+# the serin_link adapter maps to SL2 HEAT_COOL (set_low_dc/set_high_dc STATE,
+# band_min_gap_dc CAPS) — the capability echavet's cn105 cannot express.
+#
+# Layout follows the serin-labs.com YAML generator output (substitutions,
+# wifi + fallback AP + captive portal, improv_serial, encrypted api, esphome
+# ota, web_server v3, uptime/wifi/version diagnostics), adapted for this
+# hardware-less bench zone. Deviations from the generator, on purpose:
+#   - no name_add_mac_suffix: this updates an existing device, which must keep
+#     the exact name it was adopted under (the generator's own guidance).
+#   - logger DEBUG (generator: INFO): pairing/link logs are the bench's point.
+#   - wifi power_save_mode NONE: ESP-NOW RX needs the radio awake.
+#
+# Flash onto any spare ESP32-S3 board (adjust `board:`). The dial then shows
+# the dual-hero "Auto" band face for this zone.
+substitutions:
+  name: serin-band
+  friendly_name: "Band Bench"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # ESP-NOW RX needs the radio awake (same reason as bench_dryrun).
+  power_save_mode: NONE
+  # Fallback hotspot (captive portal) in case wifi connection fails.
+  ap:
+    password: "serinlabs"
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+captive_portal:
+
+improv_serial:
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.11.0
+  on_boot:
+    priority: -100          # after wifi/api are up
+    then:
+      - lambda: 'id(serin).pair_start(120000);'   # pairing window on every boot
+      # Boot straight into the band mode so the dial shows the dual-hero face
+      # as soon as it pairs (no need to pick "Auto" on the ring first).
+      - climate.control:
+          id: hvac
+          mode: HEAT_COOL
+
+esp32:
+  board: m5stack-atoms3
+  framework:
+    type: esp-idf
+    version: recommended
+
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components
+    components: [serin_link]
+
+logger:
+  level: DEBUG
+
+ota:
+  - platform: esphome
+
+web_server:
+  version: 3
+
+# Local current-temperature source: a gentle wiggle so the dial shows a live
+# room temp with nothing wired. The thermostat needs a real sensor to run.
+sensor:
+  - platform: template
+    id: room_temp
+    name: "Room Temp"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: 2s
+    lambda: 'return 21.5f + 0.3f * sinf(millis() / 8000.0f);'
+  - platform: uptime
+    name: Uptime
+    unit_of_measurement: s
+    icon: mdi:timer-outline
+    accuracy_decimals: 0
+    device_class: duration
+    state_class: total_increasing
+    update_interval: 60s
+    internal: true
+  - platform: wifi_signal
+    name: Signal dB
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: IP
+    ssid:
+      name: SSID
+  - platform: version
+    name: ESPHome Version
+    hide_timestamp: true
+    icon: mdi:new-box
+    entity_category: diagnostic
+
+# No-op actuators for the thermostat's heat/cool actions (pin-free).
+switch:
+  - platform: template
+    id: heater
+    optimistic: true
+  - platform: template
+    id: cooler
+    optimistic: true
+
+climate:
+  - platform: thermostat
+    id: hvac
+    name: "Band Bench"
+    sensor: room_temp
+    # Two-point requires BOTH heat and cool actions + their min timings.
+    min_idle_time: 30s
+    min_heating_off_time: 30s
+    min_heating_run_time: 30s
+    min_cooling_off_time: 30s
+    min_cooling_run_time: 30s
+    heat_action:
+      - switch.turn_on: heater
+    cool_action:
+      - switch.turn_on: cooler
+    idle_action:
+      - switch.turn_off: heater
+      - switch.turn_off: cooler
+    # heat_cool_mode: true is what makes the entity ADVERTISE CLIMATE_MODE_HEAT_COOL
+    # as a supported mode. Without it, two-point targets exist but the mode isn't
+    # offered, so serin_link never sets CAPS bit 3 and the dial hides the band
+    # node. (heat_action + cool_action already give the low/high target pair.)
+    heat_cool_mode: true
+    visual:
+      min_temperature: 16 °C
+      max_temperature: 30 °C
+      temperature_step: 0.5 °C
+    # A preset carrying BOTH low and high targets flips the entity into
+    # two-point mode and seeds the band the dial first sees.
+    default_preset: Home
+    preset:
+      - name: Home
+        default_target_temperature_low: 20 °C
+        default_target_temperature_high: 24 °C
+
+serin_link:
+  id: serin
+  climate_id: hvac
+  zone_name: "Band Bench"
+  # No hvac_link lambda: the thermostat entity always has a room temp, so the
+  # link-health fallback reports connected (correct for a hardware-less bench).
+
+button:
+  - platform: template
+    name: "Pair Serin Dial"
+    on_press:
+      - lambda: 'id(serin).pair_start(60000);'
+  - platform: template
+    name: "Forget All Dials"
+    on_press:
+      - lambda: 'id(serin).forget_all_dials();'
+
+binary_sensor:
+  - platform: template
+    name: "Serin Dial Linked"
+    lambda: 'return id(serin).any_dial_live();'

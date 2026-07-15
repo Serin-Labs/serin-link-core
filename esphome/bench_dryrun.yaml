@@ -1,0 +1,105 @@
+# DRY RUN: echavet MitsubishiCN105ESPHome + serin_link on a spare ESP32-S3
+# with no heat pump wired — the cn105 entity exists and idles, which is all
+# the dial needs to pair, pull CAPS, and stream STATE.
+esphome:
+  name: serin-dryrun
+  friendly_name: Dry Run
+  on_boot:
+    priority: -100          # after wifi/api are up
+    then:
+      - lambda: 'id(serin).pair_start(120000);'   # window opens on every boot
+
+esp32:
+  board: m5stack-atoms3
+  framework:
+    type: esp-idf
+
+external_components:
+  - source: github://echavet/MitsubishiCN105ESPHome
+  - source:
+      type: local
+      path: ../esphome/components
+    components: [serin_link]
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # ESP-NOW RX needs the radio awake: modem sleep drops most unicast frames
+  # from non-AP peers (the encrypted PROBEs/CMDs from the dial).
+  power_save_mode: NONE
+
+logger:
+  level: VERY_VERBOSE
+  logs:
+    CN105: ERROR
+    climate: ERROR
+    sensor: ERROR
+    uart: ERROR
+    api: ERROR
+    scheduler: ERROR
+    component: ERROR
+
+api:
+
+web_server:
+  port: 80
+
+uart:
+  id: HP_UART
+  baud_rate: 2400
+  parity: EVEN
+  rx_pin: GPIO2       # AtomS3 Lite grove; use GPIO16/17 on a plain ESP32
+  tx_pin: GPIO1
+
+climate:
+  - platform: cn105
+    id: hvac
+    name: "Dry Run"
+    update_interval: 2s
+    # Typical-Mitsubishi surface, spelled out so the declared CAPS are visible
+    # here: 5 modes, fan auto + 5 detents, both vane axes. NOTE: echavet's cn105
+    # has NO dual-setpoint HEAT_COOL (two-point is hardcoded off, no control
+    # case; Mitsubishi AUTO is single-setpoint vendor-auto -> CLIMATE_MODE_AUTO).
+    # Do NOT add HEAT_COOL here — it advertises a mode the unit can't honor and
+    # makes the dial show a phantom band node. For real two-point band testing
+    # use bench_band.yaml. (echavet's own default list: AUTO,COOL,HEAT,DRY,FAN.)
+    supports:
+      mode: [AUTO, COOL, HEAT, DRY, FAN_ONLY]
+      fan_mode: [AUTO, QUIET, LOW, MIDDLE, MEDIUM, HIGH]
+      swing_mode: ["OFF", VERTICAL, HORIZONTAL, BOTH]
+      # classic 7-option horizontal set: 5 sweep stops + split (←→) + swing
+      # (drops the newer AIRFLOW CONTROL option so CAPS declares 6 positions
+      # + swing — the same shape the native Serin Controller announces)
+      horizontal_vane_mode: ["←←", "←", "|", "→", "→→", "←→", "SWING"]
+    vertical_vane_select:
+      name: "Vertical Vane"
+      id: vane_v
+    horizontal_vane_select:
+      name: "Horizontal Vane"
+      id: vane_h
+
+serin_link:
+  id: serin
+  climate_id: hvac
+  # Device-link health -> the dial's offline face + System "No link":
+  # without this a dead/absent CN105 reads as "Connected" at 0°. On a
+  # heat-pump-less bench the dial should show the zone as OFFLINE.
+  hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'
+  # vane axes ride echavet's select entities; option order = wire positions
+  vane_v_select: vane_v
+  vane_h_select: vane_h
+
+button:
+  - platform: template
+    name: "Pair Serin Dial"
+    on_press:
+      - lambda: 'id(serin).pair_start(60000);'
+  - platform: template
+    name: "Forget All Dials"
+    on_press:
+      - lambda: 'id(serin).forget_all_dials();'
+
+binary_sensor:
+  - platform: template
+    name: "Serin Dial Linked"
+    lambda: 'return id(serin).any_dial_live();'
