@@ -2,6 +2,8 @@
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
 #include "esphome/components/network/util.h"
+#include "esphome/components/wifi/wifi_component.h"
+#include "esphome/core/version.h"
 
 #include <cctype>
 #include <cinttypes>
@@ -13,6 +15,9 @@
 #include <nvs.h>
 #include <sodium.h>
 #include <esp_random.h>
+#include <esp_system.h>
+
+#include "sl2_info.h"
 
 namespace esphome {
 namespace serin_link {
@@ -262,7 +267,7 @@ static uint8_t vane_caps_byte(select::Select *s) {
 }
 
 static uint8_t vane_state_code(select::Select *s) {
-  const std::string cur = s->state;
+  const std::string cur = s->current_option().str();
   int pos = 0;
   for (const auto &o : s->traits.get_options()) {
     if (opt_is(o, "auto"))  { if (o == cur) return SL2_VANE_AUTO;  continue; }
@@ -300,6 +305,16 @@ bool SerinLinkComponent::hvac_get_state(sl2_hvac_state_t *out) {
   out->set_high_dc = SL2_DC_NA;
   out->room_hum_pct = SL2_HUM_NA;
   out->hum_set_pct = SL2_HUM_NA;
+
+  if (battery_sensor_ != nullptr && battery_sensor_->has_state() &&
+      !std::isnan(battery_sensor_->state)) {
+    float b = battery_sensor_->state;
+    if (b <= batt_low_threshold_) batt_low_latch_ = true;
+    else if (b >= batt_low_threshold_ + 5) batt_low_latch_ = false;
+  } else {
+    batt_low_latch_ = false;
+  }
+  out->sensor_batt_low = batt_low_latch_;
 
   if (climate_ == nullptr) {                 /* spike: canned device */
     out->hvac_link = true;
@@ -558,6 +573,18 @@ void SerinLinkComponent::apply_overlay_(sl2_hvac_state_t *out, bool two_point) {
 }
 
 bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
+  /* Telemetry capability bits: WIFI_INFO/FW_INFO are always served (SYS has
+   * no bit — it's an always-on TLV); the rest follow the YAML bindings.
+   * Feature bit = capability; TLV presence = current validity (spec §9). */
+  out->features = SL2_FEAT_WIFI_INFO | SL2_FEAT_FW_INFO;
+  if (outside_temp_sensor_ != nullptr) out->features |= SL2_FEAT_OUTSIDE_T;
+  if (compressor_hz_sensor_ != nullptr || stage_sensor_ != nullptr ||
+      sub_mode_sensor_ != nullptr || auto_sub_mode_sensor_ != nullptr)
+    out->features |= SL2_FEAT_COMPRESSOR;
+  if (battery_sensor_ != nullptr) out->features |= SL2_FEAT_SENSOR_BATT;
+  if (runtime_sensor_ != nullptr) out->features |= SL2_FEAT_RUNTIME;
+  if (power_sensor_ != nullptr || energy_sensor_ != nullptr)
+    out->features |= SL2_FEAT_ENERGY;
   if (climate_ == nullptr) {                 /* spike: canned CAPS */
     out->modes = (1u << SL2_MODE_OFF) | (1u << SL2_MODE_HEAT) |
                  (1u << SL2_MODE_COOL) | (1u << SL2_MODE_DRY) |
@@ -611,7 +638,78 @@ bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
   return true;
 }
 
-static size_t h_tlvs(void *, uint8_t *, size_t) { return 0; }
+/* NaN/negative -> 0; ceiling-clamped round for sensor floats. */
+static uint8_t f_to_u8(float f, uint8_t max) {
+  if (std::isnan(f) || f <= 0.0f) return 0;
+  if (f >= max) return max;
+  return static_cast<uint8_t>(std::lround(f));
+}
+
+static uint32_t f_to_u32(float f, uint32_t max) {
+  if (std::isnan(f) || f <= 0.0f) return 0;
+  if (f >= static_cast<float>(max)) return max;
+  return static_cast<uint32_t>(std::llround(static_cast<double>(f)));
+}
+
+size_t SerinLinkComponent::fill_info_tlvs(uint8_t *buf, size_t cap) {
+  size_t off = 0;
+  /* Same TLV order as the reference adopter (mitsubishi-cn105-homekit);
+   * HOMEKIT (0x02) has no ESPHome analogue and is never emitted. */
+  if (network::is_connected() && wifi::global_wifi_component != nullptr) {
+    char ip_buf[network::IP_ADDRESS_BUFFER_SIZE] = {};
+    for (const auto &addr : wifi::global_wifi_component->wifi_sta_ip_addresses())
+      if (addr.is_set()) { addr.str_to(ip_buf); break; }
+    char ssid_buf[wifi::SSID_BUFFER_SIZE];
+    sl2_info_put_wifi(buf, cap, &off,
+                      static_cast<int8_t>(wifi::global_wifi_component->wifi_rssi()),
+                      p_channel(nullptr),
+                      wifi::global_wifi_component->wifi_ssid_to(ssid_buf),
+                      ip_buf);
+  }
+  if (outside_temp_sensor_ != nullptr && outside_temp_sensor_->has_state() &&
+      !std::isnan(outside_temp_sensor_->state))
+    sl2_info_put_outside_t(buf, cap, &off,
+                           sl2_c_to_dc(outside_temp_sensor_->state));
+  if (compressor_hz_sensor_ != nullptr || stage_sensor_ != nullptr ||
+      sub_mode_sensor_ != nullptr || auto_sub_mode_sensor_ != nullptr) {
+    uint8_t hz = 0;
+    if (compressor_hz_sensor_ != nullptr && compressor_hz_sensor_->has_state())
+      hz = f_to_u8(compressor_hz_sensor_->state, 255);
+    uint8_t stage = 0, sub = 0, autosub = 0;
+    if (stage_sensor_ != nullptr && stage_sensor_->has_state())
+      stage = sl2_info_stage_code(stage_sensor_->state.c_str());
+    if (sub_mode_sensor_ != nullptr && sub_mode_sensor_->has_state())
+      sub = sl2_info_sub_mode_code(sub_mode_sensor_->state.c_str());
+    if (auto_sub_mode_sensor_ != nullptr && auto_sub_mode_sensor_->has_state())
+      autosub = sl2_info_auto_sub_code(auto_sub_mode_sensor_->state.c_str());
+    sl2_info_put_compressor(buf, cap, &off, hz, stage, sub, autosub);
+  }
+  if (battery_sensor_ != nullptr && battery_sensor_->has_state() &&
+      !std::isnan(battery_sensor_->state))
+    sl2_info_put_batt(buf, cap, &off, f_to_u8(battery_sensor_->state, 100));
+  char build_buf[Application::BUILD_TIME_STR_SIZE];
+  App.get_build_time_string(build_buf);
+  sl2_info_put_fw(buf, cap, &off, ESPHOME_VERSION, build_buf);
+  if (runtime_sensor_ != nullptr && runtime_sensor_->has_state() &&
+      !std::isnan(runtime_sensor_->state))
+    sl2_info_put_runtime(buf, cap, &off,
+                         f_to_u32(runtime_sensor_->state, UINT32_MAX - 1));
+  sl2_info_put_sys(buf, cap, &off,
+                   static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL),
+                   static_cast<uint8_t>(esp_reset_reason()));
+  if (power_sensor_ != nullptr || energy_sensor_ != nullptr) {
+    uint16_t w = SL2_INFO_W_NA;
+    if (power_sensor_ != nullptr && power_sensor_->has_state() &&
+        !std::isnan(power_sensor_->state))
+      w = static_cast<uint16_t>(f_to_u32(power_sensor_->state, 0xFFFE));
+    uint32_t wh = SL2_INFO_WH_NA;
+    if (energy_sensor_ != nullptr && energy_sensor_->has_state() &&
+        !std::isnan(energy_sensor_->state))
+      wh = f_to_u32(energy_sensor_->state * 1000.0f, 0xFFFFFFFE);  /* kWh -> Wh */
+    sl2_info_put_energy(buf, cap, &off, w, wh);
+  }
+  return off;
+}
 
 /* trampolines: sl2 C hooks -> the component */
 static bool t_get_state(void *ctx, sl2_hvac_state_t *out) {
@@ -622,6 +720,9 @@ static bool t_apply(void *ctx, uint16_t mask, const struct sl2_cmd_pkt *cmd) {
 }
 static bool t_get_caps(void *ctx, struct sl2_caps_pkt *out) {
   return static_cast<SerinLinkComponent *>(ctx)->hvac_get_caps(out);
+}
+static size_t t_tlvs(void *ctx, uint8_t *buf, size_t cap) {
+  return static_cast<SerinLinkComponent *>(ctx)->fill_info_tlvs(buf, cap);
 }
 
 /* ── component ────────────────────────────────────────────────────────── */
@@ -696,7 +797,7 @@ void SerinLinkComponent::setup() {
   hvac_.get_state = t_get_state;
   hvac_.apply = t_apply;
   hvac_.get_caps = t_get_caps;
-  hvac_.fill_info_tlvs = h_tlvs;
+  hvac_.fill_info_tlvs = t_tlvs;
   hvac_.wifi_creds = nullptr;  /* Link-OTA creds relay: future work */
 
   sl2_link_init(&link_, &port_, &crypto_, &hvac_);
@@ -775,6 +876,13 @@ void SerinLinkComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  vanes: V=%02X H=%02X (VANECAP npos|auto|swing)",
                   vane_v_sel_ ? vane_caps_byte(vane_v_sel_) : 0,
                   vane_h_sel_ ? vane_caps_byte(vane_h_sel_) : 0);
+  ESP_LOGCONFIG(TAG, "  telemetry: wifi fw sys%s%s%s%s%s",
+                outside_temp_sensor_ ? " outside_t" : "",
+                (compressor_hz_sensor_ || stage_sensor_ || sub_mode_sensor_ ||
+                 auto_sub_mode_sensor_) ? " compressor" : "",
+                battery_sensor_ ? " sensor_batt" : "",
+                runtime_sensor_ ? " runtime" : "",
+                (power_sensor_ || energy_sensor_) ? " energy" : "");
   ESP_LOGCONFIG(TAG, "  bonded dials: %d", sl2_link_dial_count(&link_));
   ESP_LOGCONFIG(TAG, "  rxq dropped: %u", static_cast<unsigned>(rxq_.dropped));
 }

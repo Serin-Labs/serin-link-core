@@ -13,7 +13,7 @@ implements ESP-NOW link-layer encryption nor shares the recv callback.
 import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
-from esphome.components import climate, select
+from esphome.components import climate, select, sensor, text_sensor
 from esphome.components.esp32 import add_idf_component
 from esphome.const import CONF_ID
 
@@ -21,8 +21,9 @@ CODEOWNERS = ["@Serin-Labs"]
 DEPENDENCIES = ["wifi", "esp32"]
 # climate core is always compiled in (the adapter references its types even
 # when no entity is bound — spike mode); an actual entity is still optional.
-# select is auto-loaded so the optional vane bindings always compile
-AUTO_LOAD = ["climate", "select"]
+# select/sensor/text_sensor are auto-loaded so the optional bindings always
+# compile.
+AUTO_LOAD = ["climate", "select", "sensor", "text_sensor"]
 
 serin_link_ns = cg.esphome_ns.namespace("serin_link")
 SerinLinkComponent = serin_link_ns.class_("SerinLinkComponent", cg.Component)
@@ -33,6 +34,16 @@ CONF_HVAC_LINK = "hvac_link"
 CONF_VANE_V_SELECT = "vane_v_select"
 CONF_VANE_H_SELECT = "vane_h_select"
 CONF_CMD_DEBOUNCE = "cmd_debounce"
+CONF_OUTSIDE_TEMP_SENSOR = "outside_temp_sensor"
+CONF_COMPRESSOR_HZ_SENSOR = "compressor_hz_sensor"
+CONF_STAGE_SENSOR = "stage_sensor"
+CONF_SUB_MODE_SENSOR = "sub_mode_sensor"
+CONF_AUTO_SUB_MODE_SENSOR = "auto_sub_mode_sensor"
+CONF_BATTERY_SENSOR = "battery_sensor"
+CONF_BATTERY_LOW_THRESHOLD = "battery_low_threshold"
+CONF_RUNTIME_SENSOR = "runtime_sensor"
+CONF_POWER_SENSOR = "power_sensor"
+CONF_ENERGY_SENSOR = "energy_sensor"
 
 # esp-idf framework required (raw nvs_*, esp_now encrypted peers, libsodium);
 # it is ESPHome's ESP32 default. (cv.only_with_esp_idf was removed in 2026.x.)
@@ -60,6 +71,29 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(
             CONF_CMD_DEBOUNCE, default="300ms"
         ): cv.positive_time_period_milliseconds,
+        # Telemetry bindings -> INFO TLVs + CAPS feature bits (dial telemetry
+        # pages). All optional; unbound = TLV omitted, feature bit unset, the
+        # dial hides the row. Any platform's entities work — for echavet's
+        # cn105 give its sensor blocks ids and bind them here.
+        cv.Optional(CONF_OUTSIDE_TEMP_SENSOR): cv.use_id(sensor.Sensor),
+        cv.Optional(CONF_COMPRESSOR_HZ_SENSOR): cv.use_id(sensor.Sensor),
+        # stage/sub-mode are text on cn105; strings map to wire codes via the
+        # Mitsubishi value tables in sl2_info.h (wire spec §9, COMPRESSOR TLV)
+        cv.Optional(CONF_STAGE_SENSOR): cv.use_id(text_sensor.TextSensor),
+        cv.Optional(CONF_SUB_MODE_SENSOR): cv.use_id(text_sensor.TextSensor),
+        cv.Optional(CONF_AUTO_SUB_MODE_SENSOR): cv.use_id(text_sensor.TextSensor),
+        # battery_sensor: percent (0-100) from ANY sensor (BLE, HA import, …);
+        # also drives the STATE low-battery flag with +5% clear hysteresis,
+        # hence the 95% ceiling on the threshold.
+        cv.Optional(CONF_BATTERY_SENSOR): cv.use_id(sensor.Sensor),
+        cv.Optional(CONF_BATTERY_LOW_THRESHOLD, default="10%"): cv.All(
+            cv.percentage, cv.Range(min=0.0, max=0.95)
+        ),
+        cv.Optional(CONF_RUNTIME_SENSOR): cv.use_id(sensor.Sensor),
+        # ENERGY TLV: power_sensor in W, energy_sensor in kWh (sent as Wh);
+        # either alone is fine — the other half rides as n/a.
+        cv.Optional(CONF_POWER_SENSOR): cv.use_id(sensor.Sensor),
+        cv.Optional(CONF_ENERGY_SENSOR): cv.use_id(sensor.Sensor),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -96,6 +130,25 @@ async def to_code(config):
     if CONF_VANE_H_SELECT in config:
         sel = await cg.get_variable(config[CONF_VANE_H_SELECT])
         cg.add(var.set_vane_h_select(sel))
+    for key, setter in (
+        (CONF_OUTSIDE_TEMP_SENSOR, var.set_outside_temp_sensor),
+        (CONF_COMPRESSOR_HZ_SENSOR, var.set_compressor_hz_sensor),
+        (CONF_STAGE_SENSOR, var.set_stage_sensor),
+        (CONF_SUB_MODE_SENSOR, var.set_sub_mode_sensor),
+        (CONF_AUTO_SUB_MODE_SENSOR, var.set_auto_sub_mode_sensor),
+        (CONF_BATTERY_SENSOR, var.set_battery_sensor),
+        (CONF_RUNTIME_SENSOR, var.set_runtime_sensor),
+        (CONF_POWER_SENSOR, var.set_power_sensor),
+        (CONF_ENERGY_SENSOR, var.set_energy_sensor),
+    ):
+        if key in config:
+            ent = await cg.get_variable(config[key])
+            cg.add(setter(ent))
+    cg.add(
+        var.set_battery_low_threshold(
+            int(round(config[CONF_BATTERY_LOW_THRESHOLD] * 100))
+        )
+    )
     cg.add(var.set_cmd_debounce(config[CONF_CMD_DEBOUNCE].total_milliseconds))
     # Ed25519 + X25519 + HMAC-SHA256 all come from libsodium (mbedTLS has no
     # EdDSA). Caret range, not an exact pin: arduino-on-IDF builds carry

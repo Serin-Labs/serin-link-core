@@ -3,6 +3,8 @@
 #include "esphome/core/preferences.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/select/select.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include <functional>
 #include <string>
 #include <vector>
@@ -49,6 +51,20 @@ class SerinLinkComponent : public Component {
   void set_vane_v_select(select::Select *s) { vane_v_sel_ = s; }
   void set_vane_h_select(select::Select *s) { vane_h_sel_ = s; }
 
+  /* Telemetry bindings — each populates an INFO TLV and declares the
+   * matching SL2_FEAT_* capability bit (spec §8/§9). All optional; an
+   * unbound source simply omits its TLV and the dial hides the row. */
+  void set_outside_temp_sensor(sensor::Sensor *s) { outside_temp_sensor_ = s; }
+  void set_compressor_hz_sensor(sensor::Sensor *s) { compressor_hz_sensor_ = s; }
+  void set_stage_sensor(text_sensor::TextSensor *s) { stage_sensor_ = s; }
+  void set_sub_mode_sensor(text_sensor::TextSensor *s) { sub_mode_sensor_ = s; }
+  void set_auto_sub_mode_sensor(text_sensor::TextSensor *s) { auto_sub_mode_sensor_ = s; }
+  void set_battery_sensor(sensor::Sensor *s) { battery_sensor_ = s; }
+  void set_battery_low_threshold(uint8_t pct) { batt_low_threshold_ = pct; }
+  void set_runtime_sensor(sensor::Sensor *s) { runtime_sensor_ = s; }
+  void set_power_sensor(sensor::Sensor *s) { power_sensor_ = s; }
+  void set_energy_sensor(sensor::Sensor *s) { energy_sensor_ = s; }
+
   /* For template buttons / lambdas in YAML. */
   void pair_start(uint32_t window_ms = 60000) { sl2_link_pair_start(&link_, window_ms); }
   void pair_cancel() { sl2_link_pair_cancel(&link_); }
@@ -62,6 +78,7 @@ class SerinLinkComponent : public Component {
   bool hvac_get_state(sl2_hvac_state_t *out);
   bool hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd);
   bool hvac_get_caps(struct sl2_caps_pkt *out);
+  size_t fill_info_tlvs(uint8_t *buf, size_t cap);
   void copy_zone_name(char *dst, size_t cap) const;
 
   /* Internals shared with the static ESP-NOW callbacks. */
@@ -91,6 +108,19 @@ class SerinLinkComponent : public Component {
   std::function<bool()> hvac_link_fn_{nullptr};
   select::Select *vane_v_sel_{nullptr};
   select::Select *vane_h_sel_{nullptr};
+  sensor::Sensor *outside_temp_sensor_{nullptr};
+  sensor::Sensor *compressor_hz_sensor_{nullptr};
+  text_sensor::TextSensor *stage_sensor_{nullptr};
+  text_sensor::TextSensor *sub_mode_sensor_{nullptr};
+  text_sensor::TextSensor *auto_sub_mode_sensor_{nullptr};
+  sensor::Sensor *battery_sensor_{nullptr};
+  sensor::Sensor *runtime_sensor_{nullptr};
+  sensor::Sensor *power_sensor_{nullptr};
+  sensor::Sensor *energy_sensor_{nullptr};
+  uint8_t batt_low_threshold_{10};
+  /* low-battery hysteresis latch: on at <= threshold, off at >= threshold+5
+   * (a cell hovering at the line must not flap the dial's home-face chip) */
+  bool batt_low_latch_{false};
   ESPPreferenceObject caps_fp_pref_;   /* fingerprint: announce caps changes */
   std::vector<climate::ClimateFanMode> fan_detents_;
   bool fan_has_auto_{false};

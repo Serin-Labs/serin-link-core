@@ -23,7 +23,12 @@ esp32:
 
 external_components:
   - source: github://echavet/MitsubishiCN105ESPHome
-  - source: github://Serin-Labs/serin-link-core@v0.1.1   # or: {type: local, path: ../esphome/components}
+  - source:
+      type: local
+      path: ../esphome/components
+      # no published tag has the telemetry keys below yet (v0.1.2 predates
+      # them); TODO(release): once one ships, point this at
+      # github://Serin-Labs/serin-link-core@vX.Y.Z instead.
     components: [serin_link]
 
 wifi:
@@ -59,6 +64,39 @@ climate:
     horizontal_vane_select:
       name: "Horizontal Vane"
       id: vane_h
+    # Telemetry the dial can show (INFO TLVs) — give the platform's sensor
+    # blocks ids and bind them in serin_link: below.
+    outside_air_temperature_sensor:
+      name: "Outside Air Temp"
+      id: oat
+    compressor_frequency_sensor:
+      name: "Compressor Frequency"
+      id: comp_hz
+      entity_category: diagnostic
+    stage_sensor:
+      name: "Stage"
+      id: stage
+      entity_category: diagnostic
+    sub_mode_sensor:
+      name: "Sub Mode"
+      id: sub_mode
+      entity_category: diagnostic
+    auto_sub_mode_sensor:
+      name: "Auto Sub Mode"
+      id: auto_sub
+      entity_category: diagnostic
+    input_power_sensor:
+      name: "Input Power"
+      id: input_w
+      entity_category: diagnostic
+    kwh_sensor:
+      name: "Energy Used"
+      id: kwh_total
+      entity_category: diagnostic
+    runtime_hours_sensor:
+      name: "Runtime Hours"
+      id: runtime_h
+      entity_category: diagnostic
 
 serin_link:
   id: serin          # NB: `id: link` collides with libc link() in generated code
@@ -73,6 +111,18 @@ serin_link:
   hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'
   vane_v_select: vane_v
   vane_h_select: vane_h
+  # Telemetry -> the dial's INFO pages (outside temp, compressor, energy,
+  # runtime). Bind any sensors you like — these are the cn105 ones above.
+  # A battery_sensor (any % sensor, e.g. a BLE room sensor imported from HA)
+  # additionally drives the dial's low-battery chip.
+  outside_temp_sensor: oat
+  compressor_hz_sensor: comp_hz
+  stage_sensor: stage
+  sub_mode_sensor: sub_mode
+  auto_sub_mode_sensor: auto_sub
+  runtime_sensor: runtime_h
+  power_sensor: input_w
+  energy_sensor: kwh_total
 
 button:
   - platform: template
@@ -90,5 +140,4 @@ binary_sensor:
     lambda: 'return id(serin).any_dial_live();'
 
 # Known gaps against a native Serin Controller:
-#  - compressor Hz / stage / defrost / error code: not yet read into INFO TLVs.
 #  - Link OTA credential relay: not wired (dial hides its update entry).

@@ -20,7 +20,9 @@ The repo ships two things:
 The wire protocol is specified in
 [`docs/serin-link-wire-spec.md`](docs/serin-link-wire-spec.md) (current wire
 version: 2, `SL2_PROTO_VERSION`) and hardware-verified against ESPHome (CN105
-and generic climate platforms) and the native Serin Controller firmware.
+and generic climate platforms) and
+[mitsubishi-cn105-homekit](https://github.com/akifbayram/mitsubishi-cn105-homekit),
+an independent open-source CN105/HomeKit firmware.
 
 ## ESPHome quickstart
 
@@ -153,6 +155,13 @@ Notes:
   sources in a component dir). Never edit those copies directly: edit the
   canonical files (`include/serin_link/`, `src/`), re-run
   `tools/sync_esphome.sh`, and commit both — CI fails on drift.
+- Telemetry for the dial's info pages binds through optional sensor keys
+  (`outside_temp_sensor`, `compressor_hz_sensor`, `stage_sensor`,
+  `sub_mode_sensor`, `auto_sub_mode_sensor`, `battery_sensor` (+
+  `battery_low_threshold`, default 10%), `runtime_sensor`, `power_sensor`,
+  `energy_sensor`) — each group sets its CAPS feature bit and INFO TLV; Wi-Fi,
+  firmware, and system info are always served. Any platform's entities
+  work; `example_cn105.yaml` shows the cn105 set.
 - The Link-OTA credential relay (`SL2_FEAT_LINK_OTA_CREDS`) is not wired yet —
   the dial hides its firmware-update path against this controller.
 - Compile-verified against ESPHome 2026.6.5 / IDF 5.5.
@@ -171,8 +180,9 @@ sl2_link_loop(&link);
 `sl2_port_t` is the platform (send/peers/clock/key-value store),
 `sl2_hvac_iface_t` is your device (semantic state/apply/caps). The core owns
 everything else: pairing, crypto policy, bond storage, scheduling, fan-out.
-See the spec's §12 and the ESPHome component as a worked example. The native
-Serin Controller firmware is the reference non-ESPHome adopter.
+See the spec's §12 and the ESPHome component as a worked example.
+[mitsubishi-cn105-homekit](https://github.com/akifbayram/mitsubishi-cn105-homekit)
+is the reference non-ESPHome adopter.
 
 ## Tests
 
