@@ -370,8 +370,9 @@ enum {
 ```
 
 Apply-masked-fields-only; echo STATE to **all** bonded dials immediately after
-applying. The dial debounces edits (250 ms) and holds its local value against
-the echo for 3 s. Controllers whose HVAC backend applies asynchronously or
+applying. The dial debounces edits (1 s settle from the last detent, so a
+whole knob turn — fast or detent-by-detent — lands as ONE CMD and one apply)
+and holds its local value against the echo for 3 s. Controllers whose HVAC backend applies asynchronously or
 expensively MAY coalesce a CMD burst and defer the actual apply, provided the
 echoed STATE already reflects the accepted values (optimistic overlay until
 the backend confirms them or a safety timeout expires — a stale echo snaps
@@ -690,5 +691,5 @@ the SPSC ring in `sl2_rxq.h` if they don't. Note there is deliberately no HKDF
 crypto hook (see the key-derivation note in §3).
 
 Reference adapters: the ESPHome `serin_link` component in this repo (binds any
-`climate` entity — `ClimateTraits` → `sl2_caps_pkt` is nearly 1:1), and the
-Serin Controller firmware (native CN105/HomeKit).
+`climate` entity — `ClimateTraits` → `sl2_caps_pkt` is nearly 1:1), and
+mitsubishi-cn105-homekit (a non-ESPHome CN105/HomeKit adopter).
