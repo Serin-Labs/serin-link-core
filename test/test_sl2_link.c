@@ -1059,6 +1059,150 @@ static void test_dial_info(void) {
     printf("dial info ok\n");
 }
 
+/* ── DIAL_INFO cert TLV tail (proto §10c) ─────────────────────────────── */
+
+/* Forge a toy-crypto root signature: t_verify derives seed = pub ^ 0x55. */
+static void root_sign(const uint8_t root_pub[32], const uint8_t *m, size_t ml,
+                      uint8_t sig[64]) {
+    uint8_t seed[32];
+    for (int i = 0; i < 32; i++) seed[i] = root_pub[i] ^ 0x55;
+    t_sig_of(seed, m, ml, sig);
+}
+
+static sl2_dial_cert_t mk_cert(const uint8_t root_pub[32],
+                               const uint8_t dev_pub[32], uint32_t serial) {
+    sl2_dial_cert_t c;
+    memset(&c, 0, sizeof c);
+    c.fmt = SL2_DIAL_CERT_FMT;
+    c.root_key_id = 1;
+    c.model = 1; c.hw_rev = 1;
+    c.serial = serial;
+    c.issue_date = 201;
+    memcpy(c.device_pub, dev_pub, 32);
+    root_sign(root_pub, (const uint8_t *)&c, SL2_DIAL_CERT_SIGNED_LEN, c.sig);
+    return c;
+}
+
+static void send_dial_info_cert(sl2_link_t *l, const fdial_t *d,
+                                const sl2_dial_cert_t *c) {
+    uint8_t buf[sizeof(struct sl2_dial_info_pkt) + 2 + SL2_DIAL_CERT_LEN];
+    struct sl2_dial_info_pkt di;
+    memset(&di, 0, sizeof di);
+    di.type = SL2_PKT_DIAL_INFO;
+    di.version = SL2_PROTO_VERSION;
+    memcpy(buf, &di, sizeof di);
+    size_t off = sizeof di;
+    assert(sl2_tlv_put(buf, sizeof buf, &off, SL2_TLV_DIAL_CERT,
+                       c, SL2_DIAL_CERT_LEN));
+    sl2_link_on_recv(l, d->mac, F.own, buf, (int)off);
+}
+
+static void test_dial_cert(void) {
+    uint8_t root[32];
+    for (int i = 0; i < 32; i++) root[i] = (uint8_t)(0xA0 + i);
+
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xC1);
+    pair_dial(&l, &d);
+
+    sl2_dial_view_t v;
+    uint8_t raw[SL2_DIAL_CERT_LEN];
+
+    /* no cert TLV yet (incl. a bare fixed-struct DIAL_INFO) */
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(v.cert_state == SL2_CERT_NONE);
+    assert(!sl2_link_dial_cert(&l, 0, raw));
+
+    /* cert arrives, no root configured -> PRESENT, raw bytes readable */
+    sl2_dial_cert_t c = mk_cert(root, d.id_pub, 42);
+    send_dial_info_cert(&l, &d, &c);
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(v.cert_state == SL2_CERT_PRESENT);
+    assert(sl2_link_dial_cert(&l, 0, raw));
+    assert(memcmp(raw, &c, SL2_DIAL_CERT_LEN) == 0);
+
+    /* root configured, resent -> OK (signature + pinned-identity binding) */
+    sl2_link_set_root_pub(&l, root);
+    send_dial_info_cert(&l, &d, &c);
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(v.cert_state == SL2_CERT_OK);
+
+    /* field tamper without re-sign -> INVALID */
+    sl2_dial_cert_t t = c;
+    t.serial = 43;
+    send_dial_info_cert(&l, &d, &t);
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(v.cert_state == SL2_CERT_INVALID);
+
+    /* validly-signed cert for a DIFFERENT dial identity -> INVALID (pin) */
+    fdial_t other;
+    dial_make(&other, 0xC2);
+    sl2_dial_cert_t oc = mk_cert(root, other.id_pub, 44);
+    send_dial_info_cert(&l, &d, &oc);
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(v.cert_state == SL2_CERT_INVALID);
+
+    /* recovery: the genuine cert again -> OK */
+    send_dial_info_cert(&l, &d, &c);
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(v.cert_state == SL2_CERT_OK);
+
+    /* truncated TLV tail (header promises more than present): ignored,
+     * state unchanged */
+    {
+        uint8_t buf[sizeof(struct sl2_dial_info_pkt) + 2];
+        struct sl2_dial_info_pkt di;
+        memset(&di, 0, sizeof di);
+        di.type = SL2_PKT_DIAL_INFO;
+        di.version = SL2_PROTO_VERSION;
+        memcpy(buf, &di, sizeof di);
+        buf[sizeof di]     = SL2_TLV_DIAL_CERT;
+        buf[sizeof di + 1] = SL2_DIAL_CERT_LEN;   /* ...but no payload */
+        sl2_link_on_recv(&l, d.mac, F.own, buf, (int)sizeof buf);
+        assert(sl2_link_dial_view(&l, 0, &v));
+        assert(v.cert_state == SL2_CERT_OK);
+    }
+
+    /* wrong-length cert TLV -> INVALID (strict decode) */
+    {
+        uint8_t buf[sizeof(struct sl2_dial_info_pkt) + 2 + 64];
+        struct sl2_dial_info_pkt di;
+        memset(&di, 0, sizeof di);
+        di.type = SL2_PKT_DIAL_INFO;
+        di.version = SL2_PROTO_VERSION;
+        memcpy(buf, &di, sizeof di);
+        size_t off = sizeof di;
+        assert(sl2_tlv_put(buf, sizeof buf, &off, SL2_TLV_DIAL_CERT, &c, 64));
+        sl2_link_on_recv(&l, d.mac, F.own, buf, (int)off);
+        assert(sl2_link_dial_view(&l, 0, &v));
+        assert(v.cert_state == SL2_CERT_INVALID);
+    }
+
+    /* unknown TLV type in the tail is skipped; cert after it still applies */
+    {
+        uint8_t buf[sizeof(struct sl2_dial_info_pkt) + 2 + 3 + 2 + SL2_DIAL_CERT_LEN];
+        struct sl2_dial_info_pkt di;
+        memset(&di, 0, sizeof di);
+        di.type = SL2_PKT_DIAL_INFO;
+        di.version = SL2_PROTO_VERSION;
+        memcpy(buf, &di, sizeof di);
+        size_t off = sizeof di;
+        static const uint8_t junk[3] = { 1, 2, 3 };
+        assert(sl2_tlv_put(buf, sizeof buf, &off, 0x7E, junk, 3));
+        assert(sl2_tlv_put(buf, sizeof buf, &off, SL2_TLV_DIAL_CERT,
+                           &c, SL2_DIAL_CERT_LEN));
+        sl2_link_on_recv(&l, d.mac, F.own, buf, (int)off);
+        assert(sl2_link_dial_view(&l, 0, &v));
+        assert(v.cert_state == SL2_CERT_OK);
+    }
+
+    /* forget clears the slot */
+    assert(sl2_link_forget_dial(&l, d.mac));
+    printf("dial cert ok\n");
+}
+
 int main(void) {
     sl2_link_t probe_size_check;
     (void)probe_size_check;
@@ -1084,6 +1228,7 @@ int main(void) {
     test_epoch_rand_fail_fails_open();
     test_wifi_err_flag();
     test_dial_info();
+    test_dial_cert();
     test_forget();
     test_unbonded_and_broadcast_ignored();
     printf("test_sl2_link: ALL OK\n");

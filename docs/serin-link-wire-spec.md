@@ -608,6 +608,31 @@ caps_seq change, and ~every 60 s. `caps_seq` is the generation the dial has
 hint. Controllers expose the latest values via `sl2_link_dial_view()`;
 receiving any DIAL_INFO also refreshes the dial's liveness window.
 
+### TLV tail (optional, wire v2)
+
+Bytes past the fixed struct are an optional TLV stream with the INFO framing
+(`u8 t; u8 l; u8 v[l]`). The tolerant decode both sides already use copies
+`min(len, sizeof)`, so floor-era receivers drop the tail unread — appending
+TLVs is backward-compatible by construction. Defined today:
+
+| t | name | payload |
+|---|------|---------|
+| 0x0A | `SL2_TLV_DIAL_CERT` | raw 112 B Serin device certificate |
+
+`SL2_TLV_DIAL_CERT` carries the dial's factory-provisioned identity
+certificate — the Serin root's Ed25519 signature over the dial's identity
+pubkey + metadata (layout in `sl2_dial_cert.h`; 43 + 2 + 112 = 157 B total,
+statically asserted under the 250 B ESP-NOW ceiling). Unprovisioned dials
+send the bare fixed struct. Verification is optional and needs no secrets:
+a controller given the public Serin root checks (1) the signature over the
+first 48 bytes and (2) that `device_pub` equals the bond's TOFU-pinned
+identity from pairing — so a valid cert replayed from a different dial still
+fails. The core tracks per-dial `SL2_CERT_NONE / PRESENT / INVALID / OK`
+(`sl2_link_set_root_pub()`, `sl2_dial_view_t.cert_state`,
+`sl2_link_dial_cert()`); with no root configured (the default) certs are
+stored but unverified. Nothing gates on this state — it is informational
+for controller UIs and Serin-side tooling.
+
 ## 11. Future-proofing inventory (what's deliberately left room for)
 
 - **New modes/presets/actions:** u16 masks + reserved enum space; additive.
