@@ -216,6 +216,75 @@ static void test_bonds(void) {
     printf("bonds ok\n");
 }
 
+/* ── DIAL_SENSOR (wire v2 addition) ─────────────────────────────────────── */
+
+static void test_dial_sensor_sizeof(void) {
+    /* The sizeof guard in the header is compile-time; this pins the field
+     * offsets a hand-written encoder on another platform must match. */
+    assert(sizeof(struct sl2_dial_sensor_pkt) == 9);
+    struct sl2_dial_sensor_pkt p;
+    assert((char *)&p.type     - (char *)&p == 0);
+    assert((char *)&p.version  - (char *)&p == 1);
+    assert((char *)&p.flags    - (char *)&p == 2);
+    assert((char *)&p.temp_dc  - (char *)&p == 3);
+    assert((char *)&p.hum_pct  - (char *)&p == 5);
+    assert((char *)&p.want_src - (char *)&p == 6);
+}
+
+static void test_dial_sensor_short_frame_is_reading_only(void) {
+    /* A sender that stops after hum_pct (SL2_DIAL_SENSOR_MIN_LEN) must decode
+     * as "no edit", not as an edit to source 0 (Internal). Zero-fill would
+     * mean "switch to Internal" — so NOEDIT cannot be 0. */
+    uint8_t wire[SL2_DIAL_SENSOR_MIN_LEN] = {
+        SL2_PKT_DIAL_SENSOR, SL2_PROTO_VERSION, SL2_DSF_HAS_SENSOR,
+        0xE2, 0x00,   /* temp_dc = 226 deci-C, little-endian */
+        45            /* hum_pct */
+    };
+    struct sl2_dial_sensor_pkt p;
+    sl2_decode_pkt(&p, sizeof p, wire, (int)sizeof wire);
+    assert(p.temp_dc == 226);
+    assert(p.hum_pct == 45);
+    assert(p.want_src == 0);   /* zero-filled by the tolerant decode */
+    /* Receivers MUST therefore treat a short frame as reading-only by length,
+     * not by value. Pin that the min length excludes want_src. */
+    assert(SL2_DIAL_SENSOR_MIN_LEN == 6);
+    assert(SL2_ROOMSRC_NOEDIT == 0xFF);
+}
+
+static void test_dial_sensor_na_sentinels(void) {
+    struct sl2_dial_sensor_pkt p = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = SL2_DC_NA,
+        .hum_pct = SL2_HUM_NA, .want_src = SL2_ROOMSRC_NOEDIT,
+    };
+    /* "I have hardware but no reading right now" must be expressible. */
+    assert(p.flags & SL2_DSF_HAS_SENSOR);
+    assert(p.temp_dc == SL2_DC_NA);
+    assert(p.hum_pct == SL2_HUM_NA);
+}
+
+static void test_room_src_tlv_round_trip(void) {
+    uint8_t buf[16]; size_t off = 0;
+    const uint8_t v[2] = { SL2_ROOMSRC_LINK, SL2_ROOMST_STALE };
+    assert(sl2_tlv_put(buf, sizeof buf, &off, SL2_TLV_ROOM_SRC, v, 2));
+    size_t roff = 0; uint8_t t, l; const uint8_t *rv;
+    assert(sl2_tlv_next(buf, off, &roff, &t, &l, &rv));
+    assert(t == SL2_TLV_ROOM_SRC && l == 2);
+    assert(rv[0] == SL2_ROOMSRC_LINK && rv[1] == SL2_ROOMST_STALE);
+}
+
+static void test_link_sensor_feature_bit_is_free(void) {
+    /* Must not collide with any existing SL2_FEAT_*, and must fit the u16
+     * CAPS.features field. */
+    assert(SL2_FEAT_LINK_SENSOR == (1u << 10));
+    assert(SL2_FEAT_LINK_SENSOR <= 0xFFFF);
+    const uint16_t taken = SL2_FEAT_WIFI_INFO | SL2_FEAT_HOMEKIT |
+        SL2_FEAT_OUTSIDE_T | SL2_FEAT_COMPRESSOR | SL2_FEAT_SENSOR_BATT |
+        SL2_FEAT_FW_INFO | SL2_FEAT_RUNTIME | SL2_FEAT_LINK_OTA_CREDS |
+        SL2_FEAT_ENERGY | SL2_FEAT_WIFI_SETUP;
+    assert((taken & SL2_FEAT_LINK_SENSOR) == 0);
+}
+
 int main(void) {
     test_layout();
     test_tolerant_decode();
@@ -224,6 +293,11 @@ int main(void) {
     test_transcripts();
     test_bonds();
     test_hkdf_rfc5869();
+    test_dial_sensor_sizeof();
+    test_dial_sensor_short_frame_is_reading_only();
+    test_dial_sensor_na_sentinels();
+    test_room_src_tlv_round_trip();
+    test_link_sensor_feature_bit_is_free();
     printf("test_sl2_proto: ALL OK\n");
     return 0;
 }

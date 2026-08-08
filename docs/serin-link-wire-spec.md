@@ -76,8 +76,9 @@ ignored, never errors.
 | 9 | `WIFI_RESP` | ctrl→dial | yes | Link OTA: creds reply |
 | 10 | `WIFI_SETUP` | dial→ctrl | yes | raise setup hotspot (change network) |
 | 11 | `DIAL_INFO` | dial→ctrl | yes | dial identity (model/fw/caps_seq) for the controller's UI |
+| 12 | `DIAL_SENSOR` | dial→ctrl | yes | Dial's own room sensor reading + source edit |
 
-Types 12–127 are reserved for core growth; 128–255 are reserved for experiments
+Types 13–127 are reserved for core growth; 128–255 are reserved for experiments
 (never shipped semantics).
 
 ## 3. Pairing: signed X25519 + TOFU pinning
@@ -451,7 +452,8 @@ enum {  /* features — telemetry the controller can emit (INFO TLVs / creds) */
     SL2_FEAT_SENSOR_BATT = 1u<<4,  SL2_FEAT_FW_INFO    = 1u<<5,
     SL2_FEAT_RUNTIME     = 1u<<6,  SL2_FEAT_LINK_OTA_CREDS = 1u<<7,
     SL2_FEAT_ENERGY      = 1u<<8,  SL2_FEAT_WIFI_SETUP = 1u<<9, /* accepts WIFI_SETUP */
-    /* bits 10-15 spare */
+    SL2_FEAT_LINK_SENSOR = 1u<<10, /* accepts DIAL_SENSOR as a room source */
+    /* bits 11-15 spare */
 };
 ```
 
@@ -509,6 +511,7 @@ unknown types in both ranges):
 | 0x07 | `RUNTIME` | `u32 hours` |
 | 0x08 | `SYS` | `u32 uptime_s; u8 reset_reason` |
 | 0x09 | `ENERGY` | `u16 input_w; u32 wh_total` (0xFFFF/0xFFFFFFFF = n/a) |
+| 0x0B | `ROOM_SRC` | `u8 applied_src; u8 status` |
 
 Rules: dial renders "—" for any TLV absent; `l` is authoritative (forward-compat:
 longer payloads than the dial knows are prefix-read); a TLV never changes
@@ -633,17 +636,73 @@ fails. The core tracks per-dial `SL2_CERT_NONE / PRESENT / INVALID / OK`
 stored but unverified. Nothing gates on this state — it is informational
 for controller UIs and Serin-side tooling.
 
+## 10d. DIAL_SENSOR (dial→ctrl, encrypted, push)
+
+A dial with its own temperature sensor offers itself as a room-temperature
+source. The dial only ever reports; the controller decides whether to use the
+reading and reports back what it applied via the `ROOM_SRC` INFO TLV (§9).
+
+```c
+struct sl2_dial_sensor_pkt {
+    uint8_t  type;           /* SL2_PKT_DIAL_SENSOR */
+    uint8_t  version;        /* SL2_PROTO_VERSION */
+    uint8_t  flags;          /* SL2_DSF_* */
+    int16_t  temp_dc;        /* deci-C; SL2_DC_NA  = no reading */
+    uint8_t  hum_pct;        /* 0..100; SL2_HUM_NA = no reading */
+    uint8_t  want_src;       /* enum sl2_room_src; NOEDIT = reading only */
+    uint8_t  reserved[2];    /* senders zero-fill, receivers ignore */
+};
+#define SL2_DIAL_SENSOR_MIN_LEN 6   /* through hum_pct; want_src may be absent */
+
+enum {  /* flags */
+    SL2_DSF_HAS_SENSOR = 1u<<0,  /* dial has sensing hardware (reading may
+                                  * still be absent — see temp_dc) */
+    /* bits 1-7 spare */
+};
+
+enum sl2_room_src {
+    SL2_ROOMSRC_INTERNAL = 0,     /* heat pump's own thermistor */
+    SL2_ROOMSRC_BLE      = 1,     /* controller's BLE sensor */
+    SL2_ROOMSRC_LINK     = 2,     /* the dial's own sensor */
+    SL2_ROOMSRC_NOEDIT   = 0xFF,  /* want_src sentinel: not an edit */
+};
+
+enum sl2_room_status {
+    SL2_ROOMST_OK          = 0,   /* the selected source is feeding now */
+    SL2_ROOMST_STALE       = 1,   /* selected but timed out -> internal */
+    SL2_ROOMST_UNAVAILABLE = 2,   /* selected but never had a reading */
+};
+```
+
+`want_src` doubles as the edit channel so streaming and editing share one
+message type: it is idempotent, and the dial re-sends until the controller's
+INFO reflects the change, exactly as it treats CMD.
+
+Normative rules:
+
+- A receiver MUST treat `len < 7` as reading-only, by length, never by
+  inspecting `want_src`. This is why `SL2_ROOMSRC_NOEDIT` is `0xFF` rather
+  than `0`: the tolerant decode zero-fills a short frame, and `0` means
+  Internal, so a short frame that were read as `want_src == 0` would silently
+  switch the room source.
+- A controller that does not set `SL2_FEAT_LINK_SENSOR` MUST be assumed to
+  ignore this packet; a dial MUST NOT send it to such a controller.
+- `applied_src` (the `ROOM_SRC` TLV) names the *selected* source even when
+  `status` is `STALE`; a reader that renders only `applied_src` will show a
+  dead feed as a live one.
+
 ## 11. Future-proofing inventory (what's deliberately left room for)
 
 - **New modes/presets/actions:** u16 masks + reserved enum space; additive.
 - **New fan semantics:** percent wire is step-agnostic; `fan_flags` has 7 spare
   bits (e.g. a future "quiet" modifier as a flag, not a step).
-- **New telemetry:** TLV registry, vendor range, `features` bits 10–15 spare.
+- **New telemetry:** TLV registry, vendor range, `features` bits 11–15 spare.
 - **New control surfaces** (aux heat, purifier/night-mode switches): next
   `caps_flags` bits + CMD mask bits 9–15 + claimed `reserved[]` bytes; if they
   outgrow that, a new packet type (12+) without touching existing layouts.
-- **Second temperature sensor / follow-me:** dial-side room sensing would ride a
-  new dial→ctrl packet type; nothing in STATE precludes it.
+- **Second temperature sensor / follow-me:** implemented as `DIAL_SENSOR`
+  (§10d). Arbitration is per-controller and does not yet pin *which* dial's
+  sensor is the source when several dials on the same controller offer one.
 - **Other carriers:** §1 note — packet layer is carrier-neutral; port owns
   discovery.
 - **Bigger vane arrays / 4-way cassettes:** nibble caps positions at 15; beyond
