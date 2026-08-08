@@ -1203,6 +1203,148 @@ static void test_dial_cert(void) {
     printf("dial cert ok\n");
 }
 
+/* ── DIAL_SENSOR dispatch ──────────────────────────────────────────────── */
+
+static struct {
+    int      calls;
+    bool     last_is_edit;
+    int16_t  last_temp_dc;
+    uint8_t  last_want_src;
+    uint8_t  last_mac[6];
+} s_rs;
+
+static void h_room_sensor(void *ctx, const uint8_t src_mac[6],
+                          const struct sl2_dial_sensor_pkt *p, bool is_edit) {
+    (void)ctx;
+    s_rs.calls++;
+    s_rs.last_is_edit  = is_edit;
+    s_rs.last_temp_dc  = p->temp_dc;
+    s_rs.last_want_src = p->want_src;
+    memcpy(s_rs.last_mac, src_mac, 6);
+}
+
+/* Same body as fresh(), but with a caller-supplied hvac iface so these tests
+ * can wire in h_room_sensor without mutating the shared const FHVAC. */
+static void fresh_hvac(sl2_link_t *l, const sl2_hvac_iface_t *hv) {
+    f_reset();
+    memset(&H, 0, sizeof H);
+    H.hvac_link = true;
+    H.mode = SL2_MODE_HEAT;
+    H.action = SL2_ACT_HEATING;
+    H.room_dc = 210; H.set_dc = 220;
+    H.set_low_dc = SL2_DC_NA; H.set_high_dc = SL2_DC_NA;
+    H.room_hum_pct = 40; H.hum_set_pct = SL2_HUM_NA;
+    n_applies = 0;
+    F.now = 1000;
+    sl2_link_init(l, &FPORT, &FCRYPTO, hv);
+    assert(sl2_link_start(l));
+}
+
+static void test_dial_sensor_reading_only_is_not_an_edit(void) {
+    memset(&s_rs, 0, sizeof s_rs);
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    fdial_t d;
+    dial_make(&d, 0xE1);
+    pair_dial(&l, &d);
+
+    uint8_t wire[SL2_DIAL_SENSOR_MIN_LEN] = {
+        SL2_PKT_DIAL_SENSOR, SL2_PROTO_VERSION, SL2_DSF_HAS_SENSOR, 0xE2, 0x00, 45
+    };
+    sl2_link_on_recv(&l, d.mac, F.own, wire, (int)sizeof wire);
+
+    assert(s_rs.calls == 1);
+    assert(s_rs.last_temp_dc == 226);
+    assert(!s_rs.last_is_edit);          /* short frame -> reading only */
+    assert(sl2_mac_eq(s_rs.last_mac, d.mac));
+    printf("dial_sensor reading-only ok\n");
+}
+
+static void test_dial_sensor_noedit_sentinel_is_not_an_edit(void) {
+    memset(&s_rs, 0, sizeof s_rs);
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    fdial_t d;
+    dial_make(&d, 0xE2);
+    pair_dial(&l, &d);
+
+    struct sl2_dial_sensor_pkt p = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = 215, .hum_pct = 40,
+        .want_src = SL2_ROOMSRC_NOEDIT,
+    };
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
+
+    assert(s_rs.calls == 1);
+    assert(!s_rs.last_is_edit);
+    printf("dial_sensor noedit sentinel ok\n");
+}
+
+static void test_dial_sensor_edit_is_flagged(void) {
+    memset(&s_rs, 0, sizeof s_rs);
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    fdial_t d;
+    dial_make(&d, 0xE3);
+    pair_dial(&l, &d);
+
+    struct sl2_dial_sensor_pkt p = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = 215, .hum_pct = 40,
+        .want_src = SL2_ROOMSRC_LINK,
+    };
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
+
+    assert(s_rs.calls == 1);
+    assert(s_rs.last_is_edit);
+    assert(s_rs.last_want_src == SL2_ROOMSRC_LINK);
+    printf("dial_sensor edit flagged ok\n");
+}
+
+static void test_dial_sensor_from_unbonded_mac_is_dropped(void) {
+    memset(&s_rs, 0, sizeof s_rs);
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    fdial_t d;
+    dial_make(&d, 0xE4);
+    pair_dial(&l, &d);
+
+    const uint8_t stranger[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
+    struct sl2_dial_sensor_pkt p = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = 215, .hum_pct = 40,
+        .want_src = SL2_ROOMSRC_LINK,
+    };
+    sl2_link_on_recv(&l, stranger, F.own, (const uint8_t *)&p, (int)sizeof p);
+    assert(s_rs.calls == 0);   /* dial_by_mac() gate, same as CMD */
+    printf("dial_sensor unbonded dropped ok\n");
+}
+
+static void test_dial_sensor_null_hook_is_safe(void) {
+    sl2_link_t l;
+    fresh(&l);                /* shared FHVAC: room_sensor is NULL */
+    fdial_t d;
+    dial_make(&d, 0xE5);
+    pair_dial(&l, &d);
+
+    struct sl2_dial_sensor_pkt p = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = 215, .hum_pct = 40,
+        .want_src = SL2_ROOMSRC_NOEDIT,
+    };
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
+    /* no crash = pass */
+    printf("dial_sensor null hook safe ok\n");
+}
+
 int main(void) {
     sl2_link_t probe_size_check;
     (void)probe_size_check;
@@ -1231,6 +1373,11 @@ int main(void) {
     test_dial_cert();
     test_forget();
     test_unbonded_and_broadcast_ignored();
+    test_dial_sensor_reading_only_is_not_an_edit();
+    test_dial_sensor_noedit_sentinel_is_not_an_edit();
+    test_dial_sensor_edit_is_flagged();
+    test_dial_sensor_from_unbonded_mac_is_dropped();
+    test_dial_sensor_null_hook_is_safe();
     printf("test_sl2_link: ALL OK\n");
     return 0;
 }
