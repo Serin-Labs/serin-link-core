@@ -80,6 +80,7 @@ CONF_DIAL_MAC = "dial_mac"        # deprecated alias for link_mac (shipped v0.1.
 CONF_STALE_AFTER = "stale_after"
 CONF_PRIMARY_LINK = "primary_link"
 CONF_PRIMARY_SELECT = "primary_select"
+CONF_SLOTS = "slots"
 
 
 CONF_DIAGNOSTICS = "diagnostics"
@@ -100,11 +101,19 @@ SL2_MAX_DIALS = 4
 
 # The dropdown's options. Index 0 is "no pin"; index N is bond slot N-1. The
 # C++ keys off the INDEX (PrimaryLinkSelect::control(size_t)), so these labels
-# can be reworded freely — but their ORDER and COUNT are the contract.
+# can be reworded freely — but their ORDER is the contract.
+#
+# The LENGTH is per-config: ESPHome fixes a select's options when the entity is
+# built and Home Assistant caches them from the initial entity listing, so the
+# list cannot grow or shrink as Serin Links come and go. Offering all four slots
+# to an install that will only ever bond two means offering two choices that get
+# refused — so the count comes from `slots:`, defaulting to however many
+# `links:` rows the diagnostics block declares.
 PRIMARY_AUTO_LABEL = "Auto (last reporting)"
-PRIMARY_SELECT_OPTIONS = [PRIMARY_AUTO_LABEL] + [
-    f"Serin Link {i + 1}" for i in range(SL2_MAX_DIALS)
-]
+
+
+def primary_select_options(slots):
+    return [PRIMARY_AUTO_LABEL] + [f"Serin Link {i + 1}" for i in range(slots)]
 
 # link_sensor: — entities fed by the SERIN LINK's own sensor, owned by this
 # component (the bindings above point at entities the user already has; here
@@ -157,6 +166,14 @@ LINK_SENSOR_SCHEMA = cv.Schema(
         cv.Optional(CONF_PRIMARY_SELECT): select.select_schema(
             PrimaryLinkSelect,
             entity_category=ENTITY_CATEGORY_CONFIG,
+        ).extend(
+            {
+                # How many Serin Links this install can hold, i.e. how many
+                # entries the dropdown offers besides "Auto". Defaults to the
+                # number of `links:` rows under diagnostics:, or all
+                # SL2_MAX_DIALS slots when there is no diagnostics block.
+                cv.Optional(CONF_SLOTS): cv.int_range(min=1, max=SL2_MAX_DIALS),
+            }
         ),
         # 90s = three missed 20s Serin Link keepalives plus slack.
         cv.Optional(
@@ -495,9 +512,12 @@ async def to_code(config):
         cg.add(var.set_link_sensor_enabled())
         cg.add(var.set_dial_stale_after(ls[CONF_STALE_AFTER].total_milliseconds))
         if CONF_PRIMARY_SELECT in ls:
-            sel = await select.new_select(
-                ls[CONF_PRIMARY_SELECT], options=PRIMARY_SELECT_OPTIONS
-            )
+            ps = ls[CONF_PRIMARY_SELECT]
+            slots = ps.get(CONF_SLOTS)
+            if slots is None:
+                rows = (config.get(CONF_DIAGNOSTICS) or {}).get(CONF_LINKS) or []
+                slots = len(rows) or SL2_MAX_DIALS
+            sel = await select.new_select(ps, options=primary_select_options(slots))
             await cg.register_parented(sel, var)
             cg.add(var.set_primary_select(sel))
         if CONF_PRIMARY_LINK in ls:

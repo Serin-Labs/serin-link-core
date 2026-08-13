@@ -140,6 +140,26 @@ and `Serin Link 1` … `Serin Link 4`:
 The two keys are mutually exclusive — a config error if you set both, so there
 is never a precedence question between a compile-time pin and a stored one.
 
+**How many entries the dropdown offers** is fixed when the firmware is built —
+ESPHome sets a select's options once and Home Assistant caches them from the
+initial entity listing, so the list cannot grow and shrink as Serin Links come
+and go. It therefore defaults to the number of `links:` rows you declared under
+`diagnostics:`, which is the closest thing to "how many Links this install
+has". Declare two rows and the dropdown offers `Auto`, `Serin Link 1` and
+`Serin Link 2` — not four slots, two of which would be refused. Override it
+explicitly if the two should differ:
+
+```yaml
+    primary_select:
+      name: "Primary Serin Link"
+      slots: 3          # default: however many `links:` rows exist, else 4
+```
+
+A slot that is offered but not currently bonded (you declared three rows and
+only two Links have paired) is still refused on selection, logged, and the
+dropdown snaps back to what is in force. That residual case cannot be designed
+away without runtime option lists, which ESPHome does not have.
+
 The dropdown numbers bond *slots*, but the choice is **persisted as a MAC**.
 That distinction is the whole point: forgetting a Serin Link compacts the bond
 table, so a stored slot would quietly re-point the pin at a different room. Two
