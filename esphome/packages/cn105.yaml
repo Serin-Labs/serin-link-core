@@ -1,0 +1,125 @@
+# A Mitsubishi CN105 Serin Link zone in one package.
+#
+# Your device YAML supplies identity, board, Wi-Fi/api/ota, and the two
+# external_components (echavet's cn105 and serin_link — see
+# example_package.yaml); this package supplies everything else: the UART, the
+# fully-instrumented cn105 climate entity, and the serin_link binding with
+# pairing button, connectivity sensor, per-Link diagnostics, and the Serin
+# Link's own room sensor feeding the heat pump.
+#
+# Override any value by redeclaring it in your YAML — ESPHome merges packages.
+# The count of bonded Serin Links is ONE substitution:
+#
+#   substitutions:
+#     max_links: "2"
+#
+# For HA sub-device grouping add `esphome: devices:` rows and
+# `serin_link: link_devices: [...]` in your device YAML (see
+# example_cn105.yaml) — a package cannot know your device ids.
+
+substitutions:
+  zone_name: "Heat Pump"
+  max_links: "1"
+  pair_window: 60s
+  # AtomS3 Lite grove pins; use GPIO16/17 on a plain ESP32.
+  uart_rx: GPIO2
+  uart_tx: GPIO1
+  update_interval: 2s
+  # How long the heat pump trusts the Serin Link's last reading before
+  # reverting to its internal thermistor.
+  remote_temp_timeout: 3min
+
+wifi:
+  # serin_link forces power-save off at runtime anyway (ESP-NOW RX needs the
+  # radio awake), but setting it here keeps the intent visible.
+  power_save_mode: NONE
+
+uart:
+  id: hp_uart
+  baud_rate: 2400
+  parity: EVEN
+  rx_pin: ${uart_rx}
+  tx_pin: ${uart_tx}
+
+climate:
+  - platform: cn105
+    id: hvac
+    name: "${zone_name}"
+    update_interval: ${update_interval}
+    remote_temperature_timeout: ${remote_temp_timeout}
+    vertical_vane_select:
+      name: "Vertical Vane"
+      id: vane_v
+    horizontal_vane_select:
+      name: "Horizontal Vane"
+      id: vane_h
+    outside_air_temperature_sensor:
+      name: "Outside Air Temp"
+      id: oat
+    compressor_frequency_sensor:
+      name: "Compressor Frequency"
+      id: comp_hz
+      entity_category: diagnostic
+    stage_sensor:
+      name: "Stage"
+      id: stage
+      entity_category: diagnostic
+    sub_mode_sensor:
+      name: "Sub Mode"
+      id: sub_mode
+      entity_category: diagnostic
+    auto_sub_mode_sensor:
+      name: "Auto Sub Mode"
+      id: auto_sub
+      entity_category: diagnostic
+    input_power_sensor:
+      name: "Input Power"
+      id: input_w
+      entity_category: diagnostic
+    kwh_sensor:
+      name: "Energy Used"
+      id: kwh_total
+      entity_category: diagnostic
+    runtime_hours_sensor:
+      name: "Runtime Hours"
+      id: runtime_h
+      entity_category: diagnostic
+
+serin_link:
+  id: serin          # NB: `id: link` collides with libc link() in generated code
+  climate_id: hvac
+  max_links: ${max_links}
+  hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'
+  vane_v_select: vane_v
+  vane_h_select: vane_h
+  outside_temp_sensor: oat
+  compressor_hz_sensor: comp_hz
+  stage_sensor: stage
+  sub_mode_sensor: sub_mode
+  auto_sub_mode_sensor: auto_sub
+  runtime_sensor: runtime_h
+  power_sensor: input_w
+  energy_sensor: kwh_total
+  pair_button:
+    window: ${pair_window}
+  diagnostics:
+    connected:
+    pairing_status:
+      name: "Pairing"
+  link_sensor:
+    temperature:
+      name: "Serin Link Temperature"
+    humidity:
+      name: "Serin Link Humidity"
+    primary_select:
+    # Fires only for a fresh reading from the arbitrated primary Link while
+    # the Serin Link is the selected room source — no guards needed here.
+    on_room_temperature:
+      - lambda: 'id(hvac).set_remote_temperature(x);'
+
+button:
+  - platform: template
+    name: "Forget All Serin Links"
+    entity_category: config
+    on_press:
+      - serin_link.forget_all_links:
