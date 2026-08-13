@@ -976,6 +976,63 @@ static void test_forget(void) {
     printf("forget ok\n");
 }
 
+/* The ESPHome diagnostics rows are indexed by bond slot, and sl2_link_forget_dial
+ * COMPACTS the table — so slot N can change identity when a different dial is
+ * forgotten. test_forget() above pins that for removal of the FIRST of two via
+ * sl2_link_dial_mac(); this pins the middle-of-three case and, crucially, that
+ * sl2_link_dial_view() follows the shift too. The view carries RUNTIME state
+ * (live, model, fw), not just the persisted bond, and the diagnostics entities
+ * read the view — so "the runtime half moves with the bond" is load-bearing and
+ * was previously asserted nowhere. */
+static void test_forget_middle_compacts(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d1, d2, d3;
+    dial_make(&d1, 0xE1);
+    pair_dial(&l, &d1);
+    dial_make(&d2, 0xE2);
+    pair_dial(&l, &d2);
+    dial_make(&d3, 0xE3);
+    pair_dial(&l, &d3);
+    assert(sl2_link_dial_count(&l) == 3);
+
+    /* every dial probes, so all three carry runtime state (live, last_probe_ms) */
+    dial_probe(&l, &d1, 0);
+    dial_probe(&l, &d2, 0);
+    dial_probe(&l, &d3, 0);
+
+    sl2_dial_view_t v;
+    assert(sl2_link_dial_view(&l, 2, &v) && memcmp(v.mac, d3.mac, 6) == 0);
+    assert(v.live);
+
+    assert(sl2_link_forget_dial(&l, d2.mac));      /* the MIDDLE one */
+    assert(sl2_link_dial_count(&l) == 2);
+    assert(!f_find_peer(d2.mac));
+
+    /* d1 stays at 0; d3 shifts down into 1 with its runtime state intact */
+    uint8_t mac[6];
+    assert(sl2_link_dial_mac(&l, 0, mac) && memcmp(mac, d1.mac, 6) == 0);
+    assert(sl2_link_dial_mac(&l, 1, mac) && memcmp(mac, d3.mac, 6) == 0);
+    assert(sl2_link_dial_view(&l, 1, &v) && memcmp(v.mac, d3.mac, 6) == 0);
+    assert(v.live);                    /* the runtime half moved with the bond */
+    assert(v.last_seen_ms >= 0);
+
+    /* the vacated tail slot reads empty — this is what makes an unpopulated
+     * diagnostics row publish ""/off/NAN instead of a stale dial */
+    assert(!sl2_link_dial_view(&l, 2, &v));
+    assert(!sl2_link_dial_mac(&l, 2, mac));
+    assert(!sl2_link_dial_live(&l, 2));
+
+    /* persisted: a reboot decodes the same two bonds, in the same order */
+    sl2_link_t l2;
+    sl2_link_init(&l2, &FPORT, &FCRYPTO, &FHVAC);
+    assert(sl2_link_start(&l2));
+    assert(sl2_link_dial_count(&l2) == 2);
+    assert(sl2_link_dial_mac(&l2, 0, mac) && memcmp(mac, d1.mac, 6) == 0);
+    assert(sl2_link_dial_mac(&l2, 1, mac) && memcmp(mac, d3.mac, 6) == 0);
+    printf("forget middle compacts ok\n");
+}
+
 static void test_unbonded_and_broadcast_ignored(void) {
     sl2_link_t l;
     fresh(&l);
@@ -1372,6 +1429,7 @@ int main(void) {
     test_dial_info();
     test_dial_cert();
     test_forget();
+    test_forget_middle_compacts();
     test_unbonded_and_broadcast_ignored();
     test_dial_sensor_reading_only_is_not_an_edit();
     test_dial_sensor_noedit_sentinel_is_not_an_edit();
