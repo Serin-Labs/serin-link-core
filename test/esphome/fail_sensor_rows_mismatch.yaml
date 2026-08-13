@@ -1,0 +1,28 @@
+# A hand-written link_sensor links: list that disagrees with max_links on the
+# count must be rejected — same single-source-of-truth rule as the
+# diagnostics rows.
+esphome:
+  name: t-sensor-rows-mismatch
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 2
+  link_sensor:
+    links:
+      - temperature:
+          name: "Only Row Temperature"

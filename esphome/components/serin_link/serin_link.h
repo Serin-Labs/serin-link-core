@@ -85,6 +85,18 @@ class SerinLinkComponent : public Component {
   void set_dial_hum_sensor(sensor::Sensor *s) { dial_hum_sensor_ = s; }
   void set_dial_mac_sensor(text_sensor::TextSensor *s) { dial_mac_sensor_ = s; }
   void set_dial_stale_after(uint32_t ms) { dial_stale_ms_ = ms; }
+  /* link_sensor: links: — per-slot temperature/humidity rows. Unlike the
+   * arbitrated pair above these show EVERY bonded Link's reading, non-primary
+   * included; arbitration decides which Link feeds the pair and the heat
+   * pump, never which readings are visible. A row is a bond SLOT (the
+   * compaction caveat on add_dial_row applies). */
+  void add_sensor_row(int idx, sensor::Sensor *temp, sensor::Sensor *hum) {
+    if (idx < 0 || idx >= SL2_MAX_DIALS) return;
+    sensor_rows_[idx].temp = temp;
+    sensor_rows_[idx].hum = hum;
+    sensor_rows_[idx].declared = true;
+    sensor_rows_cfg_ = true;
+  }
   /* on_room_temperature: — fired from publish_dial_() so it inherits the
    * frame-driven dedup gate; only for fresh readings while the Serin Link is
    * the selected room source (the guards the YAML recipe used to carry). */
@@ -261,6 +273,31 @@ class SerinLinkComponent : public Component {
   uint32_t dial_pub_ms_{0};          /* millis() of that publish; 0 = never */
   bool dial_stale_{false};           /* NAN already published */
   uint32_t last_dial_check_ms_{0};
+  /* Per-slot link_sensor rows: the reading, who it belongs to (the slot's
+   * occupant can change under a forget-compaction), and the last publish, so
+   * each row honours the same frame-driven dedup as the arbitrated pair. */
+  struct SensorRow {
+    bool declared{false};
+    sensor::Sensor *temp{nullptr};
+    sensor::Sensor *hum{nullptr};
+    uint8_t mac[6]{};                /* whose reading this row shows */
+    bool mac_valid{false};
+    int16_t temp_dc{SL2_DC_NA};
+    uint8_t hum_pct{SL2_HUM_NA};
+    uint32_t temp_ms{0};             /* millis() of last valid temp; 0 = never */
+    int16_t pub_dc{SL2_DC_NA};
+    uint32_t pub_ms{0};
+    bool stale_pub{false};           /* NAN already published */
+  };
+  void feed_sensor_row_(const uint8_t src_mac[6],
+                        const struct sl2_dial_sensor_pkt *p);
+  void publish_sensor_row_(SensorRow &r, bool stale);
+  /* 1 Hz: per-row staleness, and retracting a reading whose slot occupant
+   * changed (this is the one publish path that fires on the ABSENCE or
+   * re-homing of frames, so it cannot live in feed_sensor_row_). */
+  void check_sensor_rows_(uint32_t now);
+  SensorRow sensor_rows_[SL2_MAX_DIALS];
+  bool sensor_rows_cfg_{false};
   /* Per-slot diagnostics entities plus the last value published for each, so
    * the 1 Hz walk can honour the component's publish-on-change rule without
    * asking each entity what it last held. */

@@ -799,6 +799,12 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
              static_cast<unsigned>(selected_src_));
   }
 
+  /* link_sensor: links: — per-slot rows see EVERY Link's frame, so this runs
+   * BEFORE the primary arbitration below: arbitration decides which Link
+   * feeds the arbitrated pair and the heat pump, never which readings may be
+   * seen. */
+  if (sensor_rows_cfg_ && src_mac != nullptr) feed_sensor_row_(src_mac, p);
+
   /* primary_link: (YAML) — a non-primary Link's READING is ignored; its EDIT is not.
    * Deliberately placed AFTER the is_edit branch above: refusing the edit
    * would spin that dial at ~3 Hz forever (§10d has no give-up rule), which
@@ -890,6 +896,84 @@ void SerinLinkComponent::publish_dial_(bool stale) {
   if (room_src_is_link()) {
     const float t = dial_temp_dc_ / 10.0f;
     for (auto *trig : room_temp_triggers_) trig->trigger(t);
+  }
+}
+
+void SerinLinkComponent::feed_sensor_row_(const uint8_t src_mac[6],
+                                          const struct sl2_dial_sensor_pkt *p) {
+  /* The row is the sender's bond SLOT — resolved per frame, because a
+   * forget-compaction can move a Link to another slot between frames. */
+  int slot = -1;
+  uint8_t mac[6];
+  for (int i = 0; i < SL2_MAX_DIALS; i++) {
+    if (sl2_link_dial_mac(&link_, i, mac) && std::memcmp(mac, src_mac, 6) == 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0 || !sensor_rows_[slot].declared) return;
+  SensorRow &r = sensor_rows_[slot];
+  if (!r.mac_valid || std::memcmp(r.mac, src_mac, 6) != 0) {
+    /* New occupant (fresh bond, or a compaction the 1 Hz walk hasn't caught
+     * yet): drop the previous occupant's humidity before this frame's fields
+     * apply (independent NA sentinels — same leak the arbitrated pair
+     * guards), and defeat the dedup gate so the new Link's first reading
+     * always publishes. */
+    std::memcpy(r.mac, src_mac, 6);
+    r.mac_valid = true;
+    r.hum_pct = SL2_HUM_NA;
+    r.pub_ms = 0;
+    r.pub_dc = SL2_DC_NA;
+  }
+  if (p->temp_dc == SL2_DC_NA) return;  /* edit-only frame: nothing to show */
+  if (p->hum_pct != SL2_HUM_NA) r.hum_pct = p->hum_pct;
+  r.temp_dc = p->temp_dc;
+  r.temp_ms = millis();
+  /* Same frame-driven dedup as the arbitrated pair: on change, on the 30 s
+   * heartbeat, or to recover from a published NAN. */
+  const bool changed = r.temp_dc != r.pub_dc;
+  const bool due = r.pub_ms == 0 || millis() - r.pub_ms >= 30000;
+  if (changed || due || r.stale_pub) publish_sensor_row_(r, false);
+}
+
+void SerinLinkComponent::publish_sensor_row_(SensorRow &r, bool stale) {
+  r.stale_pub = stale;
+  if (stale) {
+    if (r.temp != nullptr) r.temp->publish_state(NAN);
+    if (r.hum != nullptr) r.hum->publish_state(NAN);
+    return;
+  }
+  r.pub_dc = r.temp_dc;
+  r.pub_ms = millis();
+  if (r.temp != nullptr) r.temp->publish_state(r.temp_dc / 10.0f);
+  /* Humidity rides the temperature's publish decision — one gate, both
+   * entities — so the two never drift apart in HA's history. */
+  if (r.hum != nullptr && r.hum_pct != SL2_HUM_NA) r.hum->publish_state(r.hum_pct);
+}
+
+void SerinLinkComponent::check_sensor_rows_(uint32_t now) {
+  for (int i = 0; i < SL2_MAX_DIALS; i++) {
+    SensorRow &r = sensor_rows_[i];
+    if (!r.declared) continue;
+    uint8_t mac[6];
+    const bool occupied = sl2_link_dial_mac(&link_, i, mac);
+    if (r.mac_valid && (!occupied || std::memcmp(mac, r.mac, 6) != 0)) {
+      /* The slot's occupant changed (a forget compacted the table) or left:
+       * the reading on display belongs to the OLD occupant. Retract it; the
+       * new occupant's next frame repopulates through feed_sensor_row_. */
+      const bool had_reading = r.temp_ms != 0;
+      r.mac_valid = false;
+      r.temp_dc = SL2_DC_NA;
+      r.hum_pct = SL2_HUM_NA;
+      r.temp_ms = 0;
+      if (had_reading && !r.stale_pub) publish_sensor_row_(r, true);
+      continue;
+    }
+    if (!r.stale_pub && r.temp_ms != 0 && now - r.temp_ms >= dial_stale_ms_) {
+      ESP_LOGW(TAG, "Serin Link %d room sensor stale (%" PRIu32
+               " ms) — publishing unknown", i + 1, now - r.temp_ms);
+      publish_sensor_row_(r, true);
+    }
   }
 }
 
@@ -1163,6 +1247,7 @@ void SerinLinkComponent::loop() {
                now - dial_temp_ms_);
       publish_dial_(true);
     }
+    if (sensor_rows_cfg_) check_sensor_rows_(now);
   }
   /* Its own tick: the block above is gated on link_sensor_cfg_, and
    * diagnostics are useful without a Serin Link room sensor configured. */
@@ -1312,6 +1397,12 @@ void SerinLinkComponent::dump_config() {
     } else {
       ESP_LOGCONFIG(TAG, "    primary Serin Link: unset (last reporting Link wins)");
     }
+    int n_rows = 0;
+    for (int i = 0; i < SL2_MAX_DIALS; i++)
+      if (sensor_rows_[i].declared) n_rows++;
+    if (n_rows > 0)
+      ESP_LOGCONFIG(TAG, "    per-slot sensor rows: %d (every Link's reading, "
+                    "arbitration feeds only the pair above)", n_rows);
   }
   int n_dials = sl2_link_dial_count(&link_);
   ESP_LOGCONFIG(TAG, "  bonded Serin Links: %d", n_dials);

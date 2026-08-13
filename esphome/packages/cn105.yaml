@@ -112,6 +112,11 @@ serin_link:
     humidity:
       name: "Serin Link Humidity"
     primary_select:
+    # With max_links > 1, add `links:` (bare) in your device YAML's
+    # serin_link: link_sensor: block for per-slot temperature/humidity rows —
+    # every Link's reading in HA, not just the primary's. Not defaulted here:
+    # the key's presence is the opt-in, and a package must not grow entities
+    # under an upgrader's feet.
     # Fires only for a fresh reading from the arbitrated primary Link while
     # the Serin Link is the selected room source — no guards needed here.
     on_room_temperature:

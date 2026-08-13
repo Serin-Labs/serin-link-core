@@ -147,6 +147,43 @@ _PRIMARY_SELECT_SCHEMA = select.select_schema(
 def primary_select_options(slots):
     return [PRIMARY_AUTO_LABEL] + [f"Serin Link {i + 1}" for i in range(slots)]
 
+# link_sensor: links: — per-slot temperature/humidity, one row per bond slot.
+# The arbitrated pair below shows ONE reading (the primary Link's); these rows
+# show every bonded Link's, non-primary included — two Links in two rooms means
+# two temperatures, and arbitration only decides which one FEEDS the heat
+# pump, not which one you may see. Rows are bond SLOTS (the compaction caveat
+# on LINK_ROW_SCHEMA applies): when a forget shifts the table, a row goes
+# unknown until its new occupant reports. Like the diagnostics rows, bare
+# `links:` generates temperature+humidity per slot from max_links: /
+# link_devices:; a hand-written list is for custom naming and must agree with
+# max_links: on the count.
+LINK_SENSOR_ROW_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_TEMPERATURE): sensor.sensor_schema(
+            unit_of_measurement=UNIT_CELSIUS,
+            accuracy_decimals=1,
+            device_class=DEVICE_CLASS_TEMPERATURE,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        cv.Optional(CONF_HUMIDITY): sensor.sensor_schema(
+            unit_of_measurement=UNIT_PERCENT,
+            accuracy_decimals=0,
+            device_class=DEVICE_CLASS_HUMIDITY,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+    }
+)
+
+
+def _sensor_links(value):
+    # Bare `links:` parses as None — kept as None here, expanded into
+    # generated rows (or rejected, if there is no max_links: to size from) by
+    # _expand_max_links, which is the only place that can see max_links:.
+    if value is None:
+        return None
+    return cv.All(cv.ensure_list(LINK_SENSOR_ROW_SCHEMA), _max_link_rows)(value)
+
+
 # link_sensor: — entities fed by the SERIN LINK's own sensor, owned by this
 # component (the bindings above point at entities the user already has; here
 # the Serin Link is the data source, so there is nothing to bind to). Presence
@@ -201,6 +238,9 @@ LINK_SENSOR_SCHEMA = cv.Schema(
             if value is None or isinstance(value, dict)
             else value
         ),
+        # links: — per-slot rows (see LINK_SENSOR_ROW_SCHEMA above). Presence
+        # of the key is the opt-in, so existing configs grow no entities.
+        cv.Optional(CONF_LINKS): _sensor_links,
         # 90s = three missed 20s Serin Link keepalives plus slack.
         cv.Optional(
             CONF_STALE_AFTER, default="90s"
@@ -448,6 +488,58 @@ _ROW_ENTITIES = (
     (CONF_FIRMWARE, "Firmware"),
 )
 
+# What a generated link_sensor: links: row holds, with in-sub-device names.
+_SENSOR_ROW_ENTITIES = (
+    (CONF_TEMPERATURE, "Temperature"),
+    (CONF_HUMIDITY, "Humidity"),
+)
+
+
+def _expand_sensor_links(config, n, devs):
+    """Expand (or check) link_sensor: links: against max_links/link_devices.
+
+    Runs even with no max_links: — a bare `links:` must be rejected then (there
+    is nothing to size it from), while a hand-written list stands on its own.
+    """
+    ls = config.get(CONF_LINK_SENSOR)
+    if ls is None or CONF_LINKS not in ls:
+        return config
+    rows = ls[CONF_LINKS]
+    if rows is None:
+        if n is None:
+            raise cv.Invalid(
+                f"bare `{CONF_LINKS}:` under `{CONF_LINK_SENSOR}:` needs "
+                f"`{CONF_MAX_LINKS}:` (or `{CONF_LINK_DEVICES}:`) to know how "
+                f"many slots to generate — or write the rows out"
+            )
+        generated = []
+        for i in range(n):
+            row = {}
+            for key, label in _SENSOR_ROW_ENTITIES:
+                row[key] = (
+                    {CONF_NAME: label, CONF_DEVICE_ID: devs[i]}
+                    if devs is not None
+                    else {CONF_NAME: f"Serin Link {i + 1} {label}"}
+                )
+            generated.append(LINK_SENSOR_ROW_SCHEMA(row))
+        rows = generated
+    elif n is not None and len(rows) != n:
+        # Unlike the diagnostics rows, a hand-written list here MAY coexist
+        # with link_devices: (which keeps serving the generated diagnostics
+        # rows); scoping these rows is then per-entity device_id:.
+        raise cv.Invalid(
+            f"`{CONF_LINK_SENSOR}: {CONF_LINKS}:` declares {len(rows)} rows "
+            f"but `{CONF_MAX_LINKS}:` is {n} — they describe the same slots "
+            f"and must agree (drop the list unless you need custom names)"
+        )
+    else:
+        return config
+    config = dict(config)
+    ls = dict(ls)
+    ls[CONF_LINKS] = rows
+    config[CONF_LINK_SENSOR] = ls
+    return config
+
 
 def _expand_max_links(config):
     """Cross-key checks, then expand max_links into diagnostics.links rows.
@@ -478,6 +570,7 @@ def _expand_max_links(config):
                 f"`{CONF_MAX_LINKS}:` is {n} — one device per slot, in slot "
                 f"order"
             )
+    config = _expand_sensor_links(config, n, devs)
     if n is None:
         return config
     config = dict(config)
@@ -693,7 +786,7 @@ async def to_code(config):
             slots = ps.get(CONF_SLOTS)
             if slots is None:
                 rows = (config.get(CONF_DIAGNOSTICS) or {}).get(CONF_LINKS) or []
-                slots = len(rows) or SL2_MAX_DIALS
+                slots = len(rows) or len(ls.get(CONF_LINKS) or []) or SL2_MAX_DIALS
             sel = await select.new_select(ps, options=primary_select_options(slots))
             await cg.register_parented(sel, var)
             cg.add(var.set_primary_select(sel))
@@ -712,6 +805,18 @@ async def to_code(config):
                     await text_sensor.new_text_sensor(ls[CONF_LINK_MAC])
                 )
             )
+        for idx, row in enumerate(ls.get(CONF_LINKS) or []):
+            temp = (
+                await sensor.new_sensor(row[CONF_TEMPERATURE])
+                if CONF_TEMPERATURE in row
+                else cg.nullptr
+            )
+            hum = (
+                await sensor.new_sensor(row[CONF_HUMIDITY])
+                if CONF_HUMIDITY in row
+                else cg.nullptr
+            )
+            cg.add(var.add_sensor_row(idx, temp, hum))
         for conf in ls.get(CONF_ON_ROOM_TEMPERATURE, []):
             trig = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
             cg.add(var.add_room_temp_trigger(trig))

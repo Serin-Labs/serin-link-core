@@ -57,6 +57,19 @@ serin_link:
     # (the two are mutually exclusive).
     primary_select:
       name: "Primary Serin Link"
+    # Per-slot rows: the entities above show ONE reading (the primary's);
+    # these show every bonded Link's, non-primary included — two Links in two
+    # rooms means two temperatures in HA. Hand-written here for custom names;
+    # with max_links:/link_devices: a bare `links:` generates them instead.
+    links:
+      - temperature:
+          name: "Serin Link 1 Temperature"
+        humidity:
+          name: "Serin Link 1 Humidity"
+      - temperature:
+          name: "Serin Link 2 Temperature"
+        humidity:
+          name: "Serin Link 2 Humidity"
 
   # Visibility into the bond table. A row is a bond SLOT, not a Serin Link:
   # forgetting one Serin Link shifts the later ones down, which is why every row

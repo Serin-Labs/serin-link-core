@@ -33,7 +33,7 @@ esp32:
     type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
-  - source: github://Serin-Labs/serin-link-core@v0.1.3-beta.9
+  - source: github://Serin-Labs/serin-link-core@v0.1.3-beta.10
     components: [serin_link]
 
 climate:
@@ -205,6 +205,47 @@ Two consequences worth knowing before you pin:
   want failover instead of correctness here, don't pin.
 - **The MAC follows the physical unit**, so re-pairing the same Serin Link keeps
   the key working; swapping in a different one means editing it.
+
+### One temperature per Serin Link
+
+Pinning fixes *which room feeds the heat pump*; it also means the non-primary
+Link's reading goes nowhere. If you want both rooms in Home Assistant at once,
+add `links:` to `link_sensor:` — per-slot temperature/humidity rows, one per
+bond slot, that show **every** bonded Link's reading, non-primary included:
+
+```yaml
+  link_sensor:
+    temperature:                 # the arbitrated pair: the primary's reading,
+      name: "Serin Link Temperature"   # the one on_room_temperature feeds from
+    primary_select:
+    links:                       # per-slot rows: one temperature + one
+                                 # humidity per bond slot, every Link visible
+```
+
+Bare `links:` generates the rows from `max_links:` — with `link_devices:`
+they group under each slot's sub-device as short "Temperature" / "Humidity",
+otherwise they land flat as "Serin Link 1 Temperature", …. Hand-write the
+list if the names don't suit (the row count must then agree with
+`max_links:`, and any child can be omitted):
+
+```yaml
+  link_sensor:
+    links:
+      - temperature: { name: "Bedroom Temperature" }
+        humidity:    { name: "Bedroom Humidity" }
+      - temperature: { name: "Office Temperature" }
+```
+
+The key's presence is the opt-in, so an existing config grows no entities on
+upgrade. Arbitration is untouched: the single `temperature:` /` humidity:`
+pair and `on_room_temperature:` still follow the primary alone — these rows
+only make the other rooms *visible*, they never feed the heat pump.
+
+The usual slot caveats apply: a row is a bond slot, so a forget-compaction
+re-homes it to the next Link (the row publishes unknown until the new
+occupant reports — no reading is ever shown under the wrong Link), and a Link
+silent past `stale_after:` takes its row to unknown the same way the
+arbitrated pair does.
 
 ### Seeing the bond table
 

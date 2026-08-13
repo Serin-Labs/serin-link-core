@@ -1,0 +1,33 @@
+# Hand-written per-slot sensor rows for custom naming; the count must agree
+# with max_links, and any child (here: row 2's humidity) may be omitted.
+esphome:
+  name: t-sensor-links-rows
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 2
+  link_sensor:
+    links:
+      - temperature:
+          name: "Bedroom Temperature"
+        humidity:
+          name: "Bedroom Humidity"
+      - temperature:
+          name: "Office Temperature"

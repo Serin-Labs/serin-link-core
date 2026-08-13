@@ -1,0 +1,30 @@
+# Bare `links:` without sub-devices: per-slot temperature/humidity entities
+# are generated flat under the node with prefixed names
+# ("Serin Link 2 Temperature"), alongside the arbitrated pair.
+esphome:
+  name: t-sensor-links-bare
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 2
+  link_sensor:
+    temperature:
+      name: "Serin Link Temperature"
+    links:

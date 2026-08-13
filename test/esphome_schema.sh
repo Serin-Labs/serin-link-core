@@ -15,11 +15,18 @@ ESPHOME=${ESPHOME:-esphome}
 declare -A MUST_CONTAIN=(
   [pass_max_links.yaml]='Serin Link 2'          # generated row reaches slot 2
   [pass_max_links_bare.yaml]='Serin Link 3 MAC' # flat prefixed names, all 3 slots
+  [pass_link_sensor_links.yaml]='Humidity'      # generated per-slot sensor rows
+  [pass_link_sensor_links_bare.yaml]='Serin Link 2 Temperature'  # flat names, slot 2
+  [pass_link_sensor_links_rows.yaml]='Office Temperature'        # hand-written names
 )
 declare -A MUST_REJECT_WITH=(
   [fail_rows_mismatch.yaml]='max_links'
   [fail_link_devices_mismatch.yaml]='link_devices'
   [fail_hvac_link_both.yaml]='hvac_link'
+  # not 'max_links': the dumped config echo contains that literal, so it
+  # would match even when the rejection is for an unrelated reason
+  [fail_sensor_rows_mismatch.yaml]='must agree'
+  [fail_sensor_links_no_count.yaml]='max_links'
 )
 
 fails=0
