@@ -30,7 +30,7 @@ an independent open-source CN105/HomeKit firmware.
 esp32:
   board: esp32-s3-devkitc-1
   framework:
-    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers, libsodium
+    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
   - source: github://Serin-Labs/serin-link-core@v0.1.1
@@ -96,7 +96,7 @@ Honest summary — the spec's §3 has the full story:
 ```
 include/serin_link/   canonical headers (dependency-free C)
   sl2_proto.h         wire format: packets, enums, TLVs, ftab, transcripts
-  sl2_crypto.h        crypto hooks (Ed25519/X25519) — bind libsodium
+  sl2_crypto.h        crypto hooks (Ed25519/X25519) — bind libsodium/Monocypher
   sl2_sha256.h        SHA-256/HMAC/HKDF pinned in-tree (portable KDF)
   sl2_port.h          platform port: send/peers/clock/kv (≤250B MTU, 6B addr)
   sl2_bond.h          multi-dial bond-table codec (pure, host-tested)
@@ -199,7 +199,8 @@ CMD apply + echo-to-all-dials, CAPS/INFO pulls, credential relay, forget, and
 stranger/broadcast rejection. CI runs the suite plus an ESPHome compile on
 every push.
 
-Real-curve crypto interop happens on hardware (libsodium both ends); the toy
+Real-curve crypto interop happens on hardware (libsodium on the dial,
+vendored Monocypher on the ESPHome side); the toy
 crypto pins FSM logic only.
 
 ## License

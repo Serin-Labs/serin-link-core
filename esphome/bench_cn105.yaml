@@ -8,7 +8,7 @@
 #
 # Differences from a stock field config, on purpose:
 #   - framework esp-idf, not arduino: serin_link requires it (raw nvs_*,
-#     esp_now encrypted peers, libsodium).
+#     esp_now encrypted peers).
 #   - external component from the local tree, not github://Serin-Labs/…,
 #     so the bench always runs the latest core.
 substitutions:

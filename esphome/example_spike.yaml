@@ -17,7 +17,7 @@ esphome:
 esp32:
   board: esp32-s3-devkitc-1
   framework:
-    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers, libsodium
+    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
   - source:

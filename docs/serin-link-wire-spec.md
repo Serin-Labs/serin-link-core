@@ -732,7 +732,7 @@ typedef struct sl2_port {
     void (*log)(void *ctx, int level, const char *msg);  /* optional */
 } sl2_port_t;
 
-typedef struct sl2_crypto {   /* bind libsodium or equivalent; see sl2_crypto.h */
+typedef struct sl2_crypto {   /* bind libsodium/Monocypher; see sl2_crypto.h */
     void *ctx;
     int (*rand_bytes)(void *ctx, uint8_t *buf, size_t len);
     int (*x25519_keypair)(void *ctx, uint8_t priv[32], uint8_t pub[32]);

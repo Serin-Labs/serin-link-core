@@ -13,10 +13,11 @@
 #include <esp_wifi.h>
 #include <esp_timer.h>
 #include <nvs.h>
-#include <sodium.h>
 #include <esp_random.h>
 #include <esp_system.h>
 
+#include "monocypher.h"
+#include "monocypher-ed25519.h"
 #include "sl2_info.h"
 
 namespace esphome {
@@ -97,57 +98,64 @@ static void p_log(void *, int level, const char *msg) {
   }
 }
 
-/* ── libsodium crypto (Ed25519 + X25519 only; HKDF is pinned in sl2_sha256.h) ── */
+/* ── Monocypher crypto (Ed25519 + X25519 only; HKDF is pinned in sl2_sha256.h) ── */
 
-/* Two libsodiums used to end up in one image: the espressif/libsodium managed
- * component this component pins, and the copy ESPHome's noise-c PlatformIO lib
- * drags in whenever `api: encryption:` is configured. __init__.py now collapses
- * them onto one manifest key (see the add_idf_component comment there), so only
- * the espressif build links. Keep registering an esp_random-backed
- * implementation anyway: a build that resolves to a port whose default
- * sysrandom backend wants getrandom()//dev/urandom — absent on ESP-IDF —
- * aborts the whole app inside sodium_init() (boot loop into safe mode). */
-static const char *rb_esp32_name(void) { return "esp32"; }
-static uint32_t rb_esp32_random(void) { return esp_random(); }
-static void rb_esp32_buf(void *buf, size_t size) { esp_fill_random(buf, size); }
-static randombytes_implementation rb_esp32_impl = {
-    rb_esp32_name,   /* implementation_name */
-    rb_esp32_random, /* random */
-    nullptr,         /* stir */
-    nullptr,         /* uniform */
-    rb_esp32_buf,    /* buf */
-    nullptr,         /* close */
-};
-
+/* Vendored rather than pulled from espressif/libsodium: only ONE libsodium can
+ * exist in an ESPHome image, and it is never ours. `api: encryption:` pulls
+ * esphome/noise-c, ESPHome converts that PlatformIO lib tree into an IDF
+ * component keyed `libsodium`, and that entry is written after -- so it
+ * overwrites -- anything add_idf_component() declares under the same key.
+ * Declaring a different key instead collides on name-without-namespace and
+ * fails component discovery outright ("Can't decide which one to pick").
+ * ESPHome's port is a curated subset for noise-c: it compiles the ed25519_ref10
+ * primitives but no crypto_sign_* and no SHA-512, so binding to whatever wins
+ * the key link-errors on the three signing calls below.
+ *
+ * Monocypher (4.0.3, dual BSD-2/CC-0, see LICENCE.monocypher.md) is
+ * self-contained and namespaced away from libsodium, so it coexists with
+ * noise-c's copy no matter which ESPHome version resolves it. Wire formats are
+ * unchanged: RFC 8032 Ed25519 and RFC 7748 X25519, and Monocypher's 64-byte
+ * secret key is seed||public_key exactly as libsodium's was, so identity keys
+ * already provisioned in NVS stay valid. */
 static int c_rand(void *, uint8_t *buf, size_t len) {
-  randombytes_buf(buf, len);
+  esp_fill_random(buf, len);
   return 0;
 }
 
 static int c_xkp(void *, uint8_t priv[32], uint8_t pub[32]) {
-  randombytes_buf(priv, 32);
-  return crypto_scalarmult_curve25519_base(pub, priv);
+  esp_fill_random(priv, 32);
+  crypto_x25519_public_key(pub, priv);
+  return 0;
 }
 
 static int c_xsh(void *, const uint8_t priv[32], const uint8_t peer[32],
                  uint8_t out[32]) {
-  int rc = crypto_scalarmult_curve25519(out, priv, peer);
-  return rc;
+  crypto_x25519(out, priv, peer);
+  /* libsodium's crypto_scalarmult() rejected small-order peer points by
+   * returning -1; Monocypher returns void and documents the same check as the
+   * caller's job. An all-zero shared secret is the tell. */
+  uint8_t acc = 0;
+  for (size_t i = 0; i < 32; i++)
+    acc = (uint8_t) (acc | out[i]);
+  return acc == 0 ? -1 : 0;
 }
 
-
 static int c_ekp(void *, uint8_t priv[64], uint8_t pub[32]) {
-  return crypto_sign_ed25519_keypair(pub, priv);
+  uint8_t seed[32];
+  esp_fill_random(seed, sizeof(seed));
+  crypto_ed25519_key_pair(priv, pub, seed); /* wipes seed */
+  return 0;
 }
 
 static int c_sign(void *, const uint8_t priv[64], const uint8_t *msg,
                   size_t msg_len, uint8_t sig[64]) {
-  return crypto_sign_ed25519_detached(sig, nullptr, msg, msg_len, priv);
+  crypto_ed25519_sign(sig, priv, msg, msg_len);
+  return 0;
 }
 
 static int c_verify(void *, const uint8_t pub[32], const uint8_t *msg,
                     size_t msg_len, const uint8_t sig[64]) {
-  return crypto_sign_ed25519_verify_detached(sig, msg, msg_len, pub);
+  return crypto_ed25519_check(sig, pub, msg, msg_len); /* 0 = valid */
 }
 
 /* ── ClimateTraits/state <-> sl2 semantic model ───────────────────────── */
@@ -740,12 +748,8 @@ void SerinLinkComponent::copy_zone_name(char *dst, size_t cap) const {
 }
 
 void SerinLinkComponent::setup() {
-  randombytes_set_implementation(&rb_esp32_impl);
-  if (sodium_init() < 0) {
-    ESP_LOGE(TAG, "sodium_init failed");
-    this->mark_failed();
-    return;
-  }
+  /* No crypto init step: Monocypher has no global state, and entropy comes
+   * straight from esp_fill_random (the hardware RNG, seeded by Wi-Fi/BT). */
   sl2_rxq_init(&rxq_);
   g_self = this;
 

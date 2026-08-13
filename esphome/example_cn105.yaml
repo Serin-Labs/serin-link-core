@@ -19,7 +19,7 @@ esphome:
 esp32:
   board: m5stack-atoms3
   framework:
-    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers, libsodium
+    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
   - source: github://echavet/MitsubishiCN105ESPHome

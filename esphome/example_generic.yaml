@@ -13,7 +13,7 @@ esphome:
 esp32:
   board: esp32-s3-devkitc-1
   framework:
-    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers, libsodium
+    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
   - source: github://Serin-Labs/serin-link-core@v0.1.1   # or type: local / path: ...
