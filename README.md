@@ -33,7 +33,7 @@ esp32:
     type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
-  - source: github://Serin-Labs/serin-link-core@v0.1.1
+  - source: github://Serin-Labs/serin-link-core@v0.1.3-beta.9
     components: [serin_link]
 
 climate:
@@ -44,12 +44,7 @@ climate:
 serin_link:
   id: serin
   climate_id: hvac
-
-button:
-  - platform: template
-    name: "Pair Serin Link"
-    on_press:
-      - lambda: 'id(serin).pair_start(60000);'
+  pair_button:     # a component-owned "Pair Serin Link" button, default 60 s
 ```
 
 Put the Serin Link in pairing mode, press **Pair Serin Link** (Home Assistant or the
@@ -60,9 +55,14 @@ fan detents follow its discrete fan modes.
 
 Complete examples in [`esphome/`](esphome/):
 
-- [`example_cn105.yaml`](esphome/example_cn105.yaml) — Mitsubishi heat pump via
+- [`example_package.yaml`](esphome/example_package.yaml) — the short form: a
+  complete two-Link CN105 controller in ~40 lines, everything zone-shaped
+  pulled in from [`packages/cn105.yaml`](esphome/packages/cn105.yaml).
+  Start here.
+- [`example_cn105.yaml`](esphome/example_cn105.yaml) — the same config
+  spelled out: Mitsubishi heat pump via
   [echavet/MitsubishiCN105ESPHome](https://github.com/echavet/MitsubishiCN105ESPHome),
-  including vane-axis bindings and device-link health.
+  including vane-axis bindings, device-link health, and per-Link sub-devices.
 - [`example_generic.yaml`](esphome/example_generic.yaml) — the core
   `thermostat` platform (any climate entity works the same way).
 - [`example_spike.yaml`](esphome/example_spike.yaml) — minimal coexistence
@@ -99,17 +99,39 @@ by upgrading.
 
 The reading reaches Home Assistant either way. What it does to the *heat pump*
 is up to your climate platform, because ESPHome's `Climate` has no generic
-external-temperature input — see `example_cn105.yaml` (an `on_value:`
-automation into `set_remote_temperature`, gated on
-`id(serin).room_src_is_link()` so cycling back to Internal actually hands
-control back) or `example_generic.yaml` (the `thermostat` platform's
-`sensor:` points straight at the Serin Link's reading — simpler, but with no
+external-temperature input. `on_room_temperature:` is the hook: it fires with
+`x` (°C) only for a fresh, non-NaN reading from the arbitrated primary Link
+*while the Serin Link is the selected room source* — cycling back to Internal
+on it stops the feed, so the typical body is one unguarded line:
+
+```yaml
+  link_sensor:
+    temperature:
+      name: "Serin Link Temperature"
+    on_room_temperature:
+      - lambda: 'id(hvac).set_remote_temperature(x);'
+```
+
+Alternatively `example_generic.yaml` points the `thermostat` platform's
+`sensor:` straight at the Serin Link's reading — simpler, but with no
 `remote_temperature_timeout` equivalent: a stale Serin Link leaves it with no
-control temperature at all, rather than falling back).
+control temperature at all, rather than falling back.
 
 ### More than one Serin Link
 
-A controller bonds up to four Serin Links. They all get the STATE stream, and a
+A controller bonds up to four Serin Links. State the count **once**:
+
+```yaml
+serin_link:
+  max_links: 2
+```
+
+That single number generates the four per-slot diagnostics entities (MAC /
+Connected / Last Seen / Firmware) for each slot and sizes the primary-Link
+dropdown below — no other part of the config repeats it. Everything that
+follows describes what the multi-Link machinery does underneath.
+
+All bonded Links get the STATE stream, and a
 command from any of them is accepted — but the `link_sensor:` entities above
 are a *single* set, and by default whichever one reported last owns them. Two
 Links in two rooms therefore make that temperature — and any heat pump fed
@@ -143,16 +165,16 @@ is never a precedence question between a compile-time pin and a stored one.
 **How many entries the dropdown offers** is fixed when the firmware is built —
 ESPHome sets a select's options once and Home Assistant caches them from the
 initial entity listing, so the list cannot grow and shrink as Serin Links come
-and go. It therefore defaults to the number of `links:` rows you declared under
-`diagnostics:`, which is the closest thing to "how many Links this install
-has". Declare two rows and the dropdown offers `Auto`, `Serin Link 1` and
-`Serin Link 2` — not four slots, two of which would be refused. Override it
-explicitly if the two should differ:
+and go. It therefore follows `max_links:` (via the rows it generates; a
+hand-written `links:` list counts the same way). With `max_links: 2` the
+dropdown offers `Auto`, `Serin Link 1` and `Serin Link 2` — not four slots,
+two of which would be refused. Override it explicitly if the two should
+differ:
 
 ```yaml
     primary_select:
-      name: "Primary Serin Link"
-      slots: 3          # default: however many `links:` rows exist, else 4
+      name: "Primary Serin Link"    # bare `primary_select:` = this default
+      slots: 3          # default: max_links / `links:` rows, else 4
 ```
 
 A slot that is offered but not currently bonded (you declared three rows and
@@ -186,20 +208,20 @@ Two consequences worth knowing before you pin:
 
 ### Seeing the bond table
 
-`diagnostics:` exposes what the controller knows about each bonded Serin Link, and
-is what tells you the MAC to paste above:
+`max_links:` already generates the per-slot entities ("Serin Link 1 MAC",
+"Serin Link 1 Connected", …). `diagnostics:` adds the table-wide ones, and is
+where you'd hand-write `links:` rows if the generated names don't suit:
 
 ```yaml
   diagnostics:
+    connected:       # "any bonded Serin Link alive" (default name), the
+                     # binary_sensor a dashboard card wants
     bonded_count:    { name: "Bonded Serin Links" }
     pairing_status:  { name: "Pairing" }       # idle/listening/confirming/paired/
                                                # timeout/cancelled/full/pin-mismatch
     pairing_seconds: { name: "Pairing Window" }
-    links:
-      - mac_address: { name: "Serin Link 1 MAC" }
-        linked:      { name: "Serin Link 1 Linked" }
-        last_seen:   { name: "Serin Link 1 Last Seen" }
-        firmware:    { name: "Serin Link 1 Firmware" }
+    # links: [...]   # custom-named per-slot rows; the row count must then
+                     # agree with max_links (it IS the same statement twice)
 ```
 
 Every child is optional and the block creates no entities you don't ask for.
@@ -223,9 +245,11 @@ The same table is printed at boot with no configuration at all:
 
 ### Grouping each Serin Link as its own device
 
-By default every entity lands on the controller's device, so `Serin Link 2 Last
-Seen` sits in a flat list next to the heat pump's own sensors. ESPHome
-sub-devices fix that with config alone — the component is unaware of them:
+By default the generated entities land flat on the controller's device, so
+`Serin Link 2 Last Seen` sits in a list next to the heat pump's own sensors.
+Declare one ESPHome sub-device per slot and hand them to `link_devices:` —
+each slot's entities then group under their own device, with short names
+("MAC" under "Serin Link 1"):
 
 ```yaml
 esphome:
@@ -237,15 +261,12 @@ esphome:
       name: "Serin Link 2"
 
 serin_link:
-  diagnostics:
-    links:
-      - mac_address: { name: "MAC",       device_id: link1 }
-        linked:      { name: "Connected", device_id: link1 }
-        last_seen:   { name: "Last Seen", device_id: link1 }
-        firmware:    { name: "Firmware",  device_id: link1 }
-      - mac_address: { name: "MAC",       device_id: link2 }
-        linked:      { name: "Connected", device_id: link2 }
+  max_links: 2
+  link_devices: [link1, link2]   # one per slot, in slot order
 ```
+
+(Hand-written `links:` rows take per-entity `device_id:` instead —
+`link_devices:` only applies to the generated ones.)
 
 Home Assistant then shows a *Serin Link 1* device with `Connected`, `MAC`,
 `Last Seen` and `Firmware` under it. Entity names can drop their prefix,
@@ -257,12 +278,12 @@ tells you which one that is.
 
 ### Pairing and forgetting from automations
 
+Pairing has a first-class button — `pair_button:` in the quickstart above
+(`window:` sets the pairing window it opens, default 60 s). The actions remain
+for everything else:
+
 ```yaml
 button:
-  - platform: template
-    name: "Pair Serin Link"
-    on_press:
-      - serin_link.pair_start: { window: 60s }
   - platform: template
     name: "Forget Serin Link 1"
     on_press:
@@ -352,10 +373,12 @@ Notes:
   device-link health to the Serin Link's offline face. A climate entity exists
   whether or not the device behind it answers, so without this a dead UART
   would read as "Connected" with a frozen temperature. CN105:
-  `hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'`. Unset, a
+  `hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'`. Platforms
+  that expose the signal as an entity can bind `hvac_link_sensor: <id>` (a
+  `binary_sensor`) instead — one or the other, never both. Unset, a
   fallback heuristic reports link-down while an entity that claims a room
   temperature has none (NaN) — which catches never-connected devices on any
-  platform; mid-run link loss still needs the lambda where the platform
+  platform; mid-run link loss still needs the binding where the platform
   exposes a signal.
 - Wire input is validated before it reaches the entity: setpoints clamp to
   the entity's visual range, out-of-range humidity is ignored, unknown
