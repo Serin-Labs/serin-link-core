@@ -81,6 +81,12 @@ class SerinLinkComponent : public Component {
   void set_dial_hum_sensor(sensor::Sensor *s) { dial_hum_sensor_ = s; }
   void set_dial_mac_sensor(text_sensor::TextSensor *s) { dial_mac_sensor_ = s; }
   void set_dial_stale_after(uint32_t ms) { dial_stale_ms_ = ms; }
+  /* primary_dial: — pin the room source to one dial. Unset = last reporting
+   * dial wins (the historical behavior). */
+  void set_primary_dial(const std::array<uint8_t, 6> &mac) {
+    std::memcpy(primary_dial_, mac.data(), 6);
+    has_primary_dial_ = true;
+  }
 
   /* A bonded dial reported its own room sensor (called from the trampoline). */
   void room_sensor_feed(const uint8_t src_mac[6],
@@ -202,6 +208,12 @@ class SerinLinkComponent : public Component {
   uint32_t dial_temp_ms_{0};
   bool dial_has_sensor_{false};
   uint8_t dial_mac_[6]{};
+  uint8_t primary_dial_[6]{};
+  bool has_primary_dial_{false};
+  /* One log line per ignored dial, not per frame: non-primary DIAL_SENSOR
+   * frames arrive at up to 3 Hz while that dial's source edit is unconfirmed. */
+  uint8_t ignored_logged_[SL2_MAX_DIALS][6]{};
+  uint8_t n_ignored_logged_{0};
   int16_t dial_pub_dc_{SL2_DC_NA};   /* last value published to HA */
   uint32_t dial_pub_ms_{0};          /* millis() of that publish; 0 = never */
   bool dial_stale_{false};           /* NAN already published */

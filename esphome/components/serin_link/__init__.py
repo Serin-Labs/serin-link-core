@@ -114,6 +114,20 @@ LINK_SENSOR_SCHEMA = cv.Schema(
         cv.Optional(CONF_DIAL_MAC): text_sensor.text_sensor_schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
+        # primary_dial: — which bonded dial feeds the entities above. Unset
+        # (the default) keeps the historical behavior: whichever dial reported
+        # last owns them, which with two dials in two rooms makes the entity —
+        # and any heat pump fed from it — alternate between rooms.
+        #
+        # Set, only this dial's readings are used. Other dials are NOT
+        # rejected: their room-source EDITS are still honored, because a dial
+        # re-sends an unacknowledged edit at ~3 Hz forever (wire spec §10d has
+        # no give-up rule). Arbitration decides whose reading is used, never
+        # whether an edit is accepted.
+        #
+        # Get the MAC from diagnostics: dials: [].mac_address, or the bond
+        # table dump_config() prints at boot.
+        cv.Optional(CONF_PRIMARY_DIAL): cv.mac_address,
         # 90s = three missed 20s dial keepalives plus slack.
         cv.Optional(
             CONF_STALE_AFTER, default="90s"
@@ -414,6 +428,11 @@ async def to_code(config):
         ls = config[CONF_LINK_SENSOR]
         cg.add(var.set_link_sensor_enabled())
         cg.add(var.set_dial_stale_after(ls[CONF_STALE_AFTER].total_milliseconds))
+        if CONF_PRIMARY_DIAL in ls:
+            # list of HexInt -> braced initializer -> const std::array<uint8_t,6>&
+            cg.add(
+                var.set_primary_dial([HexInt(i) for i in ls[CONF_PRIMARY_DIAL].parts])
+            )
         if CONF_TEMPERATURE in ls:
             cg.add(var.set_dial_temp_sensor(await sensor.new_sensor(ls[CONF_TEMPERATURE])))
         if CONF_HUMIDITY in ls:
