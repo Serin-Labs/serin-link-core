@@ -307,6 +307,9 @@ FINAL_VALIDATE_SCHEMA = _no_builtin_espnow
             ): cv.templatable(cv.positive_time_period_milliseconds),
         }
     ),
+    # play() calls straight through to the component and returns — nothing is
+    # deferred to a callback, timer, or loop().
+    synchronous=True,
 )
 async def pair_start_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
@@ -326,6 +329,7 @@ async def pair_start_action_to_code(config, action_id, template_arg, args):
     "serin_link.pair_cancel",
     PairCancelAction,
     cv.Schema({cv.GenerateID(): cv.use_id(SerinLinkComponent)}),
+    synchronous=True,
 )
 async def pair_cancel_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
@@ -361,6 +365,7 @@ def _exactly_one_target(config):
         ),
         _exactly_one_target,
     ),
+    synchronous=True,
 )
 async def forget_dial_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
@@ -379,6 +384,7 @@ async def forget_dial_action_to_code(config, action_id, template_arg, args):
     "serin_link.forget_all_dials",
     ForgetAllDialsAction,
     cv.Schema({cv.GenerateID(): cv.use_id(SerinLinkComponent)}),
+    synchronous=True,
 )
 async def forget_all_dials_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)

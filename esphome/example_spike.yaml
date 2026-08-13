@@ -51,20 +51,58 @@ serin_link:
     dial_mac:
       name: "Spike Dial"
     stale_after: 60s
+    # With two dials bonded, whichever reported last owns the entities above.
+    # Pin one to stop the value alternating between rooms:
+    # primary_dial: "10:51:DB:8E:EB:38"
+
+  # Visibility into the bond table. A row is a bond SLOT, not a dial:
+  # forgetting one dial shifts the later ones down, which is why every row
+  # declares mac_address — it makes that shift visible in HA instead of
+  # silently relabelling "Dial 2" with dial 3's identity.
+  diagnostics:
+    bonded_count:
+      name: "Bonded Dials"
+    pairing_status:
+      name: "Pairing"
+    pairing_seconds:
+      name: "Pairing Window"
+    dials:
+      - mac_address:
+          name: "Dial 1 MAC"
+        linked:
+          name: "Dial 1 Linked"
+        last_seen:
+          name: "Dial 1 Last Seen"
+        firmware:
+          name: "Dial 1 Firmware"
+      - mac_address:
+          name: "Dial 2 MAC"
+        linked:
+          name: "Dial 2 Linked"
+        last_seen:
+          name: "Dial 2 Last Seen"
+        firmware:
+          name: "Dial 2 Firmware"
 
 button:
   - platform: template
     name: "Pair Serin Dial"
     on_press:
-      - lambda: 'id(serin).pair_start(60000);'
+      - serin_link.pair_start:
+          window: 60s
   - platform: template
     name: "Cancel Pairing"
     on_press:
-      - lambda: 'id(serin).pair_cancel();'
+      - serin_link.pair_cancel:
+  - platform: template
+    name: "Forget Dial 1"
+    on_press:
+      - serin_link.forget_dial:
+          slot: 0
   - platform: template
     name: "Forget All Dials"
     on_press:
-      - lambda: 'id(serin).forget_all_dials();'
+      - serin_link.forget_all_dials:
 
 binary_sensor:
   - platform: template

@@ -145,16 +145,56 @@ serin_link:
               - lambda: 'id(hvac).set_remote_temperature(x);'
     humidity:
       name: "Serin Link Humidity"
+    # With more than one dial bonded, pin which one feeds the entities above —
+    # otherwise whichever reported last wins, and the value (plus the heat
+    # pump fed from it via the on_value recipe) alternates between rooms. Get
+    # the MAC from the diagnostics entities below, or from the bond table the
+    # component prints at boot.
+    # primary_dial: "10:51:DB:8E:EB:38"
+
+  # Which dials are bonded, and are they alive. A row is a bond SLOT, not a
+  # dial: forgetting one shifts the later ones down, so declare mac_address on
+  # every row — that is what makes the shift visible instead of quietly
+  # relabelling a row with another dial's identity.
+  diagnostics:
+    bonded_count:
+      name: "Bonded Dials"
+    pairing_status:
+      name: "Pairing"
+    pairing_seconds:
+      name: "Pairing Window"
+    dials:
+      - mac_address:
+          name: "Dial 1 MAC"
+        linked:
+          name: "Dial 1 Linked"
+        last_seen:
+          name: "Dial 1 Last Seen"
+        firmware:
+          name: "Dial 1 Firmware"
+      - mac_address:
+          name: "Dial 2 MAC"
+        linked:
+          name: "Dial 2 Linked"
 
 button:
   - platform: template
     name: "Pair Serin Dial"
     on_press:
-      - lambda: 'id(serin).pair_start(60000);'
+      - serin_link.pair_start:
+          window: 60s
+  # Drops ONE dial. slot: 0 is the first bond; because forgetting compacts the
+  # table, the dial that was in slot 1 becomes slot 0 afterwards — watch the
+  # Dial N MAC entities to see it happen.
+  - platform: template
+    name: "Forget Dial 1"
+    on_press:
+      - serin_link.forget_dial:
+          slot: 0
   - platform: template
     name: "Forget All Dials"
     on_press:
-      - lambda: 'id(serin).forget_all_dials();'
+      - serin_link.forget_all_dials:
 
 binary_sensor:
   - platform: template

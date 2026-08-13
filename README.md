@@ -107,6 +107,95 @@ control back) or `example_generic.yaml` (the `thermostat` platform's
 `remote_temperature_timeout` equivalent: a stale dial leaves it with no
 control temperature at all, rather than falling back).
 
+### More than one dial
+
+A controller bonds up to four dials. They all get the STATE stream, and a
+command from any of them is accepted — but the `link_sensor:` entities above
+are a *single* set, and by default whichever dial reported last owns them. Two
+dials in two rooms therefore make that temperature (and any heat pump fed from
+it) alternate between rooms. Pin one:
+
+```yaml
+  link_sensor:
+    primary_dial: "10:51:DB:8E:EB:38"
+    temperature:
+      name: "Serin Link Temperature"
+```
+
+Unset, the old last-reporting-wins behavior is unchanged. Set, only that
+dial's readings are used; the others are still bonded, still control the heat
+pump, and their room-source selection is still honored — only their
+*measurement* is ignored, with one log line per ignored dial.
+
+Two consequences worth knowing before you pin:
+
+- **A pinned dial that goes offline takes the room source down with it** —
+  the source reports stale, then unavailable. That is deliberate: silently
+  substituting a different room's temperature is the bug being fixed. If you
+  want failover instead of correctness here, don't pin.
+- **The MAC follows the physical dial**, so re-pairing the same dial keeps the
+  key working; swapping in a different dial means editing it.
+
+### Seeing the bond table
+
+`diagnostics:` exposes what the controller knows about each bonded dial, and
+is what tells you the MAC to paste above:
+
+```yaml
+  diagnostics:
+    bonded_count:    { name: "Bonded Dials" }
+    pairing_status:  { name: "Pairing" }       # idle/listening/confirming/paired/
+                                               # timeout/cancelled/full/pin-mismatch
+    pairing_seconds: { name: "Pairing Window" }
+    dials:
+      - mac_address: { name: "Dial 1 MAC" }
+        linked:      { name: "Dial 1 Linked" }
+        last_seen:   { name: "Dial 1 Last Seen" }
+        firmware:    { name: "Dial 1 Firmware" }
+```
+
+Every child is optional and the block creates no entities you don't ask for.
+`pairing_status` is worth having even alone: pressing pair on a full bond
+table sets it to `full` and opens no window, which is otherwise
+indistinguishable from success.
+
+**A `dials:` row is a bond slot, not a dial.** Forgetting a dial *compacts*
+the table, so the dial in slot 1 moves into slot 0 and "Dial 1 …" starts
+describing it. Declaring `mac_address:` on every row is what makes that
+visible rather than silent. Rows beyond the number of bonded dials publish
+empty/off/unknown.
+
+The same table is printed at boot with no configuration at all:
+
+```
+[C][serin_link:...]   bonded dials: 2
+[C][serin_link:...]     [0] 10:51:DB:8E:EB:38  live  last seen 3 s   model 'Serin Link' fw '1.4.2'  caps_seq 7  cert 2
+[C][serin_link:...]     [1] 10:51:DB:8E:F1:84  DOWN  last seen 412 s model 'Serin Link' fw '1.4.0'  caps_seq 7  cert 0
+```
+
+### Pairing and forgetting from automations
+
+```yaml
+button:
+  - platform: template
+    name: "Pair Serin Dial"
+    on_press:
+      - serin_link.pair_start: { window: 60s }
+  - platform: template
+    name: "Forget Dial 1"
+    on_press:
+      - serin_link.forget_dial: { slot: 0 }
+```
+
+Actions: `serin_link.pair_start` (`window:`, default 60 s, templatable),
+`serin_link.pair_cancel`, `serin_link.forget_dial`, and
+`serin_link.forget_all_dials`. `forget_dial` takes **exactly one** of `slot:`
+(a bond-table position, templatable) or `mac_address:` (one specific dial,
+resolved at compile time) — declaring both, or neither, is a config error.
+
+For anything the schema doesn't expose (a dial's model, `caps_seq`, or cert
+state), `id(serin).dial_view(i, &v)` hands a lambda the raw snapshot.
+
 ## Trust model
 
 Honest summary — the spec's §3 has the full story:
