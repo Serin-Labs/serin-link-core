@@ -1,5 +1,8 @@
 #pragma once
+#include "esphome/core/automation.h"
 #include "esphome/core/component.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/log.h"
 #include "esphome/core/preferences.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/climate/climate.h"
@@ -247,6 +250,55 @@ class SerinLinkComponent : public Component {
   uint32_t cmd_debounce_ms_{300};
   uint32_t last_ps_check_ms_{0};
   bool started_{false};
+};
+
+/* ── automation actions ───────────────────────────────────────────────────
+ * Parented rather than free-standing, so a config with two serin_link
+ * components can address each one. These replace the raw lambdas the example
+ * configs used to need. */
+
+template<typename... Ts>
+class PairStartAction : public Action<Ts...>, public Parented<SerinLinkComponent> {
+ public:
+  TEMPLATABLE_VALUE(uint32_t, window)
+  void play(Ts... x) override { this->parent_->pair_start(this->window_.value(x...)); }
+};
+
+template<typename... Ts>
+class PairCancelAction : public Action<Ts...>, public Parented<SerinLinkComponent> {
+ public:
+  void play(Ts...) override { this->parent_->pair_cancel(); }
+};
+
+/* Exactly one of slot/mac is set — enforced by the config schema, so the
+ * runtime simply prefers the MAC when one is present. slot: is templatable
+ * (it is just an index); mac: is resolved at compile time by cv.mac_address,
+ * which is what keeps runtime MAC string parsing out of the component. */
+template<typename... Ts>
+class ForgetDialAction : public Action<Ts...>, public Parented<SerinLinkComponent> {
+ public:
+  TEMPLATABLE_VALUE(int, slot)
+  /* std::array, not uint8_t[6]: the codegen emits a braced initializer, which
+   * a C array parameter cannot take (it decays to a pointer). */
+  void set_mac(const std::array<uint8_t, 6> &mac) {
+    mac_ = mac;
+    has_mac_ = true;
+  }
+  void play(Ts... x) override {
+    const bool ok = has_mac_ ? this->parent_->forget_dial_mac(mac_.data())
+                             : this->parent_->forget_dial_slot(this->slot_.value(x...));
+    if (!ok) ESP_LOGW("serin_link", "forget_dial: no such dial");
+  }
+
+ protected:
+  std::array<uint8_t, 6> mac_{};
+  bool has_mac_{false};
+};
+
+template<typename... Ts>
+class ForgetAllDialsAction : public Action<Ts...>, public Parented<SerinLinkComponent> {
+ public:
+  void play(Ts...) override { this->parent_->forget_all_dials(); }
 };
 
 }  // namespace serin_link

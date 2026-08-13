@@ -13,6 +13,8 @@ implements ESP-NOW link-layer encryption nor shares the recv callback.
 import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
+from esphome import automation
+from esphome.core import HexInt
 from esphome.components import binary_sensor, climate, select, sensor, text_sensor
 from esphome.const import (
     CONF_HUMIDITY,
@@ -40,6 +42,11 @@ AUTO_LOAD = ["binary_sensor", "climate", "select", "sensor", "text_sensor"]
 
 serin_link_ns = cg.esphome_ns.namespace("serin_link")
 SerinLinkComponent = serin_link_ns.class_("SerinLinkComponent", cg.Component)
+
+PairStartAction = serin_link_ns.class_("PairStartAction", automation.Action)
+PairCancelAction = serin_link_ns.class_("PairCancelAction", automation.Action)
+ForgetDialAction = serin_link_ns.class_("ForgetDialAction", automation.Action)
+ForgetAllDialsAction = serin_link_ns.class_("ForgetAllDialsAction", automation.Action)
 
 CONF_ZONE_NAME = "zone_name"
 CONF_CLIMATE_ID = "climate_id"
@@ -265,6 +272,104 @@ def _no_builtin_espnow(config):
 
 
 FINAL_VALIDATE_SCHEMA = _no_builtin_espnow
+
+
+# ── automation actions ────────────────────────────────────────────────────
+# So configs stop reaching for raw lambdas to open a pairing window or drop a
+# dial. forget_dial is the one that needed a decision: `slot:` is a bond-table
+# POSITION (templatable, but it shifts when another dial is forgotten) and
+# `mac_address:` is a specific dial, resolved at compile time — which is what
+# keeps runtime MAC string parsing out of the component entirely.
+
+
+@automation.register_action(
+    "serin_link.pair_start",
+    PairStartAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(SerinLinkComponent),
+            cv.Optional(
+                CONF_WINDOW, default="60s"
+            ): cv.templatable(cv.positive_time_period_milliseconds),
+        }
+    ),
+)
+async def pair_start_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    # Both branches must go through cg.templatable(): since ESPHome 2026.4 a
+    # TEMPLATABLE_VALUE field is TemplatableFn-backed and static_asserts if
+    # handed a raw constant, so the static case needs the wrapper too (to_exp
+    # converts the TimePeriod to milliseconds).
+    templ = await cg.templatable(
+        config[CONF_WINDOW], args, cg.uint32, to_exp=lambda v: v.total_milliseconds
+    )
+    cg.add(var.set_window(templ))
+    return var
+
+
+@automation.register_action(
+    "serin_link.pair_cancel",
+    PairCancelAction,
+    cv.Schema({cv.GenerateID(): cv.use_id(SerinLinkComponent)}),
+)
+async def pair_cancel_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    return var
+
+
+def _exactly_one_target(config):
+    has_slot = CONF_SLOT in config
+    has_mac = CONF_MAC_ADDRESS in config
+    if has_slot == has_mac:
+        raise cv.Invalid(
+            "serin_link.forget_dial needs exactly one of `slot:` or "
+            "`mac_address:` — `slot:` is a bond-table position (which shifts "
+            "when an earlier dial is forgotten), `mac_address:` is one "
+            "specific dial."
+        )
+    return config
+
+
+@automation.register_action(
+    "serin_link.forget_dial",
+    ForgetDialAction,
+    cv.All(
+        cv.Schema(
+            {
+                cv.GenerateID(): cv.use_id(SerinLinkComponent),
+                cv.Optional(CONF_SLOT): cv.templatable(
+                    cv.int_range(min=0, max=SL2_MAX_DIALS - 1)
+                ),
+                cv.Optional(CONF_MAC_ADDRESS): cv.mac_address,
+            }
+        ),
+        _exactly_one_target,
+    ),
+)
+async def forget_dial_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    if CONF_SLOT in config:
+        templ = await cg.templatable(config[CONF_SLOT], args, cg.int_)
+        cg.add(var.set_slot(templ))
+    else:
+        # Same idiom as wifi's set_bssid: a list of HexInt renders as a braced
+        # initializer, which binds to a const std::array<uint8_t,6>&.
+        cg.add(var.set_mac([HexInt(i) for i in config[CONF_MAC_ADDRESS].parts]))
+    return var
+
+
+@automation.register_action(
+    "serin_link.forget_all_dials",
+    ForgetAllDialsAction,
+    cv.Schema({cv.GenerateID(): cv.use_id(SerinLinkComponent)}),
+)
+async def forget_all_dials_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    return var
 
 
 async def to_code(config):
