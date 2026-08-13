@@ -156,4 +156,22 @@ async def to_code(config):
     # exact pin here makes IDF version solving fail for the whole project.
     # setup() registers an esp_random-backed RNG before sodium_init(), so any
     # 1.x resolution is safe.
-    add_idf_component(name="espressif/libsodium", ref="^1.0.20")
+    #
+    # Declared UNNAMESPACED on purpose, which still resolves to
+    # espressif/libsodium (the registry defaults the namespace) but keys the
+    # manifest entry `libsodium` instead of `espressif/libsodium`. `api:` with
+    # `encryption:` pulls esphome/noise-c, and ESPHome converts that PlatformIO
+    # lib tree into IDF components, emitting its own bare `libsodium:
+    # {override_path: ...}`. Two entries whose name-without-namespace matches
+    # are a hard error in the component manager -- both land in
+    # project_managed_components, which has no priority tiebreak:
+    #
+    #   Requirement espressif__libsodium and requirement libsodium are both
+    #   added as "project_managed_components". Can't decide which one to pick.
+    #
+    # esp32/__init__.py writes the converted PlatformIO components first and
+    # then lets add_idf_component() entries overwrite by key, so sharing the key
+    # collapses the two into one. It has to be OUR direction of the swap:
+    # ESPHome's port is a curated subset for noise-c with no crypto_sign_* and
+    # no SHA-512, whereas the full espressif build covers noise-c as well.
+    add_idf_component(name="libsodium", ref="^1.0.20")

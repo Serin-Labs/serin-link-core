@@ -99,13 +99,14 @@ static void p_log(void *, int level, const char *msg) {
 
 /* ── libsodium crypto (Ed25519 + X25519 only; HKDF is pinned in sl2_sha256.h) ── */
 
-/* Two libsodiums can end up in one image: the espressif/libsodium managed
- * component this component pins, and the upstream copy that ESPHome's noise-c
- * PlatformIO lib drags in whenever `api: encryption:` is configured. If the
- * upstream one wins the link, its default sysrandom backend wants
- * getrandom()//dev/urandom — absent on ESP-IDF — and sodium_init() aborts the
- * whole app (boot loop into safe mode). Registering an esp_random-backed
- * implementation before sodium_init() is correct no matter which copy linked. */
+/* Two libsodiums used to end up in one image: the espressif/libsodium managed
+ * component this component pins, and the copy ESPHome's noise-c PlatformIO lib
+ * drags in whenever `api: encryption:` is configured. __init__.py now collapses
+ * them onto one manifest key (see the add_idf_component comment there), so only
+ * the espressif build links. Keep registering an esp_random-backed
+ * implementation anyway: a build that resolves to a port whose default
+ * sysrandom backend wants getrandom()//dev/urandom — absent on ESP-IDF —
+ * aborts the whole app inside sodium_init() (boot loop into safe mode). */
 static const char *rb_esp32_name(void) { return "esp32"; }
 static uint32_t rb_esp32_random(void) { return esp_random(); }
 static void rb_esp32_buf(void *buf, size_t size) { esp_fill_random(buf, size); }
