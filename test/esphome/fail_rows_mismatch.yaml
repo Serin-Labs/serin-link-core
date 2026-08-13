@@ -1,0 +1,27 @@
+# max_links and an explicit diagnostics links: list that disagree on the
+# count must be rejected — two sources of truth is the disease this key cures.
+esphome:
+  name: t-rows-mismatch
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 2
+  diagnostics:
+    links:
+      - mac_address:
+          name: "Only Row MAC"

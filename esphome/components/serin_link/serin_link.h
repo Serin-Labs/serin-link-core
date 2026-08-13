@@ -5,6 +5,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/preferences.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/button/button.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/sensor/sensor.h"
@@ -52,6 +53,9 @@ class SerinLinkComponent : public Component {
    * entity exists whether or not the device behind it answers). Unset, the
    * NaN-room-temp heuristic applies (sl2_hvac_link_infer). */
   void set_hvac_link_lambda(std::function<bool()> fn) { hvac_link_fn_ = std::move(fn); }
+  /* hvac_link_sensor: — the same signal from a binary_sensor entity. The
+   * schema enforces lambda-or-sensor, never both. */
+  void set_hvac_link_sensor(binary_sensor::BinarySensor *s) { hvac_link_sensor_ = s; }
   /* vane_v_select:/vane_h_select: — vane axes bound to select entities; the
    * option order defines wire positions, "auto"/"swing" map to those codes. */
   void set_vane_v_select(select::Select *s) { vane_v_sel_ = s; }
@@ -81,6 +85,10 @@ class SerinLinkComponent : public Component {
   void set_dial_hum_sensor(sensor::Sensor *s) { dial_hum_sensor_ = s; }
   void set_dial_mac_sensor(text_sensor::TextSensor *s) { dial_mac_sensor_ = s; }
   void set_dial_stale_after(uint32_t ms) { dial_stale_ms_ = ms; }
+  /* on_room_temperature: — fired from publish_dial_() so it inherits the
+   * frame-driven dedup gate; only for fresh readings while the Serin Link is
+   * the selected room source (the guards the YAML recipe used to carry). */
+  void add_room_temp_trigger(Trigger<float> *t) { room_temp_triggers_.push_back(t); }
   /* primary_link: (YAML) — pin the room source to one Serin Link. Unset =
    * last reporting one wins (the historical behavior). The C++/core side keeps
    * the wire spec's "dial" vocabulary; only the YAML key and HA-visible text
@@ -139,6 +147,13 @@ class SerinLinkComponent : public Component {
   /* diagnostics: — component-owned read-only entities over the bond table.
    * Rows are bond SLOTS (see the compaction note above), which is the whole
    * reason the MAC entity exists. */
+  /* diagnostics: connected: — any bonded Serin Link alive. Sets
+   * diagnostics_cfg_ itself: the 1 Hz walk must run for this entity even
+   * when no per-slot rows are declared. */
+  void set_connected_sensor(binary_sensor::BinarySensor *s) {
+    connected_sensor_ = s;
+    diagnostics_cfg_ = true;
+  }
   void set_bonded_count_sensor(sensor::Sensor *s) { bonded_count_sensor_ = s; }
   void set_pairing_status_sensor(text_sensor::TextSensor *s) { pairing_status_sensor_ = s; }
   void set_pairing_seconds_sensor(sensor::Sensor *s) { pairing_seconds_sensor_ = s; }
@@ -186,6 +201,7 @@ class SerinLinkComponent : public Component {
   std::string zone_name_;
   climate::Climate *climate_{nullptr};
   std::function<bool()> hvac_link_fn_{nullptr};
+  binary_sensor::BinarySensor *hvac_link_sensor_{nullptr};
   select::Select *vane_v_sel_{nullptr};
   select::Select *vane_h_sel_{nullptr};
   sensor::Sensor *outside_temp_sensor_{nullptr};
@@ -209,6 +225,7 @@ class SerinLinkComponent : public Component {
   sensor::Sensor *dial_temp_sensor_{nullptr};
   sensor::Sensor *dial_hum_sensor_{nullptr};
   text_sensor::TextSensor *dial_mac_sensor_{nullptr};
+  std::vector<Trigger<float> *> room_temp_triggers_;
   uint32_t dial_stale_ms_{90000};
   int16_t dial_temp_dc_{SL2_DC_NA};
   uint8_t dial_hum_pct_{SL2_HUM_NA};
@@ -262,6 +279,9 @@ class SerinLinkComponent : public Component {
   void publish_diagnostics_(uint32_t now);
   bool diagnostics_cfg_{false};
   DialRow dial_rows_[SL2_MAX_DIALS];
+  binary_sensor::BinarySensor *connected_sensor_{nullptr};
+  bool pub_any_live_{false};
+  bool pub_any_live_valid_{false};
   sensor::Sensor *bonded_count_sensor_{nullptr};
   text_sensor::TextSensor *pairing_status_sensor_{nullptr};
   sensor::Sensor *pairing_seconds_sensor_{nullptr};
@@ -296,6 +316,16 @@ class SerinLinkComponent : public Component {
 class PrimaryLinkSelect : public select::Select, public Parented<SerinLinkComponent> {
  protected:
   void control(size_t index) override { this->parent_->primary_select_control(index); }
+};
+
+/* pair_button: — press opens the pairing window the schema baked in. */
+class PairLinkButton : public button::Button, public Parented<SerinLinkComponent> {
+ public:
+  void set_window(uint32_t ms) { window_ms_ = ms; }
+
+ protected:
+  void press_action() override { this->parent_->pair_start(window_ms_); }
+  uint32_t window_ms_{60000};
 };
 
 /* ── automation actions ───────────────────────────────────────────────────

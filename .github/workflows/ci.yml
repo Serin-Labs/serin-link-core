@@ -32,5 +32,7 @@ jobs:
       - name: CI secrets stub
         run: |
           printf 'wifi_ssid: "ci"\nwifi_password: "ci-password-123"\napi_encryption_key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="\n' > esphome/secrets.yaml
+      - name: Schema tests (config validation only)
+        run: test/esphome_schema.sh
       - name: Compile component (local path, spike config)
         run: esphome compile esphome/example_spike.yaml

@@ -1,0 +1,31 @@
+# link_devices must name exactly max_links devices — a third device for a
+# two-Link install is a wiring error, not a preference.
+esphome:
+  name: t-linkdev-mismatch
+  devices:
+    - id: link1
+      name: "Serin Link 1"
+    - id: link2
+      name: "Serin Link 2"
+    - id: link3
+      name: "Serin Link 3"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 2
+  link_devices: [link1, link2, link3]

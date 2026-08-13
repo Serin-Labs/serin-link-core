@@ -1,0 +1,27 @@
+# max_links alone, no diagnostics block, no sub-devices: the per-slot
+# entities are still generated, flat under the node with prefixed names
+# ("Serin Link 3 MAC"), and pair_button works with all defaults.
+esphome:
+  name: t-multilink-bare
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 3
+  pair_button:

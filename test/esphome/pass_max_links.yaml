@@ -1,0 +1,49 @@
+# max_links as the single source of truth, with sub-device grouping:
+# link_devices maps each generated slot onto a declared esphome: device, the
+# per-slot diagnostics entities are generated (short names, device-scoped),
+# and the primary-Link dropdown sizes itself from the same number.
+esphome:
+  name: t-multilink
+  devices:
+    - id: link1
+      name: "Serin Link 1"
+    - id: link2
+      name: "Serin Link 2"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 2
+  link_devices: [link1, link2]
+  hvac_link_sensor: hp_ok
+  pair_button:
+    window: 45s
+  link_sensor:
+    temperature:
+      name: "Serin Link Temperature"
+    primary_select:
+    on_room_temperature:
+      - logger.log: "room temp from link"
+  diagnostics:
+    connected:
+
+binary_sensor:
+  - platform: template
+    id: hp_ok
+    name: "HP OK"

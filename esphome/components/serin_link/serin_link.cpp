@@ -346,8 +346,14 @@ bool SerinLinkComponent::hvac_get_state(sl2_hvac_state_t *out) {
   }
 
   auto traits = climate_->get_traits();
+  /* lambda or sensor, never both (schema-enforced) — either one makes the
+   * signal explicit and turns the NaN-room-temp heuristic off. */
+  const bool has_link_src = static_cast<bool>(hvac_link_fn_) || hvac_link_sensor_ != nullptr;
+  const bool link_val = hvac_link_fn_          ? hvac_link_fn_()
+                        : hvac_link_sensor_    ? hvac_link_sensor_->state
+                                               : false;
   out->hvac_link = sl2_hvac_link_infer(
-      static_cast<bool>(hvac_link_fn_), hvac_link_fn_ ? hvac_link_fn_() : false,
+      has_link_src, link_val,
       traits.has_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE),
       climate_->current_temperature);
   out->mode = mode_to_sl2(climate_->mode);
@@ -878,6 +884,13 @@ void SerinLinkComponent::publish_dial_(bool stale) {
     sl2_fmt_mac(dial_mac_, mac);
     if (dial_mac_sensor_->state != mac) dial_mac_sensor_->publish_state(mac);
   }
+  /* on_room_temperature: — same gate as the HA publish (frame-driven,
+   * deduped), plus the selected-source guard: cycling the Serin Link's room
+   * source back to Internal must stop the feed, with no YAML condition. */
+  if (room_src_is_link()) {
+    const float t = dial_temp_dc_ / 10.0f;
+    for (auto *trig : room_temp_triggers_) trig->trigger(t);
+  }
 }
 
 /* trampolines: sl2 C hooks -> the component */
@@ -1199,6 +1212,15 @@ void SerinLinkComponent::loop() {
 void SerinLinkComponent::publish_diagnostics_(uint32_t now) {
   const bool prime = !diag_primed_;
   diag_primed_ = true;
+
+  if (connected_sensor_ != nullptr) {
+    const bool live = sl2_link_any_live(&link_);
+    if (prime || !pub_any_live_valid_ || live != pub_any_live_) {
+      pub_any_live_ = live;
+      pub_any_live_valid_ = true;
+      connected_sensor_->publish_state(live);
+    }
+  }
 
   const int n = sl2_link_dial_count(&link_);
   if (bonded_count_sensor_ != nullptr && (prime || n != pub_bonded_count_)) {

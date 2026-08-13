@@ -17,12 +17,22 @@ import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome import automation
 from esphome.core import HexInt
-from esphome.components import binary_sensor, climate, select, sensor, text_sensor
+from esphome.components import (
+    binary_sensor,
+    button,
+    climate,
+    select,
+    sensor,
+    text_sensor,
+)
 from esphome.const import (
+    CONF_DEVICE_ID,
     CONF_HUMIDITY,
     CONF_ID,
     CONF_MAC_ADDRESS,
+    CONF_NAME,
     CONF_TEMPERATURE,
+    CONF_TRIGGER_ID,
     DEVICE_CLASS_CONNECTIVITY,
     DEVICE_CLASS_DURATION,
     DEVICE_CLASS_HUMIDITY,
@@ -43,13 +53,16 @@ DEPENDENCIES = ["wifi", "esp32"]
 # when no entity is bound — spike mode); an actual entity is still optional.
 # select/sensor/text_sensor are auto-loaded so the optional bindings always
 # compile.
-AUTO_LOAD = ["binary_sensor", "climate", "select", "sensor", "text_sensor"]
+AUTO_LOAD = ["binary_sensor", "button", "climate", "select", "sensor", "text_sensor"]
 
 serin_link_ns = cg.esphome_ns.namespace("serin_link")
 SerinLinkComponent = serin_link_ns.class_("SerinLinkComponent", cg.Component)
 
 PrimaryLinkSelect = serin_link_ns.class_(
     "PrimaryLinkSelect", select.Select, cg.Parented.template(SerinLinkComponent)
+)
+PairLinkButton = serin_link_ns.class_(
+    "PairLinkButton", button.Button, cg.Parented.template(SerinLinkComponent)
 )
 
 PairStartAction = serin_link_ns.class_("PairStartAction", automation.Action)
@@ -60,6 +73,12 @@ ForgetAllDialsAction = serin_link_ns.class_("ForgetAllDialsAction", automation.A
 CONF_ZONE_NAME = "zone_name"
 CONF_CLIMATE_ID = "climate_id"
 CONF_HVAC_LINK = "hvac_link"
+CONF_HVAC_LINK_SENSOR = "hvac_link_sensor"
+CONF_MAX_LINKS = "max_links"
+CONF_LINK_DEVICES = "link_devices"
+CONF_PAIR_BUTTON = "pair_button"
+CONF_CONNECTED = "connected"
+CONF_ON_ROOM_TEMPERATURE = "on_room_temperature"
 CONF_VANE_V_SELECT = "vane_v_select"
 CONF_VANE_H_SELECT = "vane_h_select"
 CONF_CMD_DEBOUNCE = "cmd_debounce"
@@ -110,6 +129,19 @@ SL2_MAX_DIALS = 4
 # refused — so the count comes from `slots:`, defaulting to however many
 # `links:` rows the diagnostics block declares.
 PRIMARY_AUTO_LABEL = "Auto (last reporting)"
+
+_PRIMARY_SELECT_SCHEMA = select.select_schema(
+    PrimaryLinkSelect,
+    entity_category=ENTITY_CATEGORY_CONFIG,
+).extend(
+    {
+        # How many Serin Links this install can hold, i.e. how many entries
+        # the dropdown offers besides "Auto". Defaults to the number of
+        # `links:` rows under diagnostics: (which max_links: generates), or
+        # all SL2_MAX_DIALS slots when there is no diagnostics block.
+        cv.Optional(CONF_SLOTS): cv.int_range(min=1, max=SL2_MAX_DIALS),
+    }
+)
 
 
 def primary_select_options(slots):
@@ -162,23 +194,31 @@ LINK_SENSOR_SCHEMA = cv.Schema(
         # exclusive with primary_link: (below), so there is never a precedence
         # question between a compile-time pin and a stored one. The chosen
         # Serin Link is persisted by MAC, so it survives a reboot and follows
-        # its Link across the slot shuffle a forget causes.
-        cv.Optional(CONF_PRIMARY_SELECT): select.select_schema(
-            PrimaryLinkSelect,
-            entity_category=ENTITY_CATEGORY_CONFIG,
-        ).extend(
-            {
-                # How many Serin Links this install can hold, i.e. how many
-                # entries the dropdown offers besides "Auto". Defaults to the
-                # number of `links:` rows under diagnostics:, or all
-                # SL2_MAX_DIALS slots when there is no diagnostics block.
-                cv.Optional(CONF_SLOTS): cv.int_range(min=1, max=SL2_MAX_DIALS),
-            }
+        # its Link across the slot shuffle a forget causes. Bare
+        # `primary_select:` gets a default name, like pair_button:.
+        cv.Optional(CONF_PRIMARY_SELECT): lambda value: _PRIMARY_SELECT_SCHEMA(
+            {CONF_NAME: "Primary Serin Link", **(value or {})}
+            if value is None or isinstance(value, dict)
+            else value
         ),
         # 90s = three missed 20s Serin Link keepalives plus slack.
         cv.Optional(
             CONF_STALE_AFTER, default="90s"
         ): cv.positive_time_period_milliseconds,
+        # on_room_temperature: — fires with x (°C) when a usable reading
+        # arrives: non-NaN, from the arbitrated primary Link, and only while
+        # the Serin Link is the SELECTED room source, so cycling back to
+        # Internal on it stops the feed with no condition in the YAML. This
+        # replaces the guarded on_value recipe the examples used to carry —
+        # the typical body is one line:
+        #   - lambda: 'id(hvac).set_remote_temperature(x);'
+        cv.Optional(CONF_ON_ROOM_TEMPERATURE): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                    automation.Trigger.template(cg.float_)
+                ),
+            }
+        ),
     }
 )
 
@@ -266,8 +306,42 @@ def _max_link_rows(value):
     return value
 
 
+# pair_button: — a component-owned Pair button, replacing the template-button
+# + lambda recipe every example carried. Bare `pair_button:` gets a default
+# name; window: is the pairing window it opens.
+PAIR_BUTTON_SCHEMA = button.button_schema(PairLinkButton).extend(
+    {
+        cv.Optional(CONF_WINDOW, default="60s"): cv.positive_time_period_milliseconds,
+    }
+)
+
+
+def _pair_button_schema(value):
+    # Bare `pair_button:` (None) and dicts get the default name; anything
+    # else falls through for the schema to reject with a real error.
+    if value is None or isinstance(value, dict):
+        value = {CONF_NAME: "Pair Serin Link", **(value or {})}
+    return PAIR_BUTTON_SCHEMA(value)
+
+
+# diagnostics: connected: — "is any bonded Serin Link alive", the component-
+# owned form of the template binary_sensor over any_dial_live() the examples
+# used to declare. Not per-slot (the links: rows carry that); this is the one
+# a dashboard card wants.
+CONNECTED_SCHEMA = binary_sensor.binary_sensor_schema(
+    device_class=DEVICE_CLASS_CONNECTIVITY,
+)
+
+
+def _connected_schema(value):
+    if value is None or isinstance(value, dict):
+        value = {CONF_NAME: "Serin Link Connected", **(value or {})}
+    return CONNECTED_SCHEMA(value)
+
+
 DIAGNOSTICS_SCHEMA = cv.Schema(
     {
+        cv.Optional(CONF_CONNECTED): _connected_schema,
         cv.Optional(CONF_BONDED_COUNT): sensor.sensor_schema(
             accuracy_decimals=0,
             state_class=STATE_CLASS_MEASUREMENT,
@@ -297,17 +371,32 @@ def _diagnostics_schema(value):
 
 # esp-idf framework required (raw nvs_*, esp_now encrypted peers);
 # it is ESPHome's ESP32 default. (cv.only_with_esp_idf was removed in 2026.x.)
-CONFIG_SCHEMA = cv.Schema(
+_BASE_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(SerinLinkComponent),
         cv.Optional(CONF_CLIMATE_ID): cv.use_id(climate.Climate),
         cv.Optional(CONF_ZONE_NAME, default=""): cv.string,
+        # max_links: — how many Serin Links this install holds, stated ONCE.
+        # It generates the per-slot diagnostics entities (so a hand-written
+        # links: list is only for custom naming) and sizes the primary-Link
+        # dropdown. See _expand_max_links for what a mismatch rejects.
+        cv.Optional(CONF_MAX_LINKS): cv.int_range(min=1, max=SL2_MAX_DIALS),
+        # link_devices: — optional HA sub-device grouping for the generated
+        # slot entities: one esphome:-devices: id per slot, in slot order.
+        # The generated entities then carry short names ("MAC") scoped to
+        # their sub-device instead of "Serin Link N MAC" flat on the node.
+        cv.Optional(CONF_LINK_DEVICES): cv.ensure_list(cv.string_strict),
         # Device-link health for the STATE hvac_link flag (drives the Link's
         # offline face). A generic climate entity exists whether or not the
         # device behind it answers, so bind the platform's own signal here,
         # e.g. cn105: `hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'`
         # Unset: NaN room temp on an entity that claims one = link down.
         cv.Optional(CONF_HVAC_LINK): cv.returning_lambda,
+        # hvac_link_sensor: — the same signal from a binary_sensor the config
+        # already has, for platforms that expose their link health as an
+        # entity. Mutually exclusive with hvac_link: (enforced below): both
+        # answer "is the device behind the climate entity actually talking".
+        cv.Optional(CONF_HVAC_LINK_SENSOR): cv.use_id(binary_sensor.BinarySensor),
         # Vane axes for platforms that expose vanes as select entities (e.g.
         # cn105's vertical_vane_select / horizontal_vane_select): the option
         # list defines the wire positions IN ORDER; options named "auto" or
@@ -344,10 +433,90 @@ CONFIG_SCHEMA = cv.Schema(
         # either alone is fine — the other half rides as n/a.
         cv.Optional(CONF_POWER_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_ENERGY_SENSOR): cv.use_id(sensor.Sensor),
+        cv.Optional(CONF_PAIR_BUTTON): _pair_button_schema,
         cv.Optional(CONF_LINK_SENSOR): _link_sensor_schema,
         cv.Optional(CONF_DIAGNOSTICS): _diagnostics_schema,
     }
 ).extend(cv.COMPONENT_SCHEMA)
+
+
+# The four entities every bond slot gets, with their in-sub-device names.
+_ROW_ENTITIES = (
+    (CONF_MAC_ADDRESS, "MAC"),
+    (CONF_LINKED, "Connected"),
+    (CONF_LAST_SEEN, "Last Seen"),
+    (CONF_FIRMWARE, "Firmware"),
+)
+
+
+def _expand_max_links(config):
+    """Cross-key checks, then expand max_links into diagnostics.links rows.
+
+    Expansion happens HERE, at validation time, so to_code sees exactly what
+    a hand-written config would produce — the generated rows go through
+    LINK_ROW_SCHEMA like user-typed ones (auto IDs, device_id resolution),
+    and the primary-select slot default (len of the rows) needs no new rule.
+    """
+    if CONF_HVAC_LINK in config and CONF_HVAC_LINK_SENSOR in config:
+        raise cv.Invalid(
+            f"`{CONF_HVAC_LINK}:` and `{CONF_HVAC_LINK_SENSOR}:` both bind "
+            f"device-link health — set one, not both"
+        )
+    n = config.get(CONF_MAX_LINKS)
+    devs = config.get(CONF_LINK_DEVICES)
+    if devs is not None:
+        if n is None:
+            n = len(devs)
+            if n > SL2_MAX_DIALS:
+                raise cv.Invalid(
+                    f"`{CONF_LINK_DEVICES}:` names {n} devices but the bond "
+                    f"table holds at most {SL2_MAX_DIALS} Serin Links"
+                )
+        elif len(devs) != n:
+            raise cv.Invalid(
+                f"`{CONF_LINK_DEVICES}:` names {len(devs)} devices but "
+                f"`{CONF_MAX_LINKS}:` is {n} — one device per slot, in slot "
+                f"order"
+            )
+    if n is None:
+        return config
+    config = dict(config)
+    diag = dict(config.get(CONF_DIAGNOSTICS) or {})
+    rows = diag.get(CONF_LINKS)
+    if rows is not None:
+        # A hand-written links: list is for custom naming, not a second place
+        # to state the count — the two must agree, and per-row device_id
+        # belongs on those rows rather than in link_devices:.
+        if devs is not None:
+            raise cv.Invalid(
+                f"`{CONF_LINK_DEVICES}:` only applies to generated rows; "
+                f"with an explicit `{CONF_LINKS}:` list, put `device_id:` on "
+                f"each row's entities instead"
+            )
+        if len(rows) != n:
+            raise cv.Invalid(
+                f"`{CONF_LINKS}:` declares {len(rows)} rows but "
+                f"`{CONF_MAX_LINKS}:` is {n} — they describe the same slots "
+                f"and must agree (drop the list unless you need custom names)"
+            )
+        return config
+    generated = []
+    for i in range(n):
+        row = {}
+        for key, label in _ROW_ENTITIES:
+            ent = (
+                {CONF_NAME: label, CONF_DEVICE_ID: devs[i]}
+                if devs is not None
+                else {CONF_NAME: f"Serin Link {i + 1} {label}"}
+            )
+            row[key] = ent
+        generated.append(LINK_ROW_SCHEMA(row))
+    diag[CONF_LINKS] = generated
+    config[CONF_DIAGNOSTICS] = diag
+    return config
+
+
+CONFIG_SCHEMA = cv.All(_BASE_SCHEMA, _expand_max_links)
 
 
 def _no_builtin_espnow(config):
@@ -481,6 +650,14 @@ async def to_code(config):
             config[CONF_HVAC_LINK], [], return_type=cg.bool_
         )
         cg.add(var.set_hvac_link_lambda(lam))
+    if CONF_HVAC_LINK_SENSOR in config:
+        sens = await cg.get_variable(config[CONF_HVAC_LINK_SENSOR])
+        cg.add(var.set_hvac_link_sensor(sens))
+    if CONF_PAIR_BUTTON in config:
+        pb = config[CONF_PAIR_BUTTON]
+        btn = await button.new_button(pb)
+        await cg.register_parented(btn, var)
+        cg.add(btn.set_window(pb[CONF_WINDOW].total_milliseconds))
     if CONF_VANE_V_SELECT in config:
         sel = await cg.get_variable(config[CONF_VANE_V_SELECT])
         cg.add(var.set_vane_v_select(sel))
@@ -535,8 +712,18 @@ async def to_code(config):
                     await text_sensor.new_text_sensor(ls[CONF_LINK_MAC])
                 )
             )
+        for conf in ls.get(CONF_ON_ROOM_TEMPERATURE, []):
+            trig = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
+            cg.add(var.add_room_temp_trigger(trig))
+            await automation.build_automation(trig, [(cg.float_, "x")], conf)
     if CONF_DIAGNOSTICS in config:
         diag = config[CONF_DIAGNOSTICS]
+        if CONF_CONNECTED in diag:
+            cg.add(
+                var.set_connected_sensor(
+                    await binary_sensor.new_binary_sensor(diag[CONF_CONNECTED])
+                )
+            )
         if CONF_BONDED_COUNT in diag:
             cg.add(
                 var.set_bonded_count_sensor(
