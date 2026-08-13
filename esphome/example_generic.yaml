@@ -16,7 +16,12 @@ esp32:
     type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
-  - source: github://Serin-Labs/serin-link-core@v0.1.1   # or type: local / path: ...
+  - source:
+      type: local
+      path: ../esphome/components
+      # no published tag has the telemetry keys below yet (v0.1.2 predates
+      # them); TODO(release): once one ships, point this at
+      # github://Serin-Labs/serin-link-core@vX.Y.Z instead.
     components: [serin_link]
 
 wifi:
@@ -28,17 +33,23 @@ api:
 ota:
   - platform: esphome
 
-# Any climate platform works. `thermostat` shown as the generic example:
-sensor:
-  - platform: homeassistant
-    id: room_temp
-    entity_id: sensor.guest_room_temperature
+# Any climate platform works. `thermostat` shown as the generic example, its
+# sensor: wired to the dial's own reading (dial_temp, declared under
+# serin_link: below).
+#
+# Non-dial alternative: an existing HA sensor as the control temperature —
+# swap this back in for `sensor: dial_temp` below if you'd rather not have
+# the dial drive the thermostat.
+# sensor:
+#   - platform: homeassistant
+#     id: room_temp
+#     entity_id: sensor.guest_room_temperature
 
 climate:
   - platform: thermostat
     id: hvac
     name: "Guest Room"
-    sensor: room_temp
+    sensor: dial_temp
     min_heating_off_time: 300s
     min_heating_run_time: 300s
     min_idle_time: 30s
@@ -64,6 +75,25 @@ serin_link:
   #                           # has one (see example_cn105.yaml); unset, a NaN
   #                           # room temp on an entity that claims one reports
   #                           # the link down (never-heard-from-device)
+  # The dial's own sensor — climate.sensor: above already points straight at
+  # dial_temp, no automation needed on this platform. Two ways this differs
+  # from cn105's recipe, both worth knowing before you deploy it:
+  #   - `thermostat` has exactly one sensor input, no internal thermistor
+  #     behind it, so there's nothing for the dial's Internal/Link cycle to
+  #     switch between here — the dial just IS the control sensor.
+  #   - No remote_temperature_timeout equivalent: if the dial goes stale,
+  #     the entity's temperature goes unknown rather than falling back.
+  link_sensor:
+    temperature:
+      id: dial_temp
+      name: "Serin Link Temperature"
+    humidity:
+      name: "Serin Link Humidity"
+    # Which dial is feeding. Only interesting when two dials bonded to one
+    # controller both offer a sensor: last reporting dial wins, so the value
+    # alternates and this names the culprit.
+    dial_mac:
+      name: "Serin Link"
 
 button:
   - platform: template

@@ -14,7 +14,17 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome.components import climate, select, sensor, text_sensor
-from esphome.const import CONF_ID
+from esphome.const import (
+    CONF_HUMIDITY,
+    CONF_ID,
+    CONF_TEMPERATURE,
+    DEVICE_CLASS_HUMIDITY,
+    DEVICE_CLASS_TEMPERATURE,
+    ENTITY_CATEGORY_DIAGNOSTIC,
+    STATE_CLASS_MEASUREMENT,
+    UNIT_CELSIUS,
+    UNIT_PERCENT,
+)
 
 CODEOWNERS = ["@Serin-Labs"]
 DEPENDENCIES = ["wifi", "esp32"]
@@ -43,6 +53,54 @@ CONF_BATTERY_LOW_THRESHOLD = "battery_low_threshold"
 CONF_RUNTIME_SENSOR = "runtime_sensor"
 CONF_POWER_SENSOR = "power_sensor"
 CONF_ENERGY_SENSOR = "energy_sensor"
+
+CONF_LINK_SENSOR = "link_sensor"
+CONF_DIAL_MAC = "dial_mac"
+CONF_STALE_AFTER = "stale_after"
+
+# link_sensor: — entities fed by the DIAL's own sensor, owned by this
+# component (the bindings above point at entities the user already has; here
+# the dial is the data source, so there is nothing to bind to). Presence of
+# the block is the opt-in and is what sets SL2_FEAT_LINK_SENSOR: without it
+# the dial never transmits and its Settings never grow a room-source cycle,
+# so an existing config upgrades with no behavior change. Every child is
+# optional — `link_sensor: {}` means "accept the dial as a room source,
+# create no HA entities".
+LINK_SENSOR_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_TEMPERATURE): sensor.sensor_schema(
+            unit_of_measurement=UNIT_CELSIUS,
+            accuracy_decimals=1,
+            device_class=DEVICE_CLASS_TEMPERATURE,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        cv.Optional(CONF_HUMIDITY): sensor.sensor_schema(
+            unit_of_measurement=UNIT_PERCENT,
+            accuracy_decimals=0,
+            device_class=DEVICE_CLASS_HUMIDITY,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        # Which dial is currently feeding. Diagnostic: it only matters when
+        # two dials bonded to one controller both offer a sensor, where the
+        # value alternates between them (last reporting dial wins).
+        cv.Optional(CONF_DIAL_MAC): text_sensor.text_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        # 90s = three missed 20s dial keepalives plus slack.
+        cv.Optional(
+            CONF_STALE_AFTER, default="90s"
+        ): cv.positive_time_period_milliseconds,
+    }
+)
+
+
+def _link_sensor_schema(value):
+    # `link_sensor:` with no sub-keys parses as None, not {} — map it before
+    # the dict schema runs so the bare form (every child optional, meaning
+    # "accept the dial as a room source, create no HA entities") validates
+    # the same as the explicit `link_sensor: {}`.
+    return LINK_SENSOR_SCHEMA(value if value is not None else {})
+
 
 # esp-idf framework required (raw nvs_*, esp_now encrypted peers);
 # it is ESPHome's ESP32 default. (cv.only_with_esp_idf was removed in 2026.x.)
@@ -93,6 +151,7 @@ CONFIG_SCHEMA = cv.Schema(
         # either alone is fine — the other half rides as n/a.
         cv.Optional(CONF_POWER_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_ENERGY_SENSOR): cv.use_id(sensor.Sensor),
+        cv.Optional(CONF_LINK_SENSOR): _link_sensor_schema,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -149,6 +208,20 @@ async def to_code(config):
         )
     )
     cg.add(var.set_cmd_debounce(config[CONF_CMD_DEBOUNCE].total_milliseconds))
+    if CONF_LINK_SENSOR in config:
+        ls = config[CONF_LINK_SENSOR]
+        cg.add(var.set_link_sensor_enabled())
+        cg.add(var.set_dial_stale_after(ls[CONF_STALE_AFTER].total_milliseconds))
+        if CONF_TEMPERATURE in ls:
+            cg.add(var.set_dial_temp_sensor(await sensor.new_sensor(ls[CONF_TEMPERATURE])))
+        if CONF_HUMIDITY in ls:
+            cg.add(var.set_dial_hum_sensor(await sensor.new_sensor(ls[CONF_HUMIDITY])))
+        if CONF_DIAL_MAC in ls:
+            cg.add(
+                var.set_dial_mac_sensor(
+                    await text_sensor.new_text_sensor(ls[CONF_DIAL_MAC])
+                )
+            )
     # No IDF managed component is declared for crypto: Ed25519 + X25519 are
     # vendored (Monocypher, see the comment over the crypto hooks in
     # serin_link.cpp), and HMAC-SHA256 is pinned in-tree in sl2_sha256.h.

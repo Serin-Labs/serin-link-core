@@ -74,6 +74,39 @@ Complete examples in [`esphome/`](esphome/):
   surface without a heat pump attached, and a field-shaped CN105 config
   (remote HA temp sensor, diagnostics) with `serin_link` added.
 
+### The dial's own temperature sensor
+
+A Serin Link dial has a built-in temperature/humidity sensor. Add a
+`link_sensor:` block and it becomes two Home Assistant entities, and the dial
+offers itself to the heat pump as a room-temperature source (Settings →
+System on the dial cycles Internal / Link — plus Sensor if you've also bound
+a `battery_sensor:`):
+
+```yaml
+serin_link:
+  id: serin        # not `link` — that collides with libc link()
+  climate_id: hvac
+  link_sensor:
+    temperature:
+      name: "Serin Link Temperature"
+    humidity:
+      name: "Serin Link Humidity"
+```
+
+The block is the opt-in: without it the dial never transmits its reading and
+its Settings never grow the source cycle, so an existing config is unaffected
+by upgrading.
+
+The reading reaches Home Assistant either way. What it does to the *heat pump*
+is up to your climate platform, because ESPHome's `Climate` has no generic
+external-temperature input — see `example_cn105.yaml` (an `on_value:`
+automation into `set_remote_temperature`, gated on
+`id(serin).room_src_is_link()` so cycling back to Internal actually hands
+control back) or `example_generic.yaml` (the `thermostat` platform's
+`sensor:` points straight at the dial's reading — simpler, but with no
+`remote_temperature_timeout` equivalent: a stale dial leaves it with no
+control temperature at all, rather than falling back).
+
 ## Trust model
 
 Honest summary — the spec's §3 has the full story:

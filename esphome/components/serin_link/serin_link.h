@@ -65,6 +65,25 @@ class SerinLinkComponent : public Component {
   void set_power_sensor(sensor::Sensor *s) { power_sensor_ = s; }
   void set_energy_sensor(sensor::Sensor *s) { energy_sensor_ = s; }
 
+  /* link_sensor: — the dial's OWN room sensor (DIAL_SENSOR, wire spec §10d).
+   * Unlike the telemetry bindings above (which point at entities the user
+   * already has), these entities are owned by this component: the dial is
+   * the data source, so there is nothing pre-existing to bind to. Presence
+   * of the YAML block is the opt-in and gates SL2_FEAT_LINK_SENSOR. */
+  void set_link_sensor_enabled() { link_sensor_cfg_ = true; }
+  void set_dial_temp_sensor(sensor::Sensor *s) { dial_temp_sensor_ = s; }
+  void set_dial_hum_sensor(sensor::Sensor *s) { dial_hum_sensor_ = s; }
+  void set_dial_mac_sensor(text_sensor::TextSensor *s) { dial_mac_sensor_ = s; }
+  void set_dial_stale_after(uint32_t ms) { dial_stale_ms_ = ms; }
+
+  /* A bonded dial reported its own room sensor (called from the trampoline). */
+  void room_sensor_feed(const uint8_t src_mac[6],
+                        const struct sl2_dial_sensor_pkt *p, bool is_edit);
+
+  /* For actuation automations in YAML: only feed the heat pump when the
+   * dial actually selected itself as the room source. */
+  bool room_src_is_link() const { return selected_src_ == SL2_ROOMSRC_LINK; }
+
   /* For template buttons / lambdas in YAML. */
   void pair_start(uint32_t window_ms = 60000) { sl2_link_pair_start(&link_, window_ms); }
   void pair_cancel() { sl2_link_pair_cancel(&link_); }
@@ -121,6 +140,31 @@ class SerinLinkComponent : public Component {
   /* low-battery hysteresis latch: on at <= threshold, off at >= threshold+5
    * (a cell hovering at the line must not flap the dial's home-face chip) */
   bool batt_low_latch_{false};
+  /* Publish the dial reading to HA. stale=true publishes NAN (HA renders it
+   * as unknown rather than a frozen number) and latches until a fresh
+   * reading arrives. */
+  void publish_dial_(bool stale);
+  bool link_sensor_cfg_{false};
+  sensor::Sensor *dial_temp_sensor_{nullptr};
+  sensor::Sensor *dial_hum_sensor_{nullptr};
+  text_sensor::TextSensor *dial_mac_sensor_{nullptr};
+  uint32_t dial_stale_ms_{90000};
+  int16_t dial_temp_dc_{SL2_DC_NA};
+  uint8_t dial_hum_pct_{SL2_HUM_NA};
+  /* millis() of the last frame carrying a VALID temperature; 0 = never.
+   * Freshness follows the TEMPERATURE, not the frame: a dial with sensing
+   * hardware but no reading yet must not hold off the stale watchdog. */
+  uint32_t dial_temp_ms_{0};
+  bool dial_has_sensor_{false};
+  uint8_t dial_mac_[6]{};
+  int16_t dial_pub_dc_{SL2_DC_NA};   /* last value published to HA */
+  uint32_t dial_pub_ms_{0};          /* millis() of that publish; 0 = never */
+  bool dial_stale_{false};           /* NAN already published */
+  uint32_t last_dial_check_ms_{0};
+  /* Health of the SELECTED room source, for the ROOM_SRC TLV. */
+  uint8_t room_src_status_() const;
+  uint8_t selected_src_{SL2_ROOMSRC_INTERNAL};
+  ESPPreferenceObject room_src_pref_;
   ESPPreferenceObject caps_fp_pref_;   /* fingerprint: announce caps changes */
   std::vector<climate::ClimateFanMode> fan_detents_;
   bool fan_has_auto_{false};

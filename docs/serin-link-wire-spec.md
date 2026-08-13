@@ -703,6 +703,10 @@ Normative rules:
 - **Second temperature sensor / follow-me:** implemented as `DIAL_SENSOR`
   (§10d). Arbitration is per-controller and does not yet pin *which* dial's
   sensor is the source when several dials on the same controller offer one.
+  Both existing adopters resolve it the same way — last reporting dial wins —
+  and the ESPHome component additionally accepts a `BLE` selection it cannot
+  serve, reporting `UNAVAILABLE`, because a rejected edit is re-sent
+  indefinitely (§10d has no give-up rule for the dial).
 - **Other carriers:** §1 note — packet layer is carrier-neutral; port owns
   discovery.
 - **Bigger vane arrays / 4-way cassettes:** nibble caps positions at 15; beyond

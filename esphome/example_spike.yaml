@@ -40,6 +40,17 @@ ota:
 serin_link:
   id: serin
   zone_name: "Spike Bench"
+  # No climate entity to feed here, but this exercises the link_sensor:
+  # codegen path (owned sensor/text_sensor entities + stale_after) so CI
+  # compiles it.
+  link_sensor:
+    temperature:
+      name: "Spike Dial Temperature"
+    humidity:
+      name: "Spike Dial Humidity"
+    dial_mac:
+      name: "Spike Dial"
+    stale_after: 60s
 
 button:
   - platform: template

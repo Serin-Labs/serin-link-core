@@ -55,6 +55,8 @@ climate:
     id: hvac         # <- serin_link binds this
     name: "Living Room"
     update_interval: 2s
+    remote_temperature_timeout: 3min   # cn105 reverts to its internal
+                                       # thermistor if the dial goes quiet
     # Vanes: cn105 exposes them as select entities; give them ids and bind
     # them below so the dial gets both axes (option order = wire positions,
     # "auto"/"swing" options map to the wire AUTO/SWING codes).
@@ -123,6 +125,26 @@ serin_link:
   runtime_sensor: runtime_h
   power_sensor: input_w
   energy_sensor: kwh_total
+  # The dial's own SHT4x, published to Home Assistant and offered to the heat
+  # pump as a room-temperature source. Adding this block is what makes the
+  # dial transmit at all, and what puts the source cycle in its Settings.
+  link_sensor:
+    temperature:
+      id: dial_temp
+      name: "Serin Link Temperature"
+      # Feed the heat pump ONLY while the dial is the selected source —
+      # cycling back to Internal on the dial must actually hand control back.
+      # The stale edge (§2 of the design doc) publishes NAN; guard it here
+      # rather than assume the platform does — cn105 upstream happens to,
+      # but this recipe is copied to platforms that may not.
+      on_value:
+        - if:
+            condition:
+              lambda: 'return !std::isnan(x) && id(serin).room_src_is_link();'
+            then:
+              - lambda: 'id(hvac).set_remote_temperature(x);'
+    humidity:
+      name: "Serin Link Humidity"
 
 button:
   - platform: template

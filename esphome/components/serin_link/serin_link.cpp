@@ -591,6 +591,7 @@ bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
       sub_mode_sensor_ != nullptr || auto_sub_mode_sensor_ != nullptr)
     out->features |= SL2_FEAT_COMPRESSOR;
   if (battery_sensor_ != nullptr) out->features |= SL2_FEAT_SENSOR_BATT;
+  if (link_sensor_cfg_) out->features |= SL2_FEAT_LINK_SENSOR;
   if (runtime_sensor_ != nullptr) out->features |= SL2_FEAT_RUNTIME;
   if (power_sensor_ != nullptr || energy_sensor_ != nullptr)
     out->features |= SL2_FEAT_ENERGY;
@@ -717,7 +718,137 @@ size_t SerinLinkComponent::fill_info_tlvs(uint8_t *buf, size_t cap) {
       wh = f_to_u32(energy_sensor_->state * 1000.0f, 0xFFFFFFFE);  /* kWh -> Wh */
     sl2_info_put_energy(buf, cap, &off, w, wh);
   }
+  /* Feature bit = capability, TLV presence = current validity (spec §9): a
+   * node that did not opt in emits neither. */
+  if (link_sensor_cfg_)
+    sl2_info_put_room_src(buf, cap, &off, selected_src_, room_src_status_());
   return off;
+}
+
+/* The three source values a dial may legally request over the wire — shared
+ * between the edit path (room_sensor_feed) and the NVS load (setup()) so an
+ * out-of-range byte can't reach the wire from either origin. BLE is included
+ * even though this component has no BLE room source to honor: accepting it
+ * into selected_src_ resolves to UNAVAILABLE rather than being rejected (see
+ * the design doc §3 and the comment in room_sensor_feed). */
+static bool is_room_src_valid(uint8_t v) {
+  return v == SL2_ROOMSRC_INTERNAL || v == SL2_ROOMSRC_BLE || v == SL2_ROOMSRC_LINK;
+}
+
+uint8_t SerinLinkComponent::room_src_status_() const {
+  switch (selected_src_) {
+    case SL2_ROOMSRC_LINK:
+      /* No sensing hardware is a permanent no, not a pending timeout: report
+       * it immediately rather than making the user wait out stale_after for
+       * an answer that can never change. This is what SL2_DSF_HAS_SENSOR is
+       * for, and the same use the reference controller puts it to. */
+      if (!dial_has_sensor_ || dial_temp_ms_ == 0) return SL2_ROOMST_UNAVAILABLE;
+      return (millis() - dial_temp_ms_ >= dial_stale_ms_) ? SL2_ROOMST_STALE
+                                                          : SL2_ROOMST_OK;
+    case SL2_ROOMSRC_BLE:
+      /* Selectable on the dial (SL2_FEAT_SENSOR_BATT) but this component has
+       * no BLE room source to feed from: selected, never had a reading. */
+      return SL2_ROOMST_UNAVAILABLE;
+    default:
+      /* Internal — the heat pump's own thermistor has no failure mode. */
+      return SL2_ROOMST_OK;
+  }
+}
+
+void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
+                                          const struct sl2_dial_sensor_pkt *p,
+                                          bool is_edit) {
+  /* The trampoline is installed unconditionally (see setup()) — without
+   * SL2_FEAT_LINK_SENSOR in CAPS a conforming dial never sends DIAL_SENSOR at
+   * all, so this is unreachable today. It's here so a disabled feature can't
+   * be made to write NVS by a nonconforming dial. */
+  if (!link_sensor_cfg_) return;
+
+  /* The core did the length check (a short frame is reading-only, decided by
+   * LENGTH never by value — the zero-filled want_src of a truncated frame
+   * means Internal and would silently switch the source). Trust is_edit; the
+   * VALUE still needs validating, it crossed the air.
+   *
+   * Any of the three known sources is accepted, including BLE, which this
+   * component can never honor — the dial offers it whenever the controller
+   * sets SL2_FEAT_SENSOR_BATT, i.e. merely by binding battery_sensor:.
+   * Rejecting it (what the reference controller does) would be worse than
+   * useless here: the dial re-sends until INFO echoes the source it asked
+   * for, with no timeout, so a rejected edit repeats at ~3 Hz forever.
+   * Accepting it and reporting UNAVAILABLE is exactly what that status code
+   * means, ends the retry, and tells the user the truth on the dial's face.
+   * See the design doc §3. */
+  if (is_edit && is_room_src_valid(p->want_src) && selected_src_ != p->want_src) {
+    selected_src_ = p->want_src;
+    room_src_pref_.save(&selected_src_);
+    ESP_LOGI(TAG, "room source -> %u (set from dial)",
+             static_cast<unsigned>(selected_src_));
+  }
+
+  /* The tracked dial may clear its own has-sensor flag without sending a
+   * reading — a permanent "no", which resolves to UNAVAILABLE rather than
+   * waiting out stale_after. Only the dial already on display may do this:
+   * another dial's edit-only frame must not speak for this one. */
+  if (src_mac != nullptr && memcmp(dial_mac_, src_mac, 6) == 0)
+    dial_has_sensor_ = (p->flags & SL2_DSF_HAS_SENSOR) != 0;
+  const bool got_temp = p->temp_dc != SL2_DC_NA;
+  if (!got_temp) return;
+
+  /* dial_mac_ and (below) dial_hum_pct_ describe "the dial whose reading is
+   * on display" — adopt them only from a frame that actually carries one,
+   * so an edit-only frame (no reading: a sensorless dial, or a source edit
+   * before its ack) can't silently re-label the entity or leak another
+   * dial's humidity in. dial_has_sensor_ is handled above (the tracked
+   * dial may update it from an edit-only frame too) but still needs the
+   * unconditional assignment below to cover a newly-adopted dial, since the
+   * MAC-scoped check above ran before dial_mac_ picks up this frame's
+   * source. Humidity additionally needs a same-source check of its own:
+   * temp_dc and hum_pct have independent NA sentinels, so one dial's
+   * frame may carry a value the other's doesn't — if the reporting dial
+   * just changed, drop the outgoing dial's humidity before this frame's
+   * fields apply, so it can never be republished under the new dial's MAC. */
+  if (src_mac != nullptr && memcmp(dial_mac_, src_mac, 6) != 0) {
+    dial_hum_pct_ = SL2_HUM_NA;
+    memcpy(dial_mac_, src_mac, 6);
+  }
+  dial_has_sensor_ = (p->flags & SL2_DSF_HAS_SENSOR) != 0;
+  if (p->hum_pct != SL2_HUM_NA) dial_hum_pct_ = p->hum_pct;
+  dial_temp_dc_ = p->temp_dc;
+  dial_temp_ms_ = millis();
+
+  /* Publishing is frame-driven, never timed (the stale path in loop() is the
+   * one exception, because it fires on the ABSENCE of frames). Dedup matters:
+   * in steady state the dial sends every 20 s or on a 0.5 C change, but while
+   * a source edit is unconfirmed it re-sends every link-task pass — ~3 Hz —
+   * until INFO echoes the source it asked for. Publishing per frame would
+   * spray HA with duplicates for the whole confirmation window. */
+  const bool changed = dial_temp_dc_ != dial_pub_dc_;
+  const bool due = dial_pub_ms_ == 0 || millis() - dial_pub_ms_ >= 30000;
+  if (changed || due || dial_stale_) publish_dial_(false);
+}
+
+void SerinLinkComponent::publish_dial_(bool stale) {
+  dial_stale_ = stale;
+  if (stale) {
+    if (dial_temp_sensor_ != nullptr) dial_temp_sensor_->publish_state(NAN);
+    if (dial_hum_sensor_ != nullptr) dial_hum_sensor_->publish_state(NAN);
+    return;
+  }
+  dial_pub_dc_ = dial_temp_dc_;
+  dial_pub_ms_ = millis();
+  if (dial_temp_sensor_ != nullptr)
+    dial_temp_sensor_->publish_state(dial_temp_dc_ / 10.0f);
+  /* Humidity rides the temperature's publish decision — one gate, both
+   * entities — so the two never drift apart in HA's history. */
+  if (dial_hum_sensor_ != nullptr && dial_hum_pct_ != SL2_HUM_NA)
+    dial_hum_sensor_->publish_state(dial_hum_pct_);
+  if (dial_mac_sensor_ != nullptr) {
+    char mac[18];
+    std::snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X",
+                  dial_mac_[0], dial_mac_[1], dial_mac_[2],
+                  dial_mac_[3], dial_mac_[4], dial_mac_[5]);
+    if (dial_mac_sensor_->state != mac) dial_mac_sensor_->publish_state(mac);
+  }
 }
 
 /* trampolines: sl2 C hooks -> the component */
@@ -732,6 +863,10 @@ static bool t_get_caps(void *ctx, struct sl2_caps_pkt *out) {
 }
 static size_t t_tlvs(void *ctx, uint8_t *buf, size_t cap) {
   return static_cast<SerinLinkComponent *>(ctx)->fill_info_tlvs(buf, cap);
+}
+static void t_room_sensor(void *ctx, const uint8_t src_mac[6],
+                          const struct sl2_dial_sensor_pkt *p, bool is_edit) {
+  static_cast<SerinLinkComponent *>(ctx)->room_sensor_feed(src_mac, p, is_edit);
 }
 
 /* ── component ────────────────────────────────────────────────────────── */
@@ -755,6 +890,10 @@ void SerinLinkComponent::setup() {
 
   use_f_pref_ = global_preferences->make_preference<bool>(0x53324C55 /* 'S2LU' */);
   use_f_pref_.load(&use_f_);
+
+  room_src_pref_ = global_preferences->make_preference<uint8_t>(0x53325253 /* 'S2RS' */);
+  if (!room_src_pref_.load(&selected_src_) || !is_room_src_valid(selected_src_))
+    selected_src_ = SL2_ROOMSRC_INTERNAL;
 
   esp_err_t err = esp_now_init();
   if (err != ESP_OK) {
@@ -803,6 +942,10 @@ void SerinLinkComponent::setup() {
   hvac_.apply = t_apply;
   hvac_.get_caps = t_get_caps;
   hvac_.fill_info_tlvs = t_tlvs;
+  /* Installed unconditionally: without SL2_FEAT_LINK_SENSOR in CAPS the dial
+   * never sends DIAL_SENSOR at all, so an unconfigured node simply never
+   * calls this — no need for a second gate here. */
+  hvac_.room_sensor = t_room_sensor;
   hvac_.wifi_creds = nullptr;  /* Link-OTA creds relay: future work */
 
   sl2_link_init(&link_, &port_, &crypto_, &hvac_);
@@ -860,6 +1003,18 @@ void SerinLinkComponent::loop() {
       esp_wifi_set_ps(WIFI_PS_NONE);
     }
   }
+  /* Dial room sensor: 1 Hz stale edge. Frame-driven publishing lives in
+   * room_sensor_feed(); this is the one publish path that fires on the
+   * ABSENCE of frames, so it cannot live there. */
+  if (link_sensor_cfg_ && now - last_dial_check_ms_ >= 1000) {
+    last_dial_check_ms_ = now;
+    if (!dial_stale_ && dial_temp_ms_ != 0 &&
+        now - dial_temp_ms_ >= dial_stale_ms_) {
+      ESP_LOGW(TAG, "dial room sensor stale (%" PRIu32 " ms) — publishing unknown",
+               now - dial_temp_ms_);
+      publish_dial_(true);
+    }
+  }
   sl2_rxq_frame_t f;
   while (sl2_rxq_pop(&rxq_, &f)) {
     ESP_LOGV(TAG, "rx type=%u len=%u from %02X:%02X:%02X:%02X:%02X:%02X",
@@ -888,6 +1043,10 @@ void SerinLinkComponent::dump_config() {
                 battery_sensor_ ? " sensor_batt" : "",
                 runtime_sensor_ ? " runtime" : "",
                 (power_sensor_ || energy_sensor_) ? " energy" : "");
+  if (link_sensor_cfg_)
+    ESP_LOGCONFIG(TAG, "  dial room sensor: accepted, stale after %" PRIu32
+                  " ms, source=%u", dial_stale_ms_,
+                  static_cast<unsigned>(selected_src_));
   ESP_LOGCONFIG(TAG, "  bonded dials: %d", sl2_link_dial_count(&link_));
   ESP_LOGCONFIG(TAG, "  rxq dropped: %u", static_cast<unsigned>(rxq_.dropped));
 }
