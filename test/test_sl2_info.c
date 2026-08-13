@@ -95,6 +95,26 @@ static void test_energy(void) {
     assert(v[2] == 0xFF && v[3] == 0xFF && v[4] == 0xFF && v[5] == 0xFF);
 }
 
+static void test_room_src(void) {
+    uint8_t buf[16];
+    size_t off = 0;
+    assert(sl2_info_put_room_src(buf, sizeof buf, &off,
+                                 SL2_ROOMSRC_LINK, SL2_ROOMST_STALE));
+    const uint8_t *v = expect_tlv(buf, off, SL2_TLV_ROOM_SRC, 2);
+    assert(v[0] == SL2_ROOMSRC_LINK);
+    assert(v[1] == SL2_ROOMST_STALE);
+
+    /* applied_src names the SELECTED source even when the feed is dead —
+     * a reader that renders only applied_src shows a dead feed as a live
+     * one (wire spec §10d), so both bytes must survive the round trip. */
+    off = 0;
+    assert(sl2_info_put_room_src(buf, sizeof buf, &off,
+                                 SL2_ROOMSRC_INTERNAL, SL2_ROOMST_OK));
+    v = expect_tlv(buf, off, SL2_TLV_ROOM_SRC, 2);
+    assert(v[0] == SL2_ROOMSRC_INTERNAL);
+    assert(v[1] == SL2_ROOMST_OK);
+}
+
 static void test_bounds_whole_tlv_or_nothing(void) {
     uint8_t buf[8];                          /* too small for WIFI_INFO */
     size_t off = 0;
@@ -103,6 +123,14 @@ static void test_bounds_whole_tlv_or_nothing(void) {
     /* a small TLV still fits after a failed big one */
     assert(sl2_info_put_batt(buf, sizeof buf, &off, 50));
     assert(off == 3);
+    /* ROOM_SRC is 4 bytes on the wire (2 header + 2 value): one fits in the
+     * remaining 5, a second does not, and the failure writes nothing. */
+    assert(sl2_info_put_room_src(buf, sizeof buf, &off,
+                                 SL2_ROOMSRC_LINK, SL2_ROOMST_OK));
+    assert(off == 7);
+    assert(!sl2_info_put_room_src(buf, sizeof buf, &off,
+                                  SL2_ROOMSRC_LINK, SL2_ROOMST_OK));
+    assert(off == 7);
 }
 
 static void test_string_tables(void) {
@@ -170,6 +198,7 @@ int main(void) {
     test_runtime();
     test_sys();
     test_energy();
+    test_room_src();
     test_bounds_whole_tlv_or_nothing();
     test_string_tables();
     test_full_packet_stream();
