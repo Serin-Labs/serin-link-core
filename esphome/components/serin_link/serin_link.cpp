@@ -900,6 +900,16 @@ static void t_room_sensor(void *ctx, const uint8_t src_mac[6],
 
 /* ── component ────────────────────────────────────────────────────────── */
 
+/* Publish the dropdown only when it actually changes. select::publish_state
+ * has no dedup of its own (it fires the state callback and notifies the API
+ * unconditionally), and this is called at 1 Hz. */
+void SerinLinkComponent::publish_primary_(size_t index) {
+  if (primary_select_ == nullptr) return;
+  if (pub_primary_idx_ == static_cast<int>(index)) return;
+  pub_primary_idx_ = static_cast<int>(index);
+  primary_select_->publish_state(index);
+}
+
 /* Which bond slot currently holds the pinned MAC. False when nothing is
  * pinned, or when the pinned Serin Link is no longer in the bond table. */
 bool SerinLinkComponent::primary_slot_(int *out_idx) const {
@@ -924,7 +934,7 @@ void SerinLinkComponent::primary_select_control(size_t index) {
     uint8_t blob[7] = {0};
     primary_pref_.save(&blob);
     ESP_LOGI(TAG, "primary Serin Link: auto (last reporting wins)");
-    if (primary_select_ != nullptr) primary_select_->publish_state(static_cast<size_t>(0));
+    publish_primary_(0);
     return;
   }
 
@@ -957,11 +967,11 @@ void SerinLinkComponent::refresh_primary_select_() {
   if (primary_select_ == nullptr) return;
   int slot = 0;
   if (!has_primary_dial_) {
-    primary_select_->publish_state(static_cast<size_t>(0));
+    publish_primary_(0);
     return;
   }
   if (primary_slot_(&slot)) {
-    primary_select_->publish_state(static_cast<size_t>(slot + 1));
+    publish_primary_(static_cast<size_t>(slot + 1));
     return;
   }
   /* Pinned Serin Link is gone from the bond table (forgotten, not merely
@@ -974,7 +984,7 @@ void SerinLinkComponent::refresh_primary_select_() {
   std::memset(primary_dial_, 0, sizeof primary_dial_);
   uint8_t blob[7] = {0};
   primary_pref_.save(&blob);
-  primary_select_->publish_state(static_cast<size_t>(0));
+  publish_primary_(0);
 }
 
 std::string SerinLinkComponent::dial_mac_str(int idx) {
@@ -1150,7 +1160,8 @@ void SerinLinkComponent::loop() {
   /* Keep the dropdown honest against the live bond table: a forget compacts
    * the table, so the pinned Serin Link can change SLOT without changing
    * identity (the label follows it), and a pin whose Link was forgotten
-   * reverts to auto. publish_state already dedups, so this is quiet. */
+   * reverts to auto. Quiet because publish_primary_() gates on change —
+   * select::publish_state itself does NOT dedup. */
   if (primary_select_ != nullptr && now - last_primary_ms_ >= 1000) {
     last_primary_ms_ = now;
     refresh_primary_select_();

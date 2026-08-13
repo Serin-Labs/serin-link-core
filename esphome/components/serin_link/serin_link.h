@@ -229,6 +229,12 @@ class SerinLinkComponent : public Component {
    * would strand the room source at unavailable forever. */
   void refresh_primary_select_();
   bool primary_slot_(int *out_idx) const;
+  /* select::Select::publish_state does NOT dedup — it fires the state callback
+   * and notifies the API on every call — so the 1 Hz refresh below has to gate
+   * itself or it streams one state per second to Home Assistant. Every other
+   * entity here carries the same explicit gate; this one is not special. */
+  void publish_primary_(size_t index);
+  int pub_primary_idx_{-1};          /* -1 = nothing published yet */
   uint32_t last_primary_ms_{0};
   /* One log line per ignored dial, not per frame: non-primary DIAL_SENSOR
    * frames arrive at up to 3 Hz while that dial's source edit is unconfirmed. */
