@@ -45,15 +45,15 @@ serin_link:
   # compiles it.
   link_sensor:
     temperature:
-      name: "Spike Dial Temperature"
+      name: "Spike Serin Link Temperature"
     humidity:
-      name: "Spike Dial Humidity"
-    dial_mac:
-      name: "Spike Dial"
+      name: "Spike Serin Link Humidity"
+    link_mac:
+      name: "Reporting Serin Link"
     stale_after: 60s
     # With two dials bonded, whichever reported last owns the entities above.
     # Pin one to stop the value alternating between rooms:
-    # primary_dial: "10:51:DB:8E:EB:38"
+    # primary_link: "10:51:DB:8E:EB:38"
 
   # Visibility into the bond table. A row is a bond SLOT, not a dial:
   # forgetting one dial shifts the later ones down, which is why every row
@@ -61,32 +61,32 @@ serin_link:
   # silently relabelling "Dial 2" with dial 3's identity.
   diagnostics:
     bonded_count:
-      name: "Bonded Dials"
+      name: "Bonded Serin Links"
     pairing_status:
       name: "Pairing"
     pairing_seconds:
       name: "Pairing Window"
-    dials:
+    links:
       - mac_address:
-          name: "Dial 1 MAC"
+          name: "Serin Link 1 MAC"
         linked:
-          name: "Dial 1 Linked"
+          name: "Serin Link 1 Linked"
         last_seen:
-          name: "Dial 1 Last Seen"
+          name: "Serin Link 1 Last Seen"
         firmware:
-          name: "Dial 1 Firmware"
+          name: "Serin Link 1 Firmware"
       - mac_address:
-          name: "Dial 2 MAC"
+          name: "Serin Link 2 MAC"
         linked:
-          name: "Dial 2 Linked"
+          name: "Serin Link 2 Linked"
         last_seen:
-          name: "Dial 2 Last Seen"
+          name: "Serin Link 2 Last Seen"
         firmware:
-          name: "Dial 2 Firmware"
+          name: "Serin Link 2 Firmware"
 
 button:
   - platform: template
-    name: "Pair Serin Dial"
+    name: "Pair Serin Link"
     on_press:
       - serin_link.pair_start:
           window: 60s
@@ -95,18 +95,18 @@ button:
     on_press:
       - serin_link.pair_cancel:
   - platform: template
-    name: "Forget Dial 1"
+    name: "Forget Serin Link 1"
     on_press:
-      - serin_link.forget_dial:
+      - serin_link.forget_link:
           slot: 0
   - platform: template
-    name: "Forget All Dials"
+    name: "Forget All Serin Links"
     on_press:
-      - serin_link.forget_all_dials:
+      - serin_link.forget_all_links:
 
 binary_sensor:
   - platform: template
-    name: "Serin Dial Linked"
+    name: "Serin Link Connected"
     lambda: 'return id(serin).any_dial_live();'
 
 text_sensor:

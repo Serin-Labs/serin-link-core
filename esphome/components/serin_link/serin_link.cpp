@@ -412,10 +412,10 @@ bool SerinLinkComponent::hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd
   // Band CMDs carry low/high (set_dc is NA), so log those instead of a bare
   // "set=0.0C" that reads as an empty command.
   if (mask & SL2_CM_TEMP_BAND) {
-    ESP_LOGI(TAG, "CMD from dial: mask=0x%04x mode=%u fan=%u band=%.1f..%.1fC", mask,
+    ESP_LOGI(TAG, "CMD from Serin Link: mask=0x%04x mode=%u fan=%u band=%.1f..%.1fC", mask,
              cmd->mode, cmd->fan, sl2_dc_to_c(cmd->set_low_dc), sl2_dc_to_c(cmd->set_high_dc));
   } else {
-    ESP_LOGI(TAG, "CMD from dial: mask=0x%04x mode=%u fan=%u set=%.1fC", mask,
+    ESP_LOGI(TAG, "CMD from Serin Link: mask=0x%04x mode=%u fan=%u set=%.1fC", mask,
              cmd->mode, cmd->fan, sl2_dc_to_c(cmd->set_dc));
   }
   /* Stage, don't apply: fields merge into hold_ (normalized to what the
@@ -789,11 +789,11 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
   if (is_edit && is_room_src_valid(p->want_src) && selected_src_ != p->want_src) {
     selected_src_ = p->want_src;
     room_src_pref_.save(&selected_src_);
-    ESP_LOGI(TAG, "room source -> %u (set from dial)",
+    ESP_LOGI(TAG, "room source -> %u (set from Serin Link)",
              static_cast<unsigned>(selected_src_));
   }
 
-  /* primary_dial: — a non-primary dial's READING is ignored; its EDIT is not.
+  /* primary_link: (YAML) — a non-primary Link's READING is ignored; its EDIT is not.
    * Deliberately placed AFTER the is_edit branch above: refusing the edit
    * would spin that dial at ~3 Hz forever (§10d has no give-up rule), which
    * is the same reason BLE is accepted-then-reported-UNAVAILABLE rather than
@@ -811,7 +811,7 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
       char got[18], want[18];
       sl2_fmt_mac(src_mac, got);
       sl2_fmt_mac(primary_dial_, want);
-      ESP_LOGI(TAG, "ignoring room sensor from %s: primary_dial is %s", got, want);
+      ESP_LOGI(TAG, "ignoring room sensor from %s: primary_link is %s", got, want);
     }
     return;
   }
@@ -1018,7 +1018,7 @@ void SerinLinkComponent::setup() {
 
   uint8_t mac[6];
   p_own_mac(nullptr, mac);
-  ESP_LOGI(TAG, "up; MAC %02X:%02X:%02X:%02X:%02X:%02X, %d dial(s) bonded, %s",
+  ESP_LOGI(TAG, "up; MAC %02X:%02X:%02X:%02X:%02X:%02X, %d Serin Link(s) bonded, %s",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
            sl2_link_dial_count(&link_),
            climate_ ? "bound to climate entity" : "spike (canned device)");
@@ -1047,7 +1047,7 @@ void SerinLinkComponent::loop() {
     last_dial_check_ms_ = now;
     if (!dial_stale_ && dial_temp_ms_ != 0 &&
         now - dial_temp_ms_ >= dial_stale_ms_) {
-      ESP_LOGW(TAG, "dial room sensor stale (%" PRIu32 " ms) — publishing unknown",
+      ESP_LOGW(TAG, "Serin Link room sensor stale (%" PRIu32 " ms) — publishing unknown",
                now - dial_temp_ms_);
       publish_dial_(true);
     }
@@ -1172,19 +1172,19 @@ void SerinLinkComponent::dump_config() {
                 runtime_sensor_ ? " runtime" : "",
                 (power_sensor_ || energy_sensor_) ? " energy" : "");
   if (link_sensor_cfg_) {
-    ESP_LOGCONFIG(TAG, "  dial room sensor: accepted, stale after %" PRIu32
+    ESP_LOGCONFIG(TAG, "  Serin Link room sensor: accepted, stale after %" PRIu32
                   " ms, source=%u", dial_stale_ms_,
                   static_cast<unsigned>(selected_src_));
     if (has_primary_dial_) {
       char mac[18];
       sl2_fmt_mac(primary_dial_, mac);
-      ESP_LOGCONFIG(TAG, "    primary dial: %s (others ignored for measurement)", mac);
+      ESP_LOGCONFIG(TAG, "    primary Serin Link: %s (others ignored for measurement)", mac);
     } else {
-      ESP_LOGCONFIG(TAG, "    primary dial: unset (last reporting dial wins)");
+      ESP_LOGCONFIG(TAG, "    primary Serin Link: unset (last reporting Link wins)");
     }
   }
   int n_dials = sl2_link_dial_count(&link_);
-  ESP_LOGCONFIG(TAG, "  bonded dials: %d", n_dials);
+  ESP_LOGCONFIG(TAG, "  bonded Serin Links: %d", n_dials);
   /* The whole table, not just a count: when a dial misbehaves this is the
    * first thing anyone reads, and it works on a config that declares no
    * diagnostics: block at all. */

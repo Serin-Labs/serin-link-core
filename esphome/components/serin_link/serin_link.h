@@ -81,8 +81,10 @@ class SerinLinkComponent : public Component {
   void set_dial_hum_sensor(sensor::Sensor *s) { dial_hum_sensor_ = s; }
   void set_dial_mac_sensor(text_sensor::TextSensor *s) { dial_mac_sensor_ = s; }
   void set_dial_stale_after(uint32_t ms) { dial_stale_ms_ = ms; }
-  /* primary_dial: — pin the room source to one dial. Unset = last reporting
-   * dial wins (the historical behavior). */
+  /* primary_link: (YAML) — pin the room source to one Serin Link. Unset =
+   * last reporting one wins (the historical behavior). The C++/core side keeps
+   * the wire spec's "dial" vocabulary; only the YAML key and HA-visible text
+   * say "Serin Link". */
   void set_primary_dial(const std::array<uint8_t, 6> &mac) {
     std::memcpy(primary_dial_, mac.data(), 6);
     has_primary_dial_ = true;
@@ -299,7 +301,7 @@ class ForgetDialAction : public Action<Ts...>, public Parented<SerinLinkComponen
   void play(Ts... x) override {
     const bool ok = has_mac_ ? this->parent_->forget_dial_mac(mac_.data())
                              : this->parent_->forget_dial_slot(this->slot_.value(x...));
-    if (!ok) ESP_LOGW("serin_link", "forget_dial: no such dial");
+    if (!ok) ESP_LOGW("serin_link", "forget_link: no such Serin Link");
   }
 
  protected:

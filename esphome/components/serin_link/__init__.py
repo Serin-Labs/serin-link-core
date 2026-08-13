@@ -1,14 +1,16 @@
 """serin_link — Serin Link controller for ESPHome.
 
-Bind any `climate` entity via climate_id and a Serin dial can pair with this
+Bind any `climate` entity via climate_id and a Serin Link can pair with this
 node: CAPS derive from the entity's ClimateTraits, STATE from its published
-state, and dial commands route through a ClimateCall. Without climate_id the
+state, and its commands route through a ClimateCall. Without climate_id the
 component runs a canned device (the coexistence spike).
 
 Owns the ESP-NOW radio (encrypted peers + broadcast pairing), so it is
 mutually exclusive with ESPHome's built-in `espnow:` component, which neither
 implements ESP-NOW link-layer encryption nor shares the recv callback.
 """
+
+import logging
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
@@ -31,6 +33,8 @@ from esphome.const import (
     UNIT_PERCENT,
     UNIT_SECOND,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@Serin-Labs"]
 DEPENDENCIES = ["wifi", "esp32"]
@@ -66,15 +70,16 @@ CONF_POWER_SENSOR = "power_sensor"
 CONF_ENERGY_SENSOR = "energy_sensor"
 
 CONF_LINK_SENSOR = "link_sensor"
-CONF_DIAL_MAC = "dial_mac"
+CONF_LINK_MAC = "link_mac"
+CONF_DIAL_MAC = "dial_mac"        # deprecated alias for link_mac (shipped v0.1.3-beta.3)
 CONF_STALE_AFTER = "stale_after"
-CONF_PRIMARY_DIAL = "primary_dial"
+CONF_PRIMARY_LINK = "primary_link"
 
 CONF_DIAGNOSTICS = "diagnostics"
 CONF_BONDED_COUNT = "bonded_count"
 CONF_PAIRING_STATUS = "pairing_status"
 CONF_PAIRING_SECONDS = "pairing_seconds"
-CONF_DIALS = "dials"
+CONF_LINKS = "links"
 CONF_LINKED = "linked"
 CONF_LAST_SEEN = "last_seen"
 CONF_FIRMWARE = "firmware"
@@ -86,13 +91,13 @@ CONF_WINDOW = "window"
 # has to be raised here.
 SL2_MAX_DIALS = 4
 
-# link_sensor: — entities fed by the DIAL's own sensor, owned by this
+# link_sensor: — entities fed by the SERIN LINK's own sensor, owned by this
 # component (the bindings above point at entities the user already has; here
-# the dial is the data source, so there is nothing to bind to). Presence of
-# the block is the opt-in and is what sets SL2_FEAT_LINK_SENSOR: without it
-# the dial never transmits and its Settings never grow a room-source cycle,
+# the Serin Link is the data source, so there is nothing to bind to). Presence
+# of the block is the opt-in and is what sets SL2_FEAT_LINK_SENSOR: without it
+# the Serin Link never transmits and its Settings never grow a room-source cycle,
 # so an existing config upgrades with no behavior change. Every child is
-# optional — `link_sensor: {}` means "accept the dial as a room source,
+# optional — `link_sensor: {}` means "accept the Serin Link as a room source,
 # create no HA entities".
 LINK_SENSOR_SCHEMA = cv.Schema(
     {
@@ -108,27 +113,27 @@ LINK_SENSOR_SCHEMA = cv.Schema(
             device_class=DEVICE_CLASS_HUMIDITY,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
-        # Which dial is currently feeding. Diagnostic: it only matters when
-        # two dials bonded to one controller both offer a sensor, where the
-        # value alternates between them (last reporting dial wins).
-        cv.Optional(CONF_DIAL_MAC): text_sensor.text_sensor_schema(
+        # Which Serin Link is currently feeding. Diagnostic: it only matters
+        # when two Links bonded to one controller both offer a sensor, where
+        # the value alternates between them (last reporting Link wins).
+        cv.Optional(CONF_LINK_MAC): text_sensor.text_sensor_schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
-        # primary_dial: — which bonded dial feeds the entities above. Unset
-        # (the default) keeps the historical behavior: whichever dial reported
-        # last owns them, which with two dials in two rooms makes the entity —
-        # and any heat pump fed from it — alternate between rooms.
+        # primary_link: — which bonded Serin Link feeds the entities above.
+        # Unset (the default) keeps the historical behavior: whichever Link
+        # reported last owns them, which with two Links in two rooms makes the
+        # entity — and any heat pump fed from it — alternate between rooms.
         #
-        # Set, only this dial's readings are used. Other dials are NOT
-        # rejected: their room-source EDITS are still honored, because a dial
+        # Set, only this Link's readings are used. Other Links are NOT
+        # rejected: their room-source EDITS are still honored, because a Link
         # re-sends an unacknowledged edit at ~3 Hz forever (wire spec §10d has
         # no give-up rule). Arbitration decides whose reading is used, never
         # whether an edit is accepted.
         #
-        # Get the MAC from diagnostics: dials: [].mac_address, or the bond
+        # Get the MAC from diagnostics: links: [].mac_address, or the bond
         # table dump_config() prints at boot.
-        cv.Optional(CONF_PRIMARY_DIAL): cv.mac_address,
-        # 90s = three missed 20s dial keepalives plus slack.
+        cv.Optional(CONF_PRIMARY_LINK): cv.mac_address,
+        # 90s = three missed 20s Serin Link keepalives plus slack.
         cv.Optional(
             CONF_STALE_AFTER, default="90s"
         ): cv.positive_time_period_milliseconds,
@@ -139,9 +144,28 @@ LINK_SENSOR_SCHEMA = cv.Schema(
 def _link_sensor_schema(value):
     # `link_sensor:` with no sub-keys parses as None, not {} — map it before
     # the dict schema runs so the bare form (every child optional, meaning
-    # "accept the dial as a room source, create no HA entities") validates
-    # the same as the explicit `link_sensor: {}`.
-    return LINK_SENSOR_SCHEMA(value if value is not None else {})
+    # "accept the Serin Link as a room source, create no HA entities")
+    # validates the same as the explicit `link_sensor: {}`.
+    if value is None:
+        value = {}
+    # dial_mac: shipped in v0.1.3-beta.3 and was renamed to link_mac: when the
+    # component's user-facing vocabulary settled on "Serin Link". Accepted for
+    # one release with a warning; cv.rename_key alone would do it silently.
+    if isinstance(value, dict) and CONF_DIAL_MAC in value:
+        if CONF_LINK_MAC in value:
+            raise cv.Invalid(
+                f"set either `{CONF_LINK_MAC}:` or the deprecated "
+                f"`{CONF_DIAL_MAC}:`, not both"
+            )
+        _LOGGER.warning(
+            "serin_link: `%s:` is deprecated, rename it to `%s:` "
+            "(the component now calls the device a Serin Link, not a dial). "
+            "The old key still works in this release.",
+            CONF_DIAL_MAC,
+            CONF_LINK_MAC,
+        )
+        value = cv.rename_key(CONF_DIAL_MAC, CONF_LINK_MAC)(value)
+    return LINK_SENSOR_SCHEMA(value)
 
 
 # diagnostics: — read-only visibility into the controller's bond table. Like
@@ -150,13 +174,13 @@ def _link_sensor_schema(value):
 # child is optional, so an install that omits it creates no entities and
 # behaves exactly as before.
 #
-# A `dials:` ROW IS A BOND SLOT, NOT A DIAL. sl2_link_forget_dial() compacts
-# the table, so forgetting slot 0 shifts every later dial down one and
-# "Dial 2 firmware" starts describing what used to be dial 3. Declare
-# mac_address: on every row — it is what makes that shift visible in HA
-# instead of silently relabelling. Rows past the number of bonded dials
-# publish ""/off/NAN.
-DIAL_ROW_SCHEMA = cv.Schema(
+# A `links:` ROW IS A BOND SLOT, NOT A SERIN LINK. sl2_link_forget_dial() (the
+# core keeps the wire spec's "dial" vocabulary) compacts the table, so
+# forgetting slot 0 shifts every later Link down one and "Serin Link 2
+# firmware" starts describing what used to be Link 3. Declare mac_address: on
+# every row — it is what makes that shift visible in HA instead of silently
+# relabelling. Rows past the number of bonded Links publish ""/off/NAN.
+LINK_ROW_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_MAC_ADDRESS): text_sensor.text_sensor_schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -178,12 +202,12 @@ DIAL_ROW_SCHEMA = cv.Schema(
     }
 )
 
-def _max_dial_rows(value):
+def _max_link_rows(value):
     # cv.Length's stock message is "length of value must be at most 4", which
     # says nothing about WHY 4. The limit is the controller's bond table.
     if len(value) > SL2_MAX_DIALS:
         raise cv.Invalid(
-            f"at most {SL2_MAX_DIALS} dial rows — that is SL2_MAX_DIALS, the "
+            f"at most {SL2_MAX_DIALS} Serin Link rows — that is SL2_MAX_DIALS, the "
             f"size of the controller's bond table, so a {SL2_MAX_DIALS + 1}th "
             f"row could never be filled (got {len(value)})"
         )
@@ -205,9 +229,9 @@ DIAGNOSTICS_SCHEMA = cv.Schema(
             accuracy_decimals=0,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
-        cv.Optional(CONF_DIALS): cv.All(
-            cv.ensure_list(DIAL_ROW_SCHEMA),
-            _max_dial_rows,
+        cv.Optional(CONF_LINKS): cv.All(
+            cv.ensure_list(LINK_ROW_SCHEMA),
+            _max_link_rows,
         ),
     }
 )
@@ -226,7 +250,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(SerinLinkComponent),
         cv.Optional(CONF_CLIMATE_ID): cv.use_id(climate.Climate),
         cv.Optional(CONF_ZONE_NAME, default=""): cv.string,
-        # Device-link health for the STATE hvac_link flag (drives the dial's
+        # Device-link health for the STATE hvac_link flag (drives the Link's
         # offline face). A generic climate entity exists whether or not the
         # device behind it answers, so bind the platform's own signal here,
         # e.g. cn105: `hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'`
@@ -238,16 +262,16 @@ CONFIG_SCHEMA = cv.Schema(
         # "swing" (case-insensitive) become the wire AUTO/SWING codes.
         cv.Optional(CONF_VANE_V_SELECT): cv.use_id(select.Select),
         cv.Optional(CONF_VANE_H_SELECT): cv.use_id(select.Select),
-        # Trailing quiet window before a burst of dial edits is applied to the
+        # Trailing quiet window before a burst of Serin Link edits is applied to the
         # climate entity as a single ClimateCall (0s = apply each CMD
-        # immediately). The STATE echoed to dials reflects the commanded
+        # immediately). The STATE echoed to Links reflects the commanded
         # values either way (optimistic overlay until the entity confirms).
         cv.Optional(
             CONF_CMD_DEBOUNCE, default="300ms"
         ): cv.positive_time_period_milliseconds,
-        # Telemetry bindings -> INFO TLVs + CAPS feature bits (dial telemetry
+        # Telemetry bindings -> INFO TLVs + CAPS feature bits (Serin Link telemetry
         # pages). All optional; unbound = TLV omitted, feature bit unset, the
-        # dial hides the row. Any platform's entities work — for echavet's
+        # the Link hides the row. Any platform's entities work — for echavet's
         # cn105 give its sensor blocks ids and bind them here.
         cv.Optional(CONF_OUTSIDE_TEMP_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_COMPRESSOR_HZ_SENSOR): cv.use_id(sensor.Sensor),
@@ -290,9 +314,10 @@ FINAL_VALIDATE_SCHEMA = _no_builtin_espnow
 
 # ── automation actions ────────────────────────────────────────────────────
 # So configs stop reaching for raw lambdas to open a pairing window or drop a
-# dial. forget_dial is the one that needed a decision: `slot:` is a bond-table
-# POSITION (templatable, but it shifts when another dial is forgotten) and
-# `mac_address:` is a specific dial, resolved at compile time — which is what
+# Serin Link. forget_link is the one that needed a decision: `slot:` is a
+# bond-table POSITION (templatable, but it shifts when another Link is
+# forgotten) and `mac_address:` is one specific Link, resolved at compile time
+# — which is what
 # keeps runtime MAC string parsing out of the component entirely.
 
 
@@ -342,16 +367,16 @@ def _exactly_one_target(config):
     has_mac = CONF_MAC_ADDRESS in config
     if has_slot == has_mac:
         raise cv.Invalid(
-            "serin_link.forget_dial needs exactly one of `slot:` or "
+            "serin_link.forget_link needs exactly one of `slot:` or "
             "`mac_address:` — `slot:` is a bond-table position (which shifts "
-            "when an earlier dial is forgotten), `mac_address:` is one "
-            "specific dial."
+            "when an earlier Serin Link is forgotten), `mac_address:` is one "
+            "specific Link."
         )
     return config
 
 
 @automation.register_action(
-    "serin_link.forget_dial",
+    "serin_link.forget_link",
     ForgetDialAction,
     cv.All(
         cv.Schema(
@@ -381,7 +406,7 @@ async def forget_dial_action_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "serin_link.forget_all_dials",
+    "serin_link.forget_all_links",
     ForgetAllDialsAction,
     cv.Schema({cv.GenerateID(): cv.use_id(SerinLinkComponent)}),
     synchronous=True,
@@ -434,19 +459,19 @@ async def to_code(config):
         ls = config[CONF_LINK_SENSOR]
         cg.add(var.set_link_sensor_enabled())
         cg.add(var.set_dial_stale_after(ls[CONF_STALE_AFTER].total_milliseconds))
-        if CONF_PRIMARY_DIAL in ls:
+        if CONF_PRIMARY_LINK in ls:
             # list of HexInt -> braced initializer -> const std::array<uint8_t,6>&
             cg.add(
-                var.set_primary_dial([HexInt(i) for i in ls[CONF_PRIMARY_DIAL].parts])
+                var.set_primary_dial([HexInt(i) for i in ls[CONF_PRIMARY_LINK].parts])
             )
         if CONF_TEMPERATURE in ls:
             cg.add(var.set_dial_temp_sensor(await sensor.new_sensor(ls[CONF_TEMPERATURE])))
         if CONF_HUMIDITY in ls:
             cg.add(var.set_dial_hum_sensor(await sensor.new_sensor(ls[CONF_HUMIDITY])))
-        if CONF_DIAL_MAC in ls:
+        if CONF_LINK_MAC in ls:
             cg.add(
                 var.set_dial_mac_sensor(
-                    await text_sensor.new_text_sensor(ls[CONF_DIAL_MAC])
+                    await text_sensor.new_text_sensor(ls[CONF_LINK_MAC])
                 )
             )
     if CONF_DIAGNOSTICS in config:
@@ -469,7 +494,7 @@ async def to_code(config):
                     await sensor.new_sensor(diag[CONF_PAIRING_SECONDS])
                 )
             )
-        for idx, row in enumerate(diag.get(CONF_DIALS, [])):
+        for idx, row in enumerate(diag.get(CONF_LINKS, [])):
             mac = (
                 await text_sensor.new_text_sensor(row[CONF_MAC_ADDRESS])
                 if CONF_MAC_ADDRESS in row

@@ -150,7 +150,7 @@ serin_link:
     # pump fed from it via the on_value recipe) alternates between rooms. Get
     # the MAC from the diagnostics entities below, or from the bond table the
     # component prints at boot.
-    # primary_dial: "10:51:DB:8E:EB:38"
+    # primary_link: "10:51:DB:8E:EB:38"
 
   # Which dials are bonded, and are they alive. A row is a bond SLOT, not a
   # dial: forgetting one shifts the later ones down, so declare mac_address on
@@ -158,28 +158,28 @@ serin_link:
   # relabelling a row with another dial's identity.
   diagnostics:
     bonded_count:
-      name: "Bonded Dials"
+      name: "Bonded Serin Links"
     pairing_status:
       name: "Pairing"
     pairing_seconds:
       name: "Pairing Window"
-    dials:
+    links:
       - mac_address:
-          name: "Dial 1 MAC"
+          name: "Serin Link 1 MAC"
         linked:
-          name: "Dial 1 Linked"
+          name: "Serin Link 1 Linked"
         last_seen:
-          name: "Dial 1 Last Seen"
+          name: "Serin Link 1 Last Seen"
         firmware:
-          name: "Dial 1 Firmware"
+          name: "Serin Link 1 Firmware"
       - mac_address:
-          name: "Dial 2 MAC"
+          name: "Serin Link 2 MAC"
         linked:
-          name: "Dial 2 Linked"
+          name: "Serin Link 2 Linked"
 
 button:
   - platform: template
-    name: "Pair Serin Dial"
+    name: "Pair Serin Link"
     on_press:
       - serin_link.pair_start:
           window: 60s
@@ -187,18 +187,18 @@ button:
   # table, the dial that was in slot 1 becomes slot 0 afterwards — watch the
   # Dial N MAC entities to see it happen.
   - platform: template
-    name: "Forget Dial 1"
+    name: "Forget Serin Link 1"
     on_press:
-      - serin_link.forget_dial:
+      - serin_link.forget_link:
           slot: 0
   - platform: template
-    name: "Forget All Dials"
+    name: "Forget All Serin Links"
     on_press:
-      - serin_link.forget_all_dials:
+      - serin_link.forget_all_links:
 
 binary_sensor:
   - platform: template
-    name: "Serin Dial Linked"
+    name: "Serin Link Connected"
     lambda: 'return id(serin).any_dial_live();'
 
 # Known gaps against a native Serin Controller:

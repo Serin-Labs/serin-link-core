@@ -162,15 +162,15 @@ serin_link:
 
 button:
   - platform: template
-    name: "Pair Serin Dial"
+    name: "Pair Serin Link"
     on_press:
       - lambda: 'id(serin).pair_start(60000);'
   - platform: template
-    name: "Forget All Dials"
+    name: "Forget All Serin Links"
     on_press:
       - lambda: 'id(serin).forget_all_dials();'
 
 binary_sensor:
   - platform: template
-    name: "Serin Dial Linked"
+    name: "Serin Link Connected"
     lambda: 'return id(serin).any_dial_live();'
