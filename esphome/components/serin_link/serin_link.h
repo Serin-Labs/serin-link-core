@@ -93,6 +93,27 @@ class SerinLinkComponent : public Component {
   bool any_dial_live() { return sl2_link_any_live(&link_); }
   void forget_all_dials() { sl2_link_forget_all(&link_); }
 
+  /* Per-dial management. The core's bond table is COMPACTED on forget
+   * (sl2_link_forget_dial), so an index identifies a bond SLOT, not a dial:
+   * forgetting slot 0 shifts every later dial down one. Callers needing a
+   * stable identity must use the MAC. */
+  bool forget_dial_slot(int idx) {
+    uint8_t mac[6];
+    if (!sl2_link_dial_mac(&link_, idx, mac)) return false;
+    return sl2_link_forget_dial(&link_, mac);
+  }
+  bool forget_dial_mac(const uint8_t mac[6]) {
+    return sl2_link_forget_dial(&link_, mac);
+  }
+  int pair_seconds_left() { return sl2_link_pair_seconds_left(&link_); }
+  /* Raw per-dial snapshot, so a YAML lambda can reach the fields the
+   * diagnostics schema deliberately does not expose (model, caps_seq,
+   * cert_state) without the schema having to grow. */
+  bool dial_view(int idx, sl2_dial_view_t *out) {
+    return sl2_link_dial_view(&link_, idx, out);
+  }
+  std::string dial_mac_str(int idx);
+
   /* HVAC iface backing (public: called from the C hook trampolines). */
   bool hvac_get_state(sl2_hvac_state_t *out);
   bool hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd);

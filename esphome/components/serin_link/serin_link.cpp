@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cinttypes>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -25,6 +26,13 @@ namespace serin_link {
 
 static const char *const TAG = "serin_link";
 static SerinLinkComponent *g_self = nullptr;
+
+/* bytes -> "AA:BB:CC:DD:EE:FF". publish_dial_() had the only copy; the
+ * diagnostics rows and the dump_config bond table need the same format. */
+static void sl2_fmt_mac(const uint8_t mac[6], char out[18]) {
+  std::snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
 
 /* ── ESP-NOW port ─────────────────────────────────────────────────────── */
 
@@ -844,9 +852,7 @@ void SerinLinkComponent::publish_dial_(bool stale) {
     dial_hum_sensor_->publish_state(dial_hum_pct_);
   if (dial_mac_sensor_ != nullptr) {
     char mac[18];
-    std::snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X",
-                  dial_mac_[0], dial_mac_[1], dial_mac_[2],
-                  dial_mac_[3], dial_mac_[4], dial_mac_[5]);
+    sl2_fmt_mac(dial_mac_, mac);
     if (dial_mac_sensor_->state != mac) dial_mac_sensor_->publish_state(mac);
   }
 }
@@ -870,6 +876,14 @@ static void t_room_sensor(void *ctx, const uint8_t src_mac[6],
 }
 
 /* ── component ────────────────────────────────────────────────────────── */
+
+std::string SerinLinkComponent::dial_mac_str(int idx) {
+  uint8_t mac[6];
+  if (!sl2_link_dial_mac(&link_, idx, mac)) return "";
+  char buf[18];
+  sl2_fmt_mac(mac, buf);
+  return std::string(buf);
+}
 
 void SerinLinkComponent::copy_zone_name(char *dst, size_t cap) const {
   const char *n = zone_name_.c_str();
@@ -1047,7 +1061,25 @@ void SerinLinkComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  dial room sensor: accepted, stale after %" PRIu32
                   " ms, source=%u", dial_stale_ms_,
                   static_cast<unsigned>(selected_src_));
-  ESP_LOGCONFIG(TAG, "  bonded dials: %d", sl2_link_dial_count(&link_));
+  int n_dials = sl2_link_dial_count(&link_);
+  ESP_LOGCONFIG(TAG, "  bonded dials: %d", n_dials);
+  /* The whole table, not just a count: when a dial misbehaves this is the
+   * first thing anyone reads, and it works on a config that declares no
+   * diagnostics: block at all. */
+  for (int i = 0; i < n_dials; i++) {
+    sl2_dial_view_t v;
+    if (!dial_view(i, &v)) continue;
+    char mac[18];
+    sl2_fmt_mac(v.mac, mac);
+    /* model/fw stay empty until that dial's DIAL_INFO arrives (have_info) */
+    ESP_LOGCONFIG(TAG, "    [%d] %s  %s  last seen %" PRId32 " s  "
+                  "model '%s' fw '%s'  caps_seq %u  cert %u",
+                  i, mac, v.live ? "live" : "DOWN",
+                  v.last_seen_ms < 0 ? (int32_t) -1 : v.last_seen_ms / 1000,
+                  v.have_info ? v.model : "", v.have_info ? v.fw : "",
+                  static_cast<unsigned>(v.caps_seq),
+                  static_cast<unsigned>(v.cert_state));
+  }
   ESP_LOGCONFIG(TAG, "  rxq dropped: %u", static_cast<unsigned>(rxq_.dropped));
 }
 
