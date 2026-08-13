@@ -1,8 +1,8 @@
 # Serin Link on a GENERIC ESPHome climate device.
 #
-# The dial pairs with this node and controls whatever `climate_id` points at —
+# The Serin Link pairs with this node and controls whatever `climate_id` points at —
 # any ESPHome climate platform (thermostat, midea, daikin, gree, ...). CAPS
-# derive from the entity's traits: the dial's mode ring shows only the modes
+# derive from the entity's traits: the Serin Link's mode ring shows only the modes
 # this entity supports, the setpoint clamps to its visual range, fan detents
 # follow its discrete fan modes.
 
@@ -34,12 +34,12 @@ ota:
   - platform: esphome
 
 # Any climate platform works. `thermostat` shown as the generic example, its
-# sensor: wired to the dial's own reading (dial_temp, declared under
+# sensor: wired to the Serin Link's own reading (dial_temp, declared under
 # serin_link: below).
 #
-# Non-dial alternative: an existing HA sensor as the control temperature —
+# Non-Link alternative: an existing HA sensor as the control temperature —
 # swap this back in for `sensor: dial_temp` below if you'd rather not have
-# the dial drive the thermostat.
+# the Serin Link drive the thermostat.
 # sensor:
 #   - platform: homeassistant
 #     id: room_temp
@@ -75,13 +75,13 @@ serin_link:
   #                           # has one (see example_cn105.yaml); unset, a NaN
   #                           # room temp on an entity that claims one reports
   #                           # the link down (never-heard-from-device)
-  # The dial's own sensor — climate.sensor: above already points straight at
+  # The Serin Link's own sensor — climate.sensor: above already points straight at
   # dial_temp, no automation needed on this platform. Two ways this differs
   # from cn105's recipe, both worth knowing before you deploy it:
   #   - `thermostat` has exactly one sensor input, no internal thermistor
-  #     behind it, so there's nothing for the dial's Internal/Link cycle to
-  #     switch between here — the dial just IS the control sensor.
-  #   - No remote_temperature_timeout equivalent: if the dial goes stale,
+  #     behind it, so there's nothing for the Serin Link's Internal/Link cycle to
+  #     switch between here — the Serin Link just IS the control sensor.
+  #   - No remote_temperature_timeout equivalent: if the Serin Link goes stale,
   #     the entity's temperature goes unknown rather than falling back.
   link_sensor:
     temperature:
@@ -89,8 +89,8 @@ serin_link:
       name: "Serin Link Temperature"
     humidity:
       name: "Serin Link Humidity"
-    # Which dial is feeding. Only interesting when two dials bonded to one
-    # controller both offer a sensor: last reporting dial wins, so the value
+    # Which Serin Link is feeding. Only interesting when two are bonded to one
+    # controller and both offer a sensor: last reporting one wins, so the value
     # alternates and this names the culprit.
     link_mac:
       name: "Serin Link"

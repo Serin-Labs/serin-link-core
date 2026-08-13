@@ -27,6 +27,7 @@ from esphome.const import (
     DEVICE_CLASS_DURATION,
     DEVICE_CLASS_HUMIDITY,
     DEVICE_CLASS_TEMPERATURE,
+    ENTITY_CATEGORY_CONFIG,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
     UNIT_CELSIUS,
@@ -46,6 +47,10 @@ AUTO_LOAD = ["binary_sensor", "climate", "select", "sensor", "text_sensor"]
 
 serin_link_ns = cg.esphome_ns.namespace("serin_link")
 SerinLinkComponent = serin_link_ns.class_("SerinLinkComponent", cg.Component)
+
+PrimaryLinkSelect = serin_link_ns.class_(
+    "PrimaryLinkSelect", select.Select, cg.Parented.template(SerinLinkComponent)
+)
 
 PairStartAction = serin_link_ns.class_("PairStartAction", automation.Action)
 PairCancelAction = serin_link_ns.class_("PairCancelAction", automation.Action)
@@ -74,6 +79,8 @@ CONF_LINK_MAC = "link_mac"
 CONF_DIAL_MAC = "dial_mac"        # deprecated alias for link_mac (shipped v0.1.3-beta.3)
 CONF_STALE_AFTER = "stale_after"
 CONF_PRIMARY_LINK = "primary_link"
+CONF_PRIMARY_SELECT = "primary_select"
+
 
 CONF_DIAGNOSTICS = "diagnostics"
 CONF_BONDED_COUNT = "bonded_count"
@@ -90,6 +97,14 @@ CONF_WINDOW = "window"
 # this with it: the C side silently ignores rows past the limit, so the error
 # has to be raised here.
 SL2_MAX_DIALS = 4
+
+# The dropdown's options. Index 0 is "no pin"; index N is bond slot N-1. The
+# C++ keys off the INDEX (PrimaryLinkSelect::control(size_t)), so these labels
+# can be reworded freely — but their ORDER and COUNT are the contract.
+PRIMARY_AUTO_LABEL = "Auto (last reporting)"
+PRIMARY_SELECT_OPTIONS = [PRIMARY_AUTO_LABEL] + [
+    f"Serin Link {i + 1}" for i in range(SL2_MAX_DIALS)
+]
 
 # link_sensor: — entities fed by the SERIN LINK's own sensor, owned by this
 # component (the bindings above point at entities the user already has; here
@@ -133,6 +148,16 @@ LINK_SENSOR_SCHEMA = cv.Schema(
         # Get the MAC from diagnostics: links: [].mac_address, or the bond
         # table dump_config() prints at boot.
         cv.Optional(CONF_PRIMARY_LINK): cv.mac_address,
+        # primary_select: — the same pin, chosen at runtime from a Home
+        # Assistant dropdown instead of baked into the config. Mutually
+        # exclusive with primary_link: (below), so there is never a precedence
+        # question between a compile-time pin and a stored one. The chosen
+        # Serin Link is persisted by MAC, so it survives a reboot and follows
+        # its Link across the slot shuffle a forget causes.
+        cv.Optional(CONF_PRIMARY_SELECT): select.select_schema(
+            PrimaryLinkSelect,
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        ),
         # 90s = three missed 20s Serin Link keepalives plus slack.
         cv.Optional(
             CONF_STALE_AFTER, default="90s"
@@ -165,6 +190,16 @@ def _link_sensor_schema(value):
             CONF_LINK_MAC,
         )
         value = cv.rename_key(CONF_DIAL_MAC, CONF_LINK_MAC)(value)
+    # Static pin or runtime pin, never both: allowing both would mean deciding
+    # whether the config or the stored selection wins, and whichever answer we
+    # picked would surprise the other half of the users.
+    if isinstance(value, dict) and CONF_PRIMARY_LINK in value and CONF_PRIMARY_SELECT in value:
+        raise cv.Invalid(
+            f"`{CONF_PRIMARY_LINK}:` and `{CONF_PRIMARY_SELECT}:` do the same "
+            f"job and cannot both be set — `{CONF_PRIMARY_LINK}:` pins one "
+            f"Serin Link at compile time, `{CONF_PRIMARY_SELECT}:` exposes the "
+            f"choice as a Home Assistant dropdown that persists across reboots."
+        )
     return LINK_SENSOR_SCHEMA(value)
 
 
@@ -459,6 +494,12 @@ async def to_code(config):
         ls = config[CONF_LINK_SENSOR]
         cg.add(var.set_link_sensor_enabled())
         cg.add(var.set_dial_stale_after(ls[CONF_STALE_AFTER].total_milliseconds))
+        if CONF_PRIMARY_SELECT in ls:
+            sel = await select.new_select(
+                ls[CONF_PRIMARY_SELECT], options=PRIMARY_SELECT_OPTIONS
+            )
+            await cg.register_parented(sel, var)
+            cg.add(var.set_primary_select(sel))
         if CONF_PRIMARY_LINK in ls:
             # list of HexInt -> braced initializer -> const std::array<uint8_t,6>&
             cg.add(

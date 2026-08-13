@@ -89,6 +89,14 @@ class SerinLinkComponent : public Component {
     std::memcpy(primary_dial_, mac.data(), 6);
     has_primary_dial_ = true;
   }
+  /* primary_select: (YAML) — the runtime equivalent, a dropdown in HA.
+   * Mutually exclusive with primary_link: at config time, so there is never a
+   * precedence question between a compile-time pin and a stored one. */
+  void set_primary_select(select::Select *s) { primary_select_ = s; }
+  /* index 0 = Auto (no pin); 1..SL2_MAX_DIALS = bond slot 0..N-1. Driven by
+   * index rather than label so the option STRINGS live only in the Python
+   * schema and rewording one can never silently change the mapping. */
+  void primary_select_control(size_t index);
 
   /* A bonded dial reported its own room sensor (called from the trampoline). */
   void room_sensor_feed(const uint8_t src_mac[6],
@@ -212,6 +220,16 @@ class SerinLinkComponent : public Component {
   uint8_t dial_mac_[6]{};
   uint8_t primary_dial_[6]{};
   bool has_primary_dial_{false};
+  select::Select *primary_select_{nullptr};
+  ESPPreferenceObject primary_pref_;
+  /* Republish the dropdown from the CURRENT bond table, and drop a pin whose
+   * Serin Link has been forgotten. Offline is not forgotten: an offline pin is
+   * kept (reporting stale beats silently switching rooms), but a Link removed
+   * from the bond table can never come back to that slot, and leaving the pin
+   * would strand the room source at unavailable forever. */
+  void refresh_primary_select_();
+  bool primary_slot_(int *out_idx) const;
+  uint32_t last_primary_ms_{0};
   /* One log line per ignored dial, not per frame: non-primary DIAL_SENSOR
    * frames arrive at up to 3 Hz while that dial's source edit is unconfirmed. */
   uint8_t ignored_logged_[SL2_MAX_DIALS][6]{};
@@ -264,6 +282,14 @@ class SerinLinkComponent : public Component {
   uint32_t cmd_debounce_ms_{300};
   uint32_t last_ps_check_ms_{0};
   bool started_{false};
+};
+
+/* The "Primary Serin Link" dropdown. Overriding the index-based control() is
+ * the API's own preferred form (select.h says so) and keeps the option labels
+ * out of the C++ entirely. */
+class PrimaryLinkSelect : public select::Select, public Parented<SerinLinkComponent> {
+ protected:
+  void control(size_t index) override { this->parent_->primary_select_control(index); }
 };
 
 /* ── automation actions ───────────────────────────────────────────────────

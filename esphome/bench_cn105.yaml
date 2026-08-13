@@ -3,7 +3,7 @@
 # restart button, diagnostics enabled) — with serin_link added the three-edit
 # way (see example_cn105.yaml). Runs on the bench board with no heat pump
 # attached: the cn105 UART talks to nothing, so the climate entity stays empty
-# and the dial shows its "No link" face via hvac_link — that behavior is part
+# and the Serin Link shows its "No link" face via hvac_link — that behavior is part
 # of what this bench exercises.
 #
 # Differences from a stock field config, on purpose:
@@ -181,7 +181,7 @@ climate:
     vertical_vane_select:
       icon: mdi:swap-vertical
       name: Vertical Vane
-      id: vane_v       # <- bound below so the dial gets the axis
+      id: vane_v       # <- bound below so the Serin Link gets the axis
     supports:
       mode:
         - COOL
@@ -229,11 +229,11 @@ climate:
 serin_link:
   id: serin            # NB: `id: link` collides with libc link() in generated code
   climate_id: hp
-  # Device-link health -> the dial's offline face + System "No link". On this
-  # bench nothing is on the UART, so the dial correctly shows "No link".
+  # Device-link health -> the Serin Link's offline face + System "No link". On this
+  # bench nothing is on the UART, so the Serin Link correctly shows "No link".
   hvac_link: !lambda 'return id(hp).isHeatpumpConnected();'
   vane_v_select: vane_v
-  # Telemetry -> dial INFO pages. No pump on the bench, so compressor/energy
+  # Telemetry -> Serin Link INFO pages. No pump on the bench, so compressor/energy
   # rows render "—"/zeros — correct degradation is part of what this
   # exercises. The fake battery number drives the low-battery latch.
   outside_temp_sensor: oat

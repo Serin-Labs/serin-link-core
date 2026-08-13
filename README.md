@@ -127,6 +127,34 @@ Link's readings are used; the others are still bonded, still control the heat
 pump, and their room-source selection is still honored — only their
 *measurement* is ignored, with one log line per ignored Serin Link.
 
+To choose at runtime instead of baking a MAC into the config, use
+`primary_select:` — a Home Assistant dropdown listing `Auto (last reporting)`
+and `Serin Link 1` … `Serin Link 4`:
+
+```yaml
+  link_sensor:
+    primary_select:
+      name: "Primary Serin Link"
+```
+
+The two keys are mutually exclusive — a config error if you set both, so there
+is never a precedence question between a compile-time pin and a stored one.
+
+The dropdown numbers bond *slots*, but the choice is **persisted as a MAC**.
+That distinction is the whole point: forgetting a Serin Link compacts the bond
+table, so a stored slot would quietly re-point the pin at a different room. Two
+consequences you can watch for:
+
+- Forget an *earlier* Link and the pinned one shifts down a slot. The pin holds
+  — the dropdown just relabels itself from "Serin Link 2" to "Serin Link 1".
+- Forget the *pinned* Link and the pin reverts to `Auto`, with a warning in the
+  log. Leaving it would strand the room source at unavailable with no way back
+  short of a reflash. Note this is about **forgetting**, not going offline: an
+  offline pinned Link keeps its pin, which is the entire feature.
+
+Selecting an empty slot is ignored, logged, and the dropdown snaps back to
+what is actually in force.
+
 Two consequences worth knowing before you pin:
 
 - **A pinned Serin Link that goes offline takes the room source down with it** —
@@ -172,6 +200,40 @@ The same table is printed at boot with no configuration at all:
 [C][serin_link:...]     [0] 10:51:DB:8E:EB:38  live  last seen 3 s   model 'Serin Link' fw '1.4.2'  caps_seq 7  cert 2
 [C][serin_link:...]     [1] 10:51:DB:8E:F1:84  DOWN  last seen 412 s model 'Serin Link' fw '1.4.0'  caps_seq 7  cert 0
 ```
+
+### Grouping each Serin Link as its own device
+
+By default every entity lands on the controller's device, so `Serin Link 2 Last
+Seen` sits in a flat list next to the heat pump's own sensors. ESPHome
+sub-devices fix that with config alone — the component is unaware of them:
+
+```yaml
+esphome:
+  name: serin-master
+  devices:
+    - id: link1
+      name: "Serin Link 1"
+    - id: link2
+      name: "Serin Link 2"
+
+serin_link:
+  diagnostics:
+    links:
+      - mac_address: { name: "MAC",       device_id: link1 }
+        linked:      { name: "Connected", device_id: link1 }
+        last_seen:   { name: "Last Seen", device_id: link1 }
+        firmware:    { name: "Firmware",  device_id: link1 }
+      - mac_address: { name: "MAC",       device_id: link2 }
+        linked:      { name: "Connected", device_id: link2 }
+```
+
+Home Assistant then shows a *Serin Link 1* device with `Connected`, `MAC`,
+`Last Seen` and `Firmware` under it. Entity names can drop their prefix,
+because the device already carries it.
+
+Remember that a row is a bond slot: sub-device "Serin Link 1" is whichever
+Link currently occupies slot 0, not a fixed unit. The `MAC` entity is what
+tells you which one that is.
 
 ### Pairing and forgetting from automations
 

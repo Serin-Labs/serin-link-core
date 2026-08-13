@@ -900,6 +900,83 @@ static void t_room_sensor(void *ctx, const uint8_t src_mac[6],
 
 /* ── component ────────────────────────────────────────────────────────── */
 
+/* Which bond slot currently holds the pinned MAC. False when nothing is
+ * pinned, or when the pinned Serin Link is no longer in the bond table. */
+bool SerinLinkComponent::primary_slot_(int *out_idx) const {
+  if (!has_primary_dial_) return false;
+  int n = sl2_link_dial_count(const_cast<sl2_link_t *>(&link_));
+  for (int i = 0; i < n; i++) {
+    uint8_t mac[6];
+    if (!sl2_link_dial_mac(const_cast<sl2_link_t *>(&link_), i, mac)) continue;
+    if (std::memcmp(mac, primary_dial_, 6) == 0) {
+      if (out_idx != nullptr) *out_idx = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+void SerinLinkComponent::primary_select_control(size_t index) {
+  if (index == 0) {                       /* Auto — clear the pin */
+    has_primary_dial_ = false;
+    std::memset(primary_dial_, 0, sizeof primary_dial_);
+    n_ignored_logged_ = 0;                /* let the log speak again if re-pinned */
+    uint8_t blob[7] = {0};
+    primary_pref_.save(&blob);
+    ESP_LOGI(TAG, "primary Serin Link: auto (last reporting wins)");
+    if (primary_select_ != nullptr) primary_select_->publish_state(static_cast<size_t>(0));
+    return;
+  }
+
+  const int slot = static_cast<int>(index) - 1;
+  uint8_t mac[6];
+  if (!sl2_link_dial_mac(&link_, slot, mac)) {
+    /* An empty slot cannot be satisfied. Re-publish what is actually in force
+     * rather than leaving HA showing a selection the controller never took. */
+    ESP_LOGW(TAG, "primary Serin Link: slot %d is empty — selection ignored", slot + 1);
+    refresh_primary_select_();
+    return;
+  }
+  std::memcpy(primary_dial_, mac, 6);
+  has_primary_dial_ = true;
+  n_ignored_logged_ = 0;
+  /* Persist the MAC, never the slot: forgetting a Serin Link COMPACTS the bond
+   * table, so a stored slot would quietly re-point the pin at a different
+   * room. */
+  uint8_t blob[7];
+  blob[0] = 1;
+  std::memcpy(blob + 1, mac, 6);
+  primary_pref_.save(&blob);
+  char s[18];
+  sl2_fmt_mac(mac, s);
+  ESP_LOGI(TAG, "primary Serin Link: %s (slot %d)", s, slot + 1);
+  refresh_primary_select_();
+}
+
+void SerinLinkComponent::refresh_primary_select_() {
+  if (primary_select_ == nullptr) return;
+  int slot = 0;
+  if (!has_primary_dial_) {
+    primary_select_->publish_state(static_cast<size_t>(0));
+    return;
+  }
+  if (primary_slot_(&slot)) {
+    primary_select_->publish_state(static_cast<size_t>(slot + 1));
+    return;
+  }
+  /* Pinned Serin Link is gone from the bond table (forgotten, not merely
+   * offline): drop the pin rather than strand the room source at unavailable
+   * with no way back except a reflash. */
+  char s[18];
+  sl2_fmt_mac(primary_dial_, s);
+  ESP_LOGW(TAG, "primary Serin Link %s is no longer bonded — reverting to auto", s);
+  has_primary_dial_ = false;
+  std::memset(primary_dial_, 0, sizeof primary_dial_);
+  uint8_t blob[7] = {0};
+  primary_pref_.save(&blob);
+  primary_select_->publish_state(static_cast<size_t>(0));
+}
+
 std::string SerinLinkComponent::dial_mac_str(int idx) {
   uint8_t mac[6];
   if (!sl2_link_dial_mac(&link_, idx, mac)) return "";
@@ -927,6 +1004,18 @@ void SerinLinkComponent::setup() {
 
   use_f_pref_ = global_preferences->make_preference<bool>(0x53324C55 /* 'S2LU' */);
   use_f_pref_.load(&use_f_);
+
+  /* Stored primary pin: [0]=set flag, [1..6]=MAC. Only consulted when a
+   * primary_select: entity exists — with the static primary_link: key the YAML
+   * is the single source of truth and the two are mutually exclusive anyway. */
+  primary_pref_ = global_preferences->make_preference<uint8_t[7]>(0x5332504C /* 'S2PL' */);
+  if (primary_select_ != nullptr) {
+    uint8_t blob[7] = {0};
+    if (primary_pref_.load(&blob) && blob[0] == 1) {
+      std::memcpy(primary_dial_, blob + 1, 6);
+      has_primary_dial_ = true;
+    }
+  }
 
   room_src_pref_ = global_preferences->make_preference<uint8_t>(0x53325253 /* 'S2RS' */);
   if (!room_src_pref_.load(&selected_src_) || !is_room_src_valid(selected_src_))
@@ -1053,10 +1142,18 @@ void SerinLinkComponent::loop() {
     }
   }
   /* Its own tick: the block above is gated on link_sensor_cfg_, and
-   * diagnostics are useful without a dial room sensor configured. */
+   * diagnostics are useful without a Serin Link room sensor configured. */
   if (diagnostics_cfg_ && now - last_diag_ms_ >= 1000) {
     last_diag_ms_ = now;
     publish_diagnostics_(now);
+  }
+  /* Keep the dropdown honest against the live bond table: a forget compacts
+   * the table, so the pinned Serin Link can change SLOT without changing
+   * identity (the label follows it), and a pin whose Link was forgotten
+   * reverts to auto. publish_state already dedups, so this is quiet. */
+  if (primary_select_ != nullptr && now - last_primary_ms_ >= 1000) {
+    last_primary_ms_ = now;
+    refresh_primary_select_();
   }
   sl2_rxq_frame_t f;
   while (sl2_rxq_pop(&rxq_, &f)) {

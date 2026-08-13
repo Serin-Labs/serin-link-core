@@ -1,7 +1,7 @@
 # Serin Link + echavet/MitsubishiCN105ESPHome on one ESP32.
 #
 # VERIFIED ON HARDWARE 2026-07-10 (M5Stack AtomS3 Lite, ESPHome 2026.6.5,
-# IDF 5.5): the dial pairs, pulls CAPS (zone name comes from the climate
+# IDF 5.5): the Serin Link pairs, pulls CAPS (zone name comes from the climate
 # entity), streams STATE, and its mode/setpoint/fan commands route into the
 # cn105 climate entity via ClimateCall.
 #
@@ -15,6 +15,14 @@
 esphome:
   name: serin-cn105
   friendly_name: Living Room
+  # Sub-devices: each bonded Serin Link gets its own device in Home Assistant,
+  # so its entities group under "Serin Link 1" instead of sitting in a flat
+  # list beside the heat pump's. Pure config — the component is unaware.
+  devices:
+    - id: link1
+      name: "Serin Link 1"
+    - id: link2
+      name: "Serin Link 2"
 
 esp32:
   board: m5stack-atoms3
@@ -56,9 +64,9 @@ climate:
     name: "Living Room"
     update_interval: 2s
     remote_temperature_timeout: 3min   # cn105 reverts to its internal
-                                       # thermistor if the dial goes quiet
+                                       # thermistor if the Serin Link goes quiet
     # Vanes: cn105 exposes them as select entities; give them ids and bind
-    # them below so the dial gets both axes (option order = wire positions,
+    # them below so the Serin Link gets both axes (option order = wire positions,
     # "auto"/"swing" options map to the wire AUTO/SWING codes).
     vertical_vane_select:
       name: "Vertical Vane"
@@ -66,7 +74,7 @@ climate:
     horizontal_vane_select:
       name: "Horizontal Vane"
       id: vane_h
-    # Telemetry the dial can show (INFO TLVs) — give the platform's sensor
+    # Telemetry the Serin Link can show (INFO TLVs) — give the platform's sensor
     # blocks ids and bind them in serin_link: below.
     outside_air_temperature_sensor:
       name: "Outside Air Temp"
@@ -104,19 +112,19 @@ serin_link:
   id: serin          # NB: `id: link` collides with libc link() in generated code
   climate_id: hvac
   # zone_name: "Living Room"   # defaults to the climate entity's name
-  # Device-link health -> the dial's offline face + System "No link". Without
+  # Device-link health -> the Serin Link's offline face + System "No link". Without
   # this, a dead CN105 UART is invisible: the climate entity keeps existing,
-  # so the dial would show "Connected" with a frozen (or 0°) temperature.
+  # so the Serin Link would show "Connected" with a frozen (or 0°) temperature.
   # Omit the line entirely on platforms with no such signal — the fallback
   # heuristic (room temperature NaN = never heard from the device) still
   # catches the never-connected case.
   hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'
   vane_v_select: vane_v
   vane_h_select: vane_h
-  # Telemetry -> the dial's INFO pages (outside temp, compressor, energy,
+  # Telemetry -> the Serin Link's INFO pages (outside temp, compressor, energy,
   # runtime). Bind any sensors you like — these are the cn105 ones above.
   # A battery_sensor (any % sensor, e.g. a BLE room sensor imported from HA)
-  # additionally drives the dial's low-battery chip.
+  # additionally drives the Serin Link's low-battery chip.
   outside_temp_sensor: oat
   compressor_hz_sensor: comp_hz
   stage_sensor: stage
@@ -125,15 +133,15 @@ serin_link:
   runtime_sensor: runtime_h
   power_sensor: input_w
   energy_sensor: kwh_total
-  # The dial's own SHT4x, published to Home Assistant and offered to the heat
-  # pump as a room-temperature source. Adding this block is what makes the
-  # dial transmit at all, and what puts the source cycle in its Settings.
+  # The Serin Link's own SHT4x, published to Home Assistant and offered to the
+  # heat pump as a room-temperature source. Adding this block is what makes the
+  # Serin Link transmit at all, and what puts the source cycle in its Settings.
   link_sensor:
     temperature:
       id: dial_temp
       name: "Serin Link Temperature"
-      # Feed the heat pump ONLY while the dial is the selected source —
-      # cycling back to Internal on the dial must actually hand control back.
+      # Feed the heat pump ONLY while the Serin Link is the selected source —
+      # cycling back to Internal on it must actually hand control back.
       # The stale edge (§2 of the design doc) publishes NAN; guard it here
       # rather than assume the platform does — cn105 upstream happens to,
       # but this recipe is copied to platforms that may not.
@@ -145,17 +153,22 @@ serin_link:
               - lambda: 'id(hvac).set_remote_temperature(x);'
     humidity:
       name: "Serin Link Humidity"
-    # With more than one dial bonded, pin which one feeds the entities above —
-    # otherwise whichever reported last wins, and the value (plus the heat
-    # pump fed from it via the on_value recipe) alternates between rooms. Get
-    # the MAC from the diagnostics entities below, or from the bond table the
-    # component prints at boot.
-    # primary_link: "10:51:DB:8E:EB:38"
+    # With more than one Serin Link bonded, pin which one feeds the entities
+    # above — otherwise whichever reported last wins, and the value (plus the
+    # heat pump fed from it via the on_value recipe) alternates between rooms.
+    #
+    # primary_select: is the runtime form: a Home Assistant dropdown listing
+    # Auto / Serin Link 1..4, persisted by MAC so it survives a reboot and
+    # follows its Link when a forget renumbers the slots. Use
+    # primary_link: "AA:BB:.." instead to pin it in the config — the two are
+    # mutually exclusive.
+    primary_select:
+      name: "Primary Serin Link"
 
-  # Which dials are bonded, and are they alive. A row is a bond SLOT, not a
-  # dial: forgetting one shifts the later ones down, so declare mac_address on
-  # every row — that is what makes the shift visible instead of quietly
-  # relabelling a row with another dial's identity.
+  # Which Serin Links are bonded, and are they alive. A row is a bond SLOT, not
+  # a Serin Link: forgetting one shifts the later ones down, so declare
+  # mac_address on every row — that is what makes the shift visible instead of
+  # quietly relabelling a row with another Link's identity.
   diagnostics:
     bonded_count:
       name: "Bonded Serin Links"
@@ -165,18 +178,29 @@ serin_link:
       name: "Pairing Window"
     links:
       - mac_address:
-          name: "Serin Link 1 MAC"
+          name: "MAC"
+          device_id: link1
         linked:
-          name: "Serin Link 1 Linked"
+          name: "Connected"
+          device_id: link1
         last_seen:
-          name: "Serin Link 1 Last Seen"
+          name: "Last Seen"
+          device_id: link1
         firmware:
-          name: "Serin Link 1 Firmware"
+          name: "Firmware"
+          device_id: link1
       - mac_address:
-          name: "Serin Link 2 MAC"
+          name: "MAC"
+          device_id: link2
         linked:
-          name: "Serin Link 2 Linked"
-
+          name: "Connected"
+          device_id: link2
+        last_seen:
+          name: "Last Seen"
+          device_id: link2
+        firmware:
+          name: "Firmware"
+          device_id: link2
 button:
   - platform: template
     name: "Pair Serin Link"
@@ -184,7 +208,7 @@ button:
       - serin_link.pair_start:
           window: 60s
   # Drops ONE dial. slot: 0 is the first bond; because forgetting compacts the
-  # table, the dial that was in slot 1 becomes slot 0 afterwards — watch the
+  # table, the Serin Link that was in slot 1 becomes slot 0 afterwards — watch the
   # Dial N MAC entities to see it happen.
   - platform: template
     name: "Forget Serin Link 1"

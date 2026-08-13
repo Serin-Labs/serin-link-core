@@ -1,4 +1,4 @@
-# BAND BENCH: a real two-point (HEAT_COOL) zone for exercising the Serin dial's
+# BAND BENCH: a real two-point (HEAT_COOL) zone for exercising the Serin Link's
 # dual-setpoint band UI. Uses ESPHome's core `thermostat` platform — no heat
 # pump, no CN105, no echavet. Both heat AND cool actions plus a preset with low
 # AND high targets make ESPHome set supports_two_point_target_temperature, which
@@ -14,7 +14,7 @@
 #   - logger DEBUG (generator: INFO): pairing/link logs are the bench's point.
 #   - wifi power_save_mode NONE: ESP-NOW RX needs the radio awake.
 #
-# Flash onto any spare ESP32-S3 board (adjust `board:`). The dial then shows
+# Flash onto any spare ESP32-S3 board (adjust `board:`). The Serin Link then shows
 # the dual-hero "Auto" band face for this zone.
 substitutions:
   name: serin-band
@@ -45,7 +45,7 @@ esphome:
     priority: -100          # after wifi/api are up
     then:
       - lambda: 'id(serin).pair_start(120000);'   # pairing window on every boot
-      # Boot straight into the band mode so the dial shows the dual-hero face
+      # Boot straight into the band mode so the Serin Link shows the dual-hero face
       # as soon as it pairs (no need to pick "Auto" on the ring first).
       - climate.control:
           id: hvac
@@ -72,7 +72,7 @@ ota:
 web_server:
   version: 3
 
-# Local current-temperature source: a gentle wiggle so the dial shows a live
+# Local current-temperature source: a gentle wiggle so the Serin Link shows a live
 # room temp with nothing wired. The thermostat needs a real sensor to run.
 sensor:
   - platform: template
@@ -138,7 +138,7 @@ climate:
       - switch.turn_off: cooler
     # heat_cool_mode: true is what makes the entity ADVERTISE CLIMATE_MODE_HEAT_COOL
     # as a supported mode. Without it, two-point targets exist but the mode isn't
-    # offered, so serin_link never sets CAPS bit 3 and the dial hides the band
+    # offered, so serin_link never sets CAPS bit 3 and the Serin Link hides the band
     # node. (heat_action + cool_action already give the low/high target pair.)
     heat_cool_mode: true
     visual:
@@ -146,7 +146,7 @@ climate:
       max_temperature: 30 °C
       temperature_step: 0.5 °C
     # A preset carrying BOTH low and high targets flips the entity into
-    # two-point mode and seeds the band the dial first sees.
+    # two-point mode and seeds the band the Serin Link first sees.
     default_preset: Home
     preset:
       - name: Home

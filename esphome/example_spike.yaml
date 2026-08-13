@@ -2,10 +2,10 @@
 #
 # Purpose: prove that serin_link's raw ESP-NOW (encrypted peers + broadcast
 # pairing) coexists with ESPHome's Wi-Fi STA + native API on real hardware,
-# and that a real Serin dial can pair with it and lock on.
+# and that a real Serin Link can pair with it and lock on.
 #
-# Flash to any spare ESP32-S3 (adjust `board:`). Then on a Serin dial:
-# open pairing on the dial while pressing the "Pair Serin Dial" button here.
+# Flash to any spare ESP32-S3 (adjust `board:`). Then on a Serin Link:
+# open pairing on the Serin Link while pressing the "Pair Serin Link" button here.
 #
 # NOTE: no `espnow:` block — serin_link owns the radio and the config
 # validator rejects the built-in component (it has no link-layer encryption).
@@ -51,14 +51,17 @@ serin_link:
     link_mac:
       name: "Reporting Serin Link"
     stale_after: 60s
-    # With two dials bonded, whichever reported last owns the entities above.
-    # Pin one to stop the value alternating between rooms:
-    # primary_link: "10:51:DB:8E:EB:38"
+    # With two Serin Links bonded, whichever reported last owns the entities
+    # above. Pin one to stop the value alternating between rooms — as a Home
+    # Assistant dropdown here, or with primary_link: "AA:BB:.." in the config
+    # (the two are mutually exclusive).
+    primary_select:
+      name: "Primary Serin Link"
 
-  # Visibility into the bond table. A row is a bond SLOT, not a dial:
-  # forgetting one dial shifts the later ones down, which is why every row
+  # Visibility into the bond table. A row is a bond SLOT, not a Serin Link:
+  # forgetting one Serin Link shifts the later ones down, which is why every row
   # declares mac_address — it makes that shift visible in HA instead of
-  # silently relabelling "Dial 2" with dial 3's identity.
+  # silently relabelling "Serin Link 2" with Link 3's identity.
   diagnostics:
     bonded_count:
       name: "Bonded Serin Links"
