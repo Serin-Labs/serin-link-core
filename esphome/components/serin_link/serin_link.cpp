@@ -1029,6 +1029,12 @@ void SerinLinkComponent::loop() {
       publish_dial_(true);
     }
   }
+  /* Its own tick: the block above is gated on link_sensor_cfg_, and
+   * diagnostics are useful without a dial room sensor configured. */
+  if (diagnostics_cfg_ && now - last_diag_ms_ >= 1000) {
+    last_diag_ms_ = now;
+    publish_diagnostics_(now);
+  }
   sl2_rxq_frame_t f;
   while (sl2_rxq_pop(&rxq_, &f)) {
     ESP_LOGV(TAG, "rx type=%u len=%u from %02X:%02X:%02X:%02X:%02X:%02X",
@@ -1037,6 +1043,91 @@ void SerinLinkComponent::loop() {
     sl2_link_on_recv(&link_, f.src, f.dst, f.data, f.len);
   }
   sl2_link_loop(&link_);
+}
+
+/* Diagnostics are POLLED state, unlike everything else this component
+ * publishes, so they need an explicit discipline rather than inheriting the
+ * publish-on-change rule by construction. Walked at 1 Hz:
+ *
+ *  - mac / firmware / linked / bonded_count / pairing_status: on change only,
+ *    so steady state is silent.
+ *  - last_seen: neither on-change nor on-new-probe works. The dial firmware
+ *    probes background zones every 4 s + up to 1.8 s of stagger (see
+ *    SL2_DIAL_LIVE_MS's comment in sl2_link.h), so on a live dial this value
+ *    sawtooths 0-6 s: on-change would publish every second, on-new-probe
+ *    every ~4 s, and neither carries information. Published on a liveness
+ *    EDGE — the actual signal, when a dial dropped and when it returned —
+ *    and otherwise at most once per 60 s so an ongoing outage's duration
+ *    stays visible.
+ *  - pairing_seconds: the deliberate exception. 1 Hz while a window is open,
+ *    a final 0 when it closes: ~60 states per pairing attempt, and a live
+ *    countdown is the entity's whole purpose.
+ *
+ * The first pass publishes everything, so HA never holds a diagnostics entity
+ * at unknown after a restart. */
+void SerinLinkComponent::publish_diagnostics_(uint32_t now) {
+  const bool prime = !diag_primed_;
+  diag_primed_ = true;
+
+  const int n = sl2_link_dial_count(&link_);
+  if (bonded_count_sensor_ != nullptr && (prime || n != pub_bonded_count_)) {
+    pub_bonded_count_ = n;
+    bonded_count_sensor_->publish_state(n);
+  }
+
+  if (pairing_status_sensor_ != nullptr) {
+    const char *res = sl2_link_pair_result(&link_);
+    if (prime || pub_pair_result_ != res) {
+      pub_pair_result_ = res;
+      pairing_status_sensor_->publish_state(res);
+    }
+  }
+
+  if (pairing_seconds_sensor_ != nullptr) {
+    const int secs = sl2_link_pairing(&link_) ? pair_seconds_left() : 0;
+    if (prime || secs != pub_pair_seconds_) {
+      pub_pair_seconds_ = secs;
+      pairing_seconds_sensor_->publish_state(secs);
+    }
+  }
+
+  for (int i = 0; i < SL2_MAX_DIALS; i++) {
+    DialRow &r = dial_rows_[i];
+    if (!r.declared) continue;
+    sl2_dial_view_t v;
+    const bool occupied = dial_view(i, &v);
+
+    std::string mac_s;
+    std::string fw_s;
+    bool live = false;
+    float last_seen = NAN;
+    if (occupied) {
+      char buf[18];
+      sl2_fmt_mac(v.mac, buf);
+      mac_s = buf;
+      fw_s = v.have_info ? v.fw : "";
+      live = v.live;
+      if (v.last_seen_ms >= 0) last_seen = v.last_seen_ms / 1000.0f;
+    }
+
+    if (r.mac != nullptr && (prime || mac_s != r.pub_mac)) {
+      r.pub_mac = mac_s;
+      r.mac->publish_state(mac_s);
+    }
+    if (r.firmware != nullptr && (prime || fw_s != r.pub_fw)) {
+      r.pub_fw = fw_s;
+      r.firmware->publish_state(fw_s);
+    }
+    const bool live_edge = !r.pub_linked_valid || live != r.pub_linked;
+    if (r.linked != nullptr && (prime || live_edge)) r.linked->publish_state(live);
+    if (r.last_seen != nullptr &&
+        (prime || live_edge || now - r.last_seen_pub_ms >= 60000)) {
+      r.last_seen_pub_ms = now;
+      r.last_seen->publish_state(last_seen);
+    }
+    r.pub_linked = live;
+    r.pub_linked_valid = true;
+  }
 }
 
 void SerinLinkComponent::dump_config() {

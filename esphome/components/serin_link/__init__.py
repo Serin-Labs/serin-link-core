@@ -13,17 +13,21 @@ implements ESP-NOW link-layer encryption nor shares the recv callback.
 import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
-from esphome.components import climate, select, sensor, text_sensor
+from esphome.components import binary_sensor, climate, select, sensor, text_sensor
 from esphome.const import (
     CONF_HUMIDITY,
     CONF_ID,
+    CONF_MAC_ADDRESS,
     CONF_TEMPERATURE,
+    DEVICE_CLASS_CONNECTIVITY,
+    DEVICE_CLASS_DURATION,
     DEVICE_CLASS_HUMIDITY,
     DEVICE_CLASS_TEMPERATURE,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
     UNIT_CELSIUS,
     UNIT_PERCENT,
+    UNIT_SECOND,
 )
 
 CODEOWNERS = ["@Serin-Labs"]
@@ -32,7 +36,7 @@ DEPENDENCIES = ["wifi", "esp32"]
 # when no entity is bound — spike mode); an actual entity is still optional.
 # select/sensor/text_sensor are auto-loaded so the optional bindings always
 # compile.
-AUTO_LOAD = ["climate", "select", "sensor", "text_sensor"]
+AUTO_LOAD = ["binary_sensor", "climate", "select", "sensor", "text_sensor"]
 
 serin_link_ns = cg.esphome_ns.namespace("serin_link")
 SerinLinkComponent = serin_link_ns.class_("SerinLinkComponent", cg.Component)
@@ -57,6 +61,23 @@ CONF_ENERGY_SENSOR = "energy_sensor"
 CONF_LINK_SENSOR = "link_sensor"
 CONF_DIAL_MAC = "dial_mac"
 CONF_STALE_AFTER = "stale_after"
+CONF_PRIMARY_DIAL = "primary_dial"
+
+CONF_DIAGNOSTICS = "diagnostics"
+CONF_BONDED_COUNT = "bonded_count"
+CONF_PAIRING_STATUS = "pairing_status"
+CONF_PAIRING_SECONDS = "pairing_seconds"
+CONF_DIALS = "dials"
+CONF_LINKED = "linked"
+CONF_LAST_SEEN = "last_seen"
+CONF_FIRMWARE = "firmware"
+CONF_SLOT = "slot"
+CONF_WINDOW = "window"
+
+# Mirrors SL2_MAX_DIALS in sl2_bond.h. If that #define ever changes, change
+# this with it: the C side silently ignores rows past the limit, so the error
+# has to be raised here.
+SL2_MAX_DIALS = 4
 
 # link_sensor: — entities fed by the DIAL's own sensor, owned by this
 # component (the bindings above point at entities the user already has; here
@@ -100,6 +121,81 @@ def _link_sensor_schema(value):
     # "accept the dial as a room source, create no HA entities") validates
     # the same as the explicit `link_sensor: {}`.
     return LINK_SENSOR_SCHEMA(value if value is not None else {})
+
+
+# diagnostics: — read-only visibility into the controller's bond table. Like
+# link_sensor: these entities are owned by the component (there is nothing
+# pre-existing to bind to), presence of the block is the opt-in, and every
+# child is optional, so an install that omits it creates no entities and
+# behaves exactly as before.
+#
+# A `dials:` ROW IS A BOND SLOT, NOT A DIAL. sl2_link_forget_dial() compacts
+# the table, so forgetting slot 0 shifts every later dial down one and
+# "Dial 2 firmware" starts describing what used to be dial 3. Declare
+# mac_address: on every row — it is what makes that shift visible in HA
+# instead of silently relabelling. Rows past the number of bonded dials
+# publish ""/off/NAN.
+DIAL_ROW_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_MAC_ADDRESS): text_sensor.text_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_LINKED): binary_sensor.binary_sensor_schema(
+            device_class=DEVICE_CLASS_CONNECTIVITY,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_LAST_SEEN): sensor.sensor_schema(
+            unit_of_measurement=UNIT_SECOND,
+            accuracy_decimals=0,
+            device_class=DEVICE_CLASS_DURATION,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_FIRMWARE): text_sensor.text_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+    }
+)
+
+def _max_dial_rows(value):
+    # cv.Length's stock message is "length of value must be at most 4", which
+    # says nothing about WHY 4. The limit is the controller's bond table.
+    if len(value) > SL2_MAX_DIALS:
+        raise cv.Invalid(
+            f"at most {SL2_MAX_DIALS} dial rows — that is SL2_MAX_DIALS, the "
+            f"size of the controller's bond table, so a {SL2_MAX_DIALS + 1}th "
+            f"row could never be filled (got {len(value)})"
+        )
+    return value
+
+
+DIAGNOSTICS_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_BONDED_COUNT): sensor.sensor_schema(
+            accuracy_decimals=0,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_PAIRING_STATUS): text_sensor.text_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_PAIRING_SECONDS): sensor.sensor_schema(
+            unit_of_measurement=UNIT_SECOND,
+            accuracy_decimals=0,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_DIALS): cv.All(
+            cv.ensure_list(DIAL_ROW_SCHEMA),
+            _max_dial_rows,
+        ),
+    }
+)
+
+
+def _diagnostics_schema(value):
+    # `diagnostics:` with no sub-keys parses as None, not {} — same treatment
+    # as _link_sensor_schema above.
+    return DIAGNOSTICS_SCHEMA(value if value is not None else {})
 
 
 # esp-idf framework required (raw nvs_*, esp_now encrypted peers);
@@ -152,6 +248,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_POWER_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_ENERGY_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_LINK_SENSOR): _link_sensor_schema,
+        cv.Optional(CONF_DIAGNOSTICS): _diagnostics_schema,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -222,6 +319,48 @@ async def to_code(config):
                     await text_sensor.new_text_sensor(ls[CONF_DIAL_MAC])
                 )
             )
+    if CONF_DIAGNOSTICS in config:
+        diag = config[CONF_DIAGNOSTICS]
+        if CONF_BONDED_COUNT in diag:
+            cg.add(
+                var.set_bonded_count_sensor(
+                    await sensor.new_sensor(diag[CONF_BONDED_COUNT])
+                )
+            )
+        if CONF_PAIRING_STATUS in diag:
+            cg.add(
+                var.set_pairing_status_sensor(
+                    await text_sensor.new_text_sensor(diag[CONF_PAIRING_STATUS])
+                )
+            )
+        if CONF_PAIRING_SECONDS in diag:
+            cg.add(
+                var.set_pairing_seconds_sensor(
+                    await sensor.new_sensor(diag[CONF_PAIRING_SECONDS])
+                )
+            )
+        for idx, row in enumerate(diag.get(CONF_DIALS, [])):
+            mac = (
+                await text_sensor.new_text_sensor(row[CONF_MAC_ADDRESS])
+                if CONF_MAC_ADDRESS in row
+                else cg.nullptr
+            )
+            linked = (
+                await binary_sensor.new_binary_sensor(row[CONF_LINKED])
+                if CONF_LINKED in row
+                else cg.nullptr
+            )
+            last_seen = (
+                await sensor.new_sensor(row[CONF_LAST_SEEN])
+                if CONF_LAST_SEEN in row
+                else cg.nullptr
+            )
+            firmware = (
+                await text_sensor.new_text_sensor(row[CONF_FIRMWARE])
+                if CONF_FIRMWARE in row
+                else cg.nullptr
+            )
+            cg.add(var.add_dial_row(idx, mac, linked, last_seen, firmware))
     # No IDF managed component is declared for crypto: Ed25519 + X25519 are
     # vendored (Monocypher, see the comment over the crypto hooks in
     # serin_link.cpp), and HMAC-SHA256 is pinned in-tree in sl2_sha256.h.

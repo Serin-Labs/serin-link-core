@@ -1,10 +1,13 @@
 #pragma once
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#include <array>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -114,6 +117,24 @@ class SerinLinkComponent : public Component {
   }
   std::string dial_mac_str(int idx);
 
+  /* diagnostics: — component-owned read-only entities over the bond table.
+   * Rows are bond SLOTS (see the compaction note above), which is the whole
+   * reason the MAC entity exists. */
+  void set_bonded_count_sensor(sensor::Sensor *s) { bonded_count_sensor_ = s; }
+  void set_pairing_status_sensor(text_sensor::TextSensor *s) { pairing_status_sensor_ = s; }
+  void set_pairing_seconds_sensor(sensor::Sensor *s) { pairing_seconds_sensor_ = s; }
+  void add_dial_row(int idx, text_sensor::TextSensor *mac,
+                    binary_sensor::BinarySensor *linked, sensor::Sensor *last_seen,
+                    text_sensor::TextSensor *firmware) {
+    if (idx < 0 || idx >= SL2_MAX_DIALS) return;
+    dial_rows_[idx].mac = mac;
+    dial_rows_[idx].linked = linked;
+    dial_rows_[idx].last_seen = last_seen;
+    dial_rows_[idx].firmware = firmware;
+    dial_rows_[idx].declared = true;
+    diagnostics_cfg_ = true;
+  }
+
   /* HVAC iface backing (public: called from the C hook trampolines). */
   bool hvac_get_state(sl2_hvac_state_t *out);
   bool hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd);
@@ -182,6 +203,32 @@ class SerinLinkComponent : public Component {
   uint32_t dial_pub_ms_{0};          /* millis() of that publish; 0 = never */
   bool dial_stale_{false};           /* NAN already published */
   uint32_t last_dial_check_ms_{0};
+  /* Per-slot diagnostics entities plus the last value published for each, so
+   * the 1 Hz walk can honour the component's publish-on-change rule without
+   * asking each entity what it last held. */
+  struct DialRow {
+    bool declared{false};
+    text_sensor::TextSensor *mac{nullptr};
+    binary_sensor::BinarySensor *linked{nullptr};
+    sensor::Sensor *last_seen{nullptr};
+    text_sensor::TextSensor *firmware{nullptr};
+    std::string pub_mac;
+    std::string pub_fw;
+    bool pub_linked{false};
+    bool pub_linked_valid{false};
+    uint32_t last_seen_pub_ms{0};
+  };
+  void publish_diagnostics_(uint32_t now);
+  bool diagnostics_cfg_{false};
+  DialRow dial_rows_[SL2_MAX_DIALS];
+  sensor::Sensor *bonded_count_sensor_{nullptr};
+  text_sensor::TextSensor *pairing_status_sensor_{nullptr};
+  sensor::Sensor *pairing_seconds_sensor_{nullptr};
+  int pub_bonded_count_{-1};
+  std::string pub_pair_result_;
+  int pub_pair_seconds_{-1};
+  uint32_t last_diag_ms_{0};
+  bool diag_primed_{false};          /* the first pass publishes everything */
   /* Health of the SELECTED room source, for the ROOM_SRC TLV. */
   uint8_t room_src_status_() const;
   uint8_t selected_src_{SL2_ROOMSRC_INTERNAL};
