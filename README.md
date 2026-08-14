@@ -33,7 +33,7 @@ esp32:
     type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
-  - source: github://Serin-Labs/serin-link-core@v0.1.3-beta.10
+  - source: github://Serin-Labs/serin-link-core@v0.1.3-beta.11
     components: [serin_link]
 
 climate:
@@ -135,52 +135,26 @@ All bonded Links get the STATE stream, and a
 command from any of them is accepted — but the `link_sensor:` entities above
 are a *single* set, and by default whichever one reported last owns them. Two
 Links in two rooms therefore make that temperature — and any heat pump fed
-from it — alternate between rooms. Pin one:
+from it — alternate between rooms. Pin one with `primary_select:` — a Home
+Assistant dropdown listing `Auto (last reporting)` and one entry per
+`max_links:` slot:
 
 ```yaml
   link_sensor:
-    primary_link: "10:51:DB:8E:EB:38"
-    temperature:
-      name: "Serin Link Temperature"
-```
-
-Unset, the old last-reporting-wins behavior is unchanged. Set, only that
-Link's readings are used; the others are still bonded, still control the heat
-pump, and their room-source selection is still honored — only their
-*measurement* is ignored, with one log line per ignored Serin Link.
-
-To choose at runtime instead of baking a MAC into the config, use
-`primary_select:` — a Home Assistant dropdown listing `Auto (last reporting)`
-and `Serin Link 1` … `Serin Link 4`:
-
-```yaml
-  link_sensor:
-    primary_select:
-      name: "Primary Serin Link"
-```
-
-The two keys are mutually exclusive — a config error if you set both, so there
-is never a precedence question between a compile-time pin and a stored one.
-
-**How many entries the dropdown offers** is fixed when the firmware is built —
-ESPHome sets a select's options once and Home Assistant caches them from the
-initial entity listing, so the list cannot grow and shrink as Serin Links come
-and go. It therefore follows `max_links:` (via the rows it generates; a
-hand-written `links:` list counts the same way). With `max_links: 2` the
-dropdown offers `Auto`, `Serin Link 1` and `Serin Link 2` — not four slots,
-two of which would be refused. Override it explicitly if the two should
-differ:
-
-```yaml
     primary_select:
       name: "Primary Serin Link"    # bare `primary_select:` = this default
-      slots: 3          # default: max_links / `links:` rows, else 4
 ```
 
-A slot that is offered but not currently bonded (you declared three rows and
-only two Links have paired) is still refused on selection, logged, and the
-dropdown snaps back to what is in force. That residual case cannot be designed
-away without runtime option lists, which ESPHome does not have.
+On `Auto`, the old last-reporting-wins behavior is unchanged. Pinned, only
+that Link's readings are used; the others are still bonded, still control the
+heat pump, and their room-source selection is still honored — only their
+*measurement* is ignored, with one log line per ignored Serin Link. Add
+`internal: true` if you want the pin without an HA entity — the choice is
+stored on the controller either way.
+
+(The dropdown's length is fixed at build time — ESPHome sets a select's
+options once and Home Assistant caches them — which is why it follows
+`max_links:` rather than growing as Links pair.)
 
 The dropdown numbers bond *slots*, but the choice is **persisted as a MAC**.
 That distinction is the whole point: forgetting a Serin Link compacts the bond
@@ -244,8 +218,8 @@ only make the other rooms *visible*, they never feed the heat pump.
 The usual slot caveats apply: a row is a bond slot, so a forget-compaction
 re-homes it to the next Link (the row publishes unknown until the new
 occupant reports — no reading is ever shown under the wrong Link), and a Link
-silent past `stale_after:` takes its row to unknown the same way the
-arbitrated pair does.
+silent past ~90 s (three missed reports) takes its row to unknown the same
+way the arbitrated pair does.
 
 ### Seeing the bond table
 
@@ -260,7 +234,6 @@ where you'd hand-write `links:` rows if the generated names don't suit:
     bonded_count:    { name: "Bonded Serin Links" }
     pairing_status:  { name: "Pairing" }       # idle/listening/confirming/paired/
                                                # timeout/cancelled/full/pin-mismatch
-    pairing_seconds: { name: "Pairing Window" }
     # links: [...]   # custom-named per-slot rows; the row count must then
                      # agree with max_links (it IS the same statement twice)
 ```
@@ -349,8 +322,11 @@ and so do the C++ identifiers that mirror them, because that vocabulary is
 shared with the Serin Link firmware and both CN105 controller repos. If you
 reach into a lambda you will meet it there; nowhere else.
 
-`link_mac:` was called `dial_mac:` up to v0.1.3-beta.4. The old key still works
-and logs a deprecation warning; it will be removed in a later release.
+`link_mac:` was called `dial_mac:` up to v0.1.3-beta.4; the alias was removed
+in v0.1.3-beta.11 (the schema says so if you still use it). With per-slot
+`links:` rows, `link_mac:` itself is rarely worth declaring — each room's
+reading is visible directly, and with a primary pinned the value just echoes
+the dropdown.
 
 ## Trust model
 
@@ -425,8 +401,8 @@ Notes:
   the entity's visual range, out-of-range humidity is ignored, unknown
   modes/presets are no-ops.
 - Serin Link edits are debounced: a CMD burst (e.g. scrolling through setpoints)
-  merges into one `ClimateCall`, applied after `cmd_debounce:` (default
-  `300ms`, `0s` = apply immediately) of quiet. The STATE echoed to Serin Links
+  merges into one `ClimateCall`, applied after 300 ms of quiet (internal
+  tuning, matched to the knob's detent rate). The STATE echoed to Serin Links
   reflects the commanded values from the first CMD on — an optimistic
   overlay masks each field until the entity publishes it back (or a 10 s
   safety timeout lets the truth through), so async platforms like CN105
@@ -437,8 +413,8 @@ Notes:
   `tools/sync_esphome.sh`, and commit both — CI fails on drift.
 - Telemetry for the Serin Link's info pages binds through optional sensor keys
   (`outside_temp_sensor`, `compressor_hz_sensor`, `stage_sensor`,
-  `sub_mode_sensor`, `auto_sub_mode_sensor`, `battery_sensor` (+
-  `battery_low_threshold`, default 10%), `runtime_sensor`, `power_sensor`,
+  `sub_mode_sensor`, `auto_sub_mode_sensor`, `battery_sensor` (also drives
+  the low-battery flag: 10%, +5% clear hysteresis), `runtime_sensor`, `power_sensor`,
   `energy_sensor`) — each group sets its CAPS feature bit and INFO TLV; Wi-Fi,
   firmware, and system info are always served. Any platform's entities
   work; `example_cn105.yaml` shows the cn105 set.

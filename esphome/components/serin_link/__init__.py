@@ -10,8 +10,6 @@ mutually exclusive with ESPHome's built-in `espnow:` component, which neither
 implements ESP-NOW link-layer encryption nor shares the recv callback.
 """
 
-import logging
-
 import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
@@ -44,8 +42,6 @@ from esphome.const import (
     UNIT_PERCENT,
     UNIT_SECOND,
 )
-
-_LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@Serin-Labs"]
 DEPENDENCIES = ["wifi", "esp32"]
@@ -130,16 +126,32 @@ SL2_MAX_DIALS = 4
 # `links:` rows the diagnostics block declares.
 PRIMARY_AUTO_LABEL = "Auto (last reporting)"
 
+
+def _removed(message):
+    """Tombstone for a key that shipped and was then removed.
+
+    A key someone's working config used deserves a sentence about where its
+    job went, not ESPHome's generic "[x] is an invalid option". Raises only
+    when the key is PRESENT.
+    """
+
+    def validator(_value):
+        raise cv.Invalid(message)
+
+    return validator
+
+
 _PRIMARY_SELECT_SCHEMA = select.select_schema(
     PrimaryLinkSelect,
     entity_category=ENTITY_CATEGORY_CONFIG,
 ).extend(
     {
-        # How many Serin Links this install can hold, i.e. how many entries
-        # the dropdown offers besides "Auto". Defaults to the number of
-        # `links:` rows under diagnostics: (which max_links: generates), or
-        # all SL2_MAX_DIALS slots when there is no diagnostics block.
-        cv.Optional(CONF_SLOTS): cv.int_range(min=1, max=SL2_MAX_DIALS),
+        cv.Optional(CONF_SLOTS): _removed(
+            "`slots:` was removed in v0.1.3-beta.11 — the dropdown always "
+            "sizes itself from `max_links:` (or the declared rows). A "
+            "dropdown longer than the install only offered selections that "
+            "had to be refused. Just delete the key."
+        ),
     }
 )
 
@@ -212,27 +224,17 @@ LINK_SENSOR_SCHEMA = cv.Schema(
         cv.Optional(CONF_LINK_MAC): text_sensor.text_sensor_schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
-        # primary_link: — which bonded Serin Link feeds the entities above.
-        # Unset (the default) keeps the historical behavior: whichever Link
-        # reported last owns them, which with two Links in two rooms makes the
-        # entity — and any heat pump fed from it — alternate between rooms.
-        #
-        # Set, only this Link's readings are used. Other Links are NOT
-        # rejected: their room-source EDITS are still honored, because a Link
-        # re-sends an unacknowledged edit at ~3 Hz forever (wire spec §10d has
-        # no give-up rule). Arbitration decides whose reading is used, never
-        # whether an edit is accepted.
-        #
-        # Get the MAC from diagnostics: links: [].mac_address, or the bond
-        # table dump_config() prints at boot.
-        cv.Optional(CONF_PRIMARY_LINK): cv.mac_address,
-        # primary_select: — the same pin, chosen at runtime from a Home
-        # Assistant dropdown instead of baked into the config. Mutually
-        # exclusive with primary_link: (below), so there is never a precedence
-        # question between a compile-time pin and a stored one. The chosen
-        # Serin Link is persisted by MAC, so it survives a reboot and follows
-        # its Link across the slot shuffle a forget causes. Bare
-        # `primary_select:` gets a default name, like pair_button:.
+        # primary_select: — which bonded Serin Link feeds the entities above,
+        # as a Home Assistant dropdown. Unset, whichever Link reported last
+        # owns them, which with two Links in two rooms makes the entity — and
+        # any heat pump fed from it — alternate between rooms. Set, only the
+        # pinned Link's readings are used; other Links' room-source EDITS are
+        # still honored (a Link re-sends an unacknowledged edit at ~3 Hz
+        # forever, wire spec §10d) — arbitration decides whose reading is
+        # used, never whether an edit is accepted. The choice is persisted by
+        # MAC, so it survives a reboot and follows its Link across the slot
+        # shuffle a forget causes. Bare `primary_select:` gets a default
+        # name, like pair_button:.
         cv.Optional(CONF_PRIMARY_SELECT): lambda value: _PRIMARY_SELECT_SCHEMA(
             {CONF_NAME: "Primary Serin Link", **(value or {})}
             if value is None or isinstance(value, dict)
@@ -241,10 +243,24 @@ LINK_SENSOR_SCHEMA = cv.Schema(
         # links: — per-slot rows (see LINK_SENSOR_ROW_SCHEMA above). Presence
         # of the key is the opt-in, so existing configs grow no entities.
         cv.Optional(CONF_LINKS): _sensor_links,
-        # 90s = three missed 20s Serin Link keepalives plus slack.
-        cv.Optional(
-            CONF_STALE_AFTER, default="90s"
-        ): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_STALE_AFTER): _removed(
+            "`stale_after:` was removed in v0.1.3-beta.11 — freshness "
+            "derives from the Serin Link's fixed 20 s report cadence (a wire "
+            "constant, not a preference): readings go unknown after 90 s of "
+            "silence, three missed reports plus slack. Just delete the key."
+        ),
+        cv.Optional(CONF_PRIMARY_LINK): _removed(
+            "`primary_link:` was removed in v0.1.3-beta.11 — use "
+            "`primary_select:`, which does the same job at runtime, persists "
+            "the choice by MAC across reboots and slot shuffles, and reverts "
+            "safely when the pinned Serin Link is forgotten. Add "
+            "`internal: true` to it if you wanted a pin without an HA entity."
+        ),
+        cv.Optional(CONF_DIAL_MAC): _removed(
+            f"`{CONF_DIAL_MAC}:` was renamed to `{CONF_LINK_MAC}:` in "
+            f"v0.1.3-beta.5 (deprecated with a warning since) and removed in "
+            f"v0.1.3-beta.11."
+        ),
         # on_room_temperature: — fires with x (°C) when a usable reading
         # arrives: non-NaN, from the arbitrated primary Link, and only while
         # the Serin Link is the SELECTED room source, so cycling back to
@@ -268,36 +284,7 @@ def _link_sensor_schema(value):
     # the dict schema runs so the bare form (every child optional, meaning
     # "accept the Serin Link as a room source, create no HA entities")
     # validates the same as the explicit `link_sensor: {}`.
-    if value is None:
-        value = {}
-    # dial_mac: shipped in v0.1.3-beta.3 and was renamed to link_mac: when the
-    # component's user-facing vocabulary settled on "Serin Link". Accepted for
-    # one release with a warning; cv.rename_key alone would do it silently.
-    if isinstance(value, dict) and CONF_DIAL_MAC in value:
-        if CONF_LINK_MAC in value:
-            raise cv.Invalid(
-                f"set either `{CONF_LINK_MAC}:` or the deprecated "
-                f"`{CONF_DIAL_MAC}:`, not both"
-            )
-        _LOGGER.warning(
-            "serin_link: `%s:` is deprecated, rename it to `%s:` "
-            "(the component now calls the device a Serin Link, not a dial). "
-            "The old key still works in this release.",
-            CONF_DIAL_MAC,
-            CONF_LINK_MAC,
-        )
-        value = cv.rename_key(CONF_DIAL_MAC, CONF_LINK_MAC)(value)
-    # Static pin or runtime pin, never both: allowing both would mean deciding
-    # whether the config or the stored selection wins, and whichever answer we
-    # picked would surprise the other half of the users.
-    if isinstance(value, dict) and CONF_PRIMARY_LINK in value and CONF_PRIMARY_SELECT in value:
-        raise cv.Invalid(
-            f"`{CONF_PRIMARY_LINK}:` and `{CONF_PRIMARY_SELECT}:` do the same "
-            f"job and cannot both be set — `{CONF_PRIMARY_LINK}:` pins one "
-            f"Serin Link at compile time, `{CONF_PRIMARY_SELECT}:` exposes the "
-            f"choice as a Home Assistant dropdown that persists across reboots."
-        )
-    return LINK_SENSOR_SCHEMA(value)
+    return LINK_SENSOR_SCHEMA(value if value is not None else {})
 
 
 # diagnostics: — read-only visibility into the controller's bond table. Like
@@ -443,13 +430,12 @@ _BASE_SCHEMA = cv.Schema(
         # "swing" (case-insensitive) become the wire AUTO/SWING codes.
         cv.Optional(CONF_VANE_V_SELECT): cv.use_id(select.Select),
         cv.Optional(CONF_VANE_H_SELECT): cv.use_id(select.Select),
-        # Trailing quiet window before a burst of Serin Link edits is applied to the
-        # climate entity as a single ClimateCall (0s = apply each CMD
-        # immediately). The STATE echoed to Links reflects the commanded
-        # values either way (optimistic overlay until the entity confirms).
-        cv.Optional(
-            CONF_CMD_DEBOUNCE, default="300ms"
-        ): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_CMD_DEBOUNCE): _removed(
+            "`cmd_debounce:` was removed in v0.1.3-beta.11 — the 300 ms "
+            "burst-merge window is internal tuning, matched to the Serin "
+            "Link's detent rate and the state-overlay timeout, not a "
+            "preference. Just delete the key."
+        ),
         # Telemetry bindings -> INFO TLVs + CAPS feature bits (Serin Link telemetry
         # pages). All optional; unbound = TLV omitted, feature bit unset, the
         # the Link hides the row. Any platform's entities work — for echavet's
@@ -462,11 +448,13 @@ _BASE_SCHEMA = cv.Schema(
         cv.Optional(CONF_SUB_MODE_SENSOR): cv.use_id(text_sensor.TextSensor),
         cv.Optional(CONF_AUTO_SUB_MODE_SENSOR): cv.use_id(text_sensor.TextSensor),
         # battery_sensor: percent (0-100) from ANY sensor (BLE, HA import, …);
-        # also drives the STATE low-battery flag with +5% clear hysteresis,
-        # hence the 95% ceiling on the threshold.
+        # also drives the STATE low-battery flag (fixed at 10%, +5% clear
+        # hysteresis).
         cv.Optional(CONF_BATTERY_SENSOR): cv.use_id(sensor.Sensor),
-        cv.Optional(CONF_BATTERY_LOW_THRESHOLD, default="10%"): cv.All(
-            cv.percentage, cv.Range(min=0.0, max=0.95)
+        cv.Optional(CONF_BATTERY_LOW_THRESHOLD): _removed(
+            "`battery_low_threshold:` was removed in v0.1.3-beta.11 — the "
+            "low-battery flag is fixed at 10% with +5% clear hysteresis. "
+            "Just delete the key."
         ),
         cv.Optional(CONF_RUNTIME_SENSOR): cv.use_id(sensor.Sensor),
         # ENERGY TLV: power_sensor in W, energy_sensor in kWh (sent as Wh);
@@ -771,30 +759,16 @@ async def to_code(config):
         if key in config:
             ent = await cg.get_variable(config[key])
             cg.add(setter(ent))
-    cg.add(
-        var.set_battery_low_threshold(
-            int(round(config[CONF_BATTERY_LOW_THRESHOLD] * 100))
-        )
-    )
-    cg.add(var.set_cmd_debounce(config[CONF_CMD_DEBOUNCE].total_milliseconds))
     if CONF_LINK_SENSOR in config:
         ls = config[CONF_LINK_SENSOR]
         cg.add(var.set_link_sensor_enabled())
-        cg.add(var.set_dial_stale_after(ls[CONF_STALE_AFTER].total_milliseconds))
         if CONF_PRIMARY_SELECT in ls:
             ps = ls[CONF_PRIMARY_SELECT]
-            slots = ps.get(CONF_SLOTS)
-            if slots is None:
-                rows = (config.get(CONF_DIAGNOSTICS) or {}).get(CONF_LINKS) or []
-                slots = len(rows) or len(ls.get(CONF_LINKS) or []) or SL2_MAX_DIALS
+            rows = (config.get(CONF_DIAGNOSTICS) or {}).get(CONF_LINKS) or []
+            slots = len(rows) or len(ls.get(CONF_LINKS) or []) or SL2_MAX_DIALS
             sel = await select.new_select(ps, options=primary_select_options(slots))
             await cg.register_parented(sel, var)
             cg.add(var.set_primary_select(sel))
-        if CONF_PRIMARY_LINK in ls:
-            # list of HexInt -> braced initializer -> const std::array<uint8_t,6>&
-            cg.add(
-                var.set_primary_dial([HexInt(i) for i in ls[CONF_PRIMARY_LINK].parts])
-            )
         if CONF_TEMPERATURE in ls:
             cg.add(var.set_dial_temp_sensor(await sensor.new_sensor(ls[CONF_TEMPERATURE])))
         if CONF_HUMIDITY in ls:

@@ -166,8 +166,7 @@ serin_link:
     # above — otherwise whichever reported last wins, and the value (plus the
     # heat pump fed from it) alternates between rooms. The dropdown offers
     # Auto + one entry per max_links slot, persists by MAC, and follows its
-    # Link when a forget renumbers the slots. Use primary_link: "AA:BB:.."
-    # instead to pin it in the config — the two are mutually exclusive.
+    # Link when a forget renumbers the slots.
     primary_select:
     # Feed the heat pump the Serin Link's reading. Fires only for a fresh,
     # non-NaN reading from the arbitrated primary Link while the Serin Link

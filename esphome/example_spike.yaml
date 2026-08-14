@@ -41,20 +41,14 @@ serin_link:
   id: serin
   zone_name: "Spike Bench"
   # No climate entity to feed here, but this exercises the link_sensor:
-  # codegen path (owned sensor/text_sensor entities + stale_after) so CI
-  # compiles it.
+  # codegen path (owned sensor entities) so CI compiles it.
   link_sensor:
     temperature:
       name: "Spike Serin Link Temperature"
     humidity:
       name: "Spike Serin Link Humidity"
-    link_mac:
-      name: "Reporting Serin Link"
-    stale_after: 60s
     # With two Serin Links bonded, whichever reported last owns the entities
-    # above. Pin one to stop the value alternating between rooms — as a Home
-    # Assistant dropdown here, or with primary_link: "AA:BB:.." in the config
-    # (the two are mutually exclusive).
+    # above. Pin one to stop the value alternating between rooms.
     primary_select:
       name: "Primary Serin Link"
     # Per-slot rows: the entities above show ONE reading (the primary's);
@@ -80,8 +74,6 @@ serin_link:
       name: "Bonded Serin Links"
     pairing_status:
       name: "Pairing"
-    pairing_seconds:
-      name: "Pairing Window"
     links:
       - mac_address:
           name: "Serin Link 1 MAC"

@@ -89,11 +89,6 @@ serin_link:
       name: "Serin Link Temperature"
     humidity:
       name: "Serin Link Humidity"
-    # Which Serin Link is feeding. Only interesting when two are bonded to one
-    # controller and both offer a sensor: last reporting one wins, so the value
-    # alternates and this names the culprit.
-    link_mac:
-      name: "Serin Link"
 
 button:
   - platform: template

@@ -46,9 +46,6 @@ class SerinLinkComponent : public Component {
 
   void set_zone_name(const std::string &name) { zone_name_ = name; }
   void set_climate(climate::Climate *c) { climate_ = c; }
-  /* cmd_debounce: — trailing quiet window before a dial CMD burst is applied
-   * to the entity as one ClimateCall (0 = apply immediately). */
-  void set_cmd_debounce(uint32_t ms) { cmd_debounce_ms_ = ms; }
   /* hvac_link: — platform-specific device-link health (a generic climate
    * entity exists whether or not the device behind it answers). Unset, the
    * NaN-room-temp heuristic applies (sl2_hvac_link_infer). */
@@ -70,7 +67,6 @@ class SerinLinkComponent : public Component {
   void set_sub_mode_sensor(text_sensor::TextSensor *s) { sub_mode_sensor_ = s; }
   void set_auto_sub_mode_sensor(text_sensor::TextSensor *s) { auto_sub_mode_sensor_ = s; }
   void set_battery_sensor(sensor::Sensor *s) { battery_sensor_ = s; }
-  void set_battery_low_threshold(uint8_t pct) { batt_low_threshold_ = pct; }
   void set_runtime_sensor(sensor::Sensor *s) { runtime_sensor_ = s; }
   void set_power_sensor(sensor::Sensor *s) { power_sensor_ = s; }
   void set_energy_sensor(sensor::Sensor *s) { energy_sensor_ = s; }
@@ -84,7 +80,6 @@ class SerinLinkComponent : public Component {
   void set_dial_temp_sensor(sensor::Sensor *s) { dial_temp_sensor_ = s; }
   void set_dial_hum_sensor(sensor::Sensor *s) { dial_hum_sensor_ = s; }
   void set_dial_mac_sensor(text_sensor::TextSensor *s) { dial_mac_sensor_ = s; }
-  void set_dial_stale_after(uint32_t ms) { dial_stale_ms_ = ms; }
   /* link_sensor: links: — per-slot temperature/humidity rows. Unlike the
    * arbitrated pair above these show EVERY bonded Link's reading, non-primary
    * included; arbitration decides which Link feeds the pair and the heat
@@ -101,17 +96,11 @@ class SerinLinkComponent : public Component {
    * frame-driven dedup gate; only for fresh readings while the Serin Link is
    * the selected room source (the guards the YAML recipe used to carry). */
   void add_room_temp_trigger(Trigger<float> *t) { room_temp_triggers_.push_back(t); }
-  /* primary_link: (YAML) — pin the room source to one Serin Link. Unset =
-   * last reporting one wins (the historical behavior). The C++/core side keeps
-   * the wire spec's "dial" vocabulary; only the YAML key and HA-visible text
-   * say "Serin Link". */
-  void set_primary_dial(const std::array<uint8_t, 6> &mac) {
-    std::memcpy(primary_dial_, mac.data(), 6);
-    has_primary_dial_ = true;
-  }
-  /* primary_select: (YAML) — the runtime equivalent, a dropdown in HA.
-   * Mutually exclusive with primary_link: at config time, so there is never a
-   * precedence question between a compile-time pin and a stored one. */
+  /* primary_select: (YAML) — pin the room source to one Serin Link, as a
+   * dropdown in HA; the choice persists by MAC. Unset = last reporting one
+   * wins (the historical behavior). The C++/core side keeps the wire spec's
+   * "dial" vocabulary; only the YAML key and HA-visible text say
+   * "Serin Link". */
   void set_primary_select(select::Select *s) { primary_select_ = s; }
   /* index 0 = Auto (no pin); 1..SL2_MAX_DIALS = bond slot 0..N-1. Driven by
    * index rather than label so the option STRINGS live only in the Python

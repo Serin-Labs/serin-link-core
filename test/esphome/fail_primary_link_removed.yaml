@@ -1,0 +1,26 @@
+# primary_link: (the compile-time MAC pin) was removed in v0.1.3-beta.11 —
+# primary_select: strictly dominates (runtime, persisted by MAC, survives
+# compaction; internal: true if no HA entity is wanted). The schema must
+# point there, not just say "invalid option".
+esphome:
+  name: t-primary-link-removed
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  link_sensor:
+    primary_link: "10:51:DB:8E:EB:38"

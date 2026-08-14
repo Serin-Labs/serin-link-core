@@ -26,6 +26,10 @@ declare -A MUST_REJECT_WITH=(
   # not 'max_links': the dumped config echo contains that literal, so it
   # would match even when the rejection is for an unrelated reason
   [fail_sensor_rows_mismatch.yaml]='must agree'
+  # removed-key tombstones must explain themselves (phrases the config echo
+  # cannot contain), not fall through to ESPHome's generic "invalid option"
+  [fail_stale_after_removed.yaml]='report cadence'
+  [fail_primary_link_removed.yaml]='internal: true'
   [fail_sensor_links_no_count.yaml]='max_links'
 )
 
