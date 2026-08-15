@@ -333,6 +333,12 @@ bool SerinLinkComponent::hvac_get_state(sl2_hvac_state_t *out) {
   }
   out->sensor_batt_low = batt_low_latch_;
 
+  /* Presence gate: read the switch's published state each tick — the core's
+   * memcmp change detection turns a flip into a fan-out, so nothing here
+   * needs to be event-driven. */
+  out->screen_ctl = screen_switch_ != nullptr;
+  out->screen_off = screen_switch_ != nullptr && !screen_switch_->state;
+
   if (climate_ == nullptr) {                 /* spike: canned device */
     out->hvac_link = true;
     out->mode = SL2_MODE_HEAT;
@@ -606,6 +612,7 @@ bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
     out->features |= SL2_FEAT_COMPRESSOR;
   if (battery_sensor_ != nullptr) out->features |= SL2_FEAT_SENSOR_BATT;
   if (link_sensor_cfg_) out->features |= SL2_FEAT_LINK_SENSOR;
+  if (screen_switch_ != nullptr) out->features |= SL2_FEAT_SCREEN;
   if (runtime_sensor_ != nullptr) out->features |= SL2_FEAT_RUNTIME;
   if (power_sensor_ != nullptr || energy_sensor_ != nullptr)
     out->features |= SL2_FEAT_ENERGY;
@@ -834,10 +841,10 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
    * another dial's edit-only frame must not speak for this one. */
   if (src_mac != nullptr && memcmp(dial_mac_, src_mac, 6) == 0)
     dial_has_sensor_ = (p->flags & SL2_DSF_HAS_SENSOR) != 0;
-  const bool got_temp = p->temp_dc != SL2_DC_NA;
+  const bool got_temp = p->temp_cc != SL2_CC_NA;
   if (!got_temp) return;
 
-  /* dial_mac_ and (below) dial_hum_pct_ describe "the dial whose reading is
+  /* dial_mac_ and (below) dial_hum_cc_ describe "the dial whose reading is
    * on display" — adopt them only from a frame that actually carries one,
    * so an edit-only frame (no reading: a sensorless dial, or a source edit
    * before its ack) can't silently re-label the entity or leak another
@@ -846,17 +853,17 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
    * unconditional assignment below to cover a newly-adopted dial, since the
    * MAC-scoped check above ran before dial_mac_ picks up this frame's
    * source. Humidity additionally needs a same-source check of its own:
-   * temp_dc and hum_pct have independent NA sentinels, so one dial's
+   * temp_cc and hum_cc have independent NA sentinels, so one dial's
    * frame may carry a value the other's doesn't — if the reporting dial
    * just changed, drop the outgoing dial's humidity before this frame's
    * fields apply, so it can never be republished under the new dial's MAC. */
   if (src_mac != nullptr && memcmp(dial_mac_, src_mac, 6) != 0) {
-    dial_hum_pct_ = SL2_HUM_NA;
+    dial_hum_cc_ = SL2_HUM_CC_NA;
     memcpy(dial_mac_, src_mac, 6);
   }
   dial_has_sensor_ = (p->flags & SL2_DSF_HAS_SENSOR) != 0;
-  if (p->hum_pct != SL2_HUM_NA) dial_hum_pct_ = p->hum_pct;
-  dial_temp_dc_ = p->temp_dc;
+  if (p->hum_cc != SL2_HUM_CC_NA) dial_hum_cc_ = p->hum_cc;
+  dial_temp_cc_ = p->temp_cc;
   dial_temp_ms_ = millis();
 
   /* Publishing is frame-driven, never timed (the stale path in loop() is the
@@ -864,8 +871,13 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
    * in steady state the dial sends every 20 s or on a 0.5 C change, but while
    * a source edit is unconfirmed it re-sends every link-task pass — ~3 Hz —
    * until INFO echoes the source it asked for. Publishing per frame would
-   * spray HA with duplicates for the whole confirmation window. */
-  const bool changed = dial_temp_dc_ != dial_pub_dc_;
+   * spray HA with duplicates for the whole confirmation window.
+   *
+   * Dedup now compares centi, so in steady state nearly every 20 s keepalive
+   * differs and publishes — ~3/min, up from a handful per hour. That is the
+   * point of the change; the 30 s `due` floor and the 0.5 C send gate on the
+   * dial still bound it. */
+  const bool changed = dial_temp_cc_ != dial_pub_cc_;
   const bool due = dial_pub_ms_ == 0 || millis() - dial_pub_ms_ >= 30000;
   if (changed || due || dial_stale_) publish_dial_(false);
 }
@@ -877,14 +889,14 @@ void SerinLinkComponent::publish_dial_(bool stale) {
     if (dial_hum_sensor_ != nullptr) dial_hum_sensor_->publish_state(NAN);
     return;
   }
-  dial_pub_dc_ = dial_temp_dc_;
+  dial_pub_cc_ = dial_temp_cc_;
   dial_pub_ms_ = millis();
   if (dial_temp_sensor_ != nullptr)
-    dial_temp_sensor_->publish_state(dial_temp_dc_ / 10.0f);
+    dial_temp_sensor_->publish_state(dial_temp_cc_ / 100.0f);
   /* Humidity rides the temperature's publish decision — one gate, both
    * entities — so the two never drift apart in HA's history. */
-  if (dial_hum_sensor_ != nullptr && dial_hum_pct_ != SL2_HUM_NA)
-    dial_hum_sensor_->publish_state(dial_hum_pct_);
+  if (dial_hum_sensor_ != nullptr && dial_hum_cc_ != SL2_HUM_CC_NA)
+    dial_hum_sensor_->publish_state(dial_hum_cc_ / 100.0f);
   if (dial_mac_sensor_ != nullptr) {
     char mac[18];
     sl2_fmt_mac(dial_mac_, mac);
@@ -894,7 +906,7 @@ void SerinLinkComponent::publish_dial_(bool stale) {
    * deduped), plus the selected-source guard: cycling the Serin Link's room
    * source back to Internal must stop the feed, with no YAML condition. */
   if (room_src_is_link()) {
-    const float t = dial_temp_dc_ / 10.0f;
+    const float t = dial_temp_cc_ / 100.0f;
     for (auto *trig : room_temp_triggers_) trig->trigger(t);
   }
 }
@@ -921,17 +933,17 @@ void SerinLinkComponent::feed_sensor_row_(const uint8_t src_mac[6],
      * always publishes. */
     std::memcpy(r.mac, src_mac, 6);
     r.mac_valid = true;
-    r.hum_pct = SL2_HUM_NA;
+    r.hum_cc = SL2_HUM_CC_NA;
     r.pub_ms = 0;
-    r.pub_dc = SL2_DC_NA;
+    r.pub_cc = SL2_CC_NA;
   }
-  if (p->temp_dc == SL2_DC_NA) return;  /* edit-only frame: nothing to show */
-  if (p->hum_pct != SL2_HUM_NA) r.hum_pct = p->hum_pct;
-  r.temp_dc = p->temp_dc;
+  if (p->temp_cc == SL2_CC_NA) return;  /* edit-only frame: nothing to show */
+  if (p->hum_cc != SL2_HUM_CC_NA) r.hum_cc = p->hum_cc;
+  r.temp_cc = p->temp_cc;
   r.temp_ms = millis();
   /* Same frame-driven dedup as the arbitrated pair: on change, on the 30 s
    * heartbeat, or to recover from a published NAN. */
-  const bool changed = r.temp_dc != r.pub_dc;
+  const bool changed = r.temp_cc != r.pub_cc;
   const bool due = r.pub_ms == 0 || millis() - r.pub_ms >= 30000;
   if (changed || due || r.stale_pub) publish_sensor_row_(r, false);
 }
@@ -943,12 +955,12 @@ void SerinLinkComponent::publish_sensor_row_(SensorRow &r, bool stale) {
     if (r.hum != nullptr) r.hum->publish_state(NAN);
     return;
   }
-  r.pub_dc = r.temp_dc;
+  r.pub_cc = r.temp_cc;
   r.pub_ms = millis();
-  if (r.temp != nullptr) r.temp->publish_state(r.temp_dc / 10.0f);
+  if (r.temp != nullptr) r.temp->publish_state(r.temp_cc / 100.0f);
   /* Humidity rides the temperature's publish decision — one gate, both
    * entities — so the two never drift apart in HA's history. */
-  if (r.hum != nullptr && r.hum_pct != SL2_HUM_NA) r.hum->publish_state(r.hum_pct);
+  if (r.hum != nullptr && r.hum_cc != SL2_HUM_CC_NA) r.hum->publish_state(r.hum_cc / 100.0f);
 }
 
 void SerinLinkComponent::check_sensor_rows_(uint32_t now) {
@@ -963,8 +975,8 @@ void SerinLinkComponent::check_sensor_rows_(uint32_t now) {
        * new occupant's next frame repopulates through feed_sensor_row_. */
       const bool had_reading = r.temp_ms != 0;
       r.mac_valid = false;
-      r.temp_dc = SL2_DC_NA;
-      r.hum_pct = SL2_HUM_NA;
+      r.temp_cc = SL2_CC_NA;
+      r.hum_cc = SL2_HUM_CC_NA;
       r.temp_ms = 0;
       if (had_reading && !r.stale_pub) publish_sensor_row_(r, true);
       continue;
@@ -1365,6 +1377,16 @@ void SerinLinkComponent::publish_diagnostics_(uint32_t now) {
     }
     r.pub_linked = live;
     r.pub_linked_valid = true;
+
+    /* Screen status: lit iff the Link is reporting AND says so — an empty
+     * slot or a Link that stopped reporting reads off, matching the row
+     * family's ""/off/NAN convention for absent slots. */
+    const bool scr = occupied && v.screen_valid && v.screen_on;
+    if (r.screen != nullptr &&
+        (prime || !r.pub_screen_valid || scr != r.pub_screen))
+      r.screen->publish_state(scr);
+    r.pub_screen = scr;
+    r.pub_screen_valid = true;
   }
 }
 

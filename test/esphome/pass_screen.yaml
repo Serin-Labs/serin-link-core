@@ -1,0 +1,30 @@
+# screen: — the HA presence gate for the paired Serin Links' displays.
+# The bare key gets a default-named switch; with max_links set, each bond
+# slot also grows a generated "Screen" status binary_sensor (the Link reports
+# its actual panel state back over DIAL_SENSOR).
+esphome:
+  name: t-screen
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 2
+  screen:
+  diagnostics:
+    connected:

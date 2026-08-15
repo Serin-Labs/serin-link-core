@@ -21,6 +21,7 @@ from esphome.components import (
     climate,
     select,
     sensor,
+    switch,
     text_sensor,
 )
 from esphome.const import (
@@ -49,7 +50,7 @@ DEPENDENCIES = ["wifi", "esp32"]
 # when no entity is bound — spike mode); an actual entity is still optional.
 # select/sensor/text_sensor are auto-loaded so the optional bindings always
 # compile.
-AUTO_LOAD = ["binary_sensor", "button", "climate", "select", "sensor", "text_sensor"]
+AUTO_LOAD = ["binary_sensor", "button", "climate", "select", "sensor", "switch", "text_sensor"]
 
 serin_link_ns = cg.esphome_ns.namespace("serin_link")
 SerinLinkComponent = serin_link_ns.class_("SerinLinkComponent", cg.Component)
@@ -60,6 +61,7 @@ PrimaryLinkSelect = serin_link_ns.class_(
 PairLinkButton = serin_link_ns.class_(
     "PairLinkButton", button.Button, cg.Parented.template(SerinLinkComponent)
 )
+ScreenSwitch = serin_link_ns.class_("ScreenSwitch", switch.Switch)
 
 PairStartAction = serin_link_ns.class_("PairStartAction", automation.Action)
 PairCancelAction = serin_link_ns.class_("PairCancelAction", automation.Action)
@@ -108,6 +110,7 @@ CONF_LAST_SEEN = "last_seen"
 CONF_FIRMWARE = "firmware"
 CONF_SLOT = "slot"
 CONF_WINDOW = "window"
+CONF_SCREEN = "screen"
 
 # Mirrors SL2_MAX_DIALS in sl2_bond.h. If that #define ever changes, change
 # this with it: the C side silently ignores rows past the limit, so the error
@@ -173,13 +176,16 @@ LINK_SENSOR_ROW_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_TEMPERATURE): sensor.sensor_schema(
             unit_of_measurement=UNIT_CELSIUS,
-            accuracy_decimals=1,
+            # Temperature resolves to 0.01 C on the wire; humidity does too,
+            # but the sensor is +/-1.8 %RH so a second decimal would be pure
+            # noise in HA.
+            accuracy_decimals=2,
             device_class=DEVICE_CLASS_TEMPERATURE,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
         cv.Optional(CONF_HUMIDITY): sensor.sensor_schema(
             unit_of_measurement=UNIT_PERCENT,
-            accuracy_decimals=0,
+            accuracy_decimals=1,
             device_class=DEVICE_CLASS_HUMIDITY,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
@@ -208,13 +214,16 @@ LINK_SENSOR_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_TEMPERATURE): sensor.sensor_schema(
             unit_of_measurement=UNIT_CELSIUS,
-            accuracy_decimals=1,
+            # Temperature resolves to 0.01 C on the wire; humidity does too,
+            # but the sensor is +/-1.8 %RH so a second decimal would be pure
+            # noise in HA.
+            accuracy_decimals=2,
             device_class=DEVICE_CLASS_TEMPERATURE,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
         cv.Optional(CONF_HUMIDITY): sensor.sensor_schema(
             unit_of_measurement=UNIT_PERCENT,
-            accuracy_decimals=0,
+            accuracy_decimals=1,
             device_class=DEVICE_CLASS_HUMIDITY,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
@@ -318,6 +327,14 @@ LINK_ROW_SCHEMA = cv.Schema(
         cv.Optional(CONF_FIRMWARE): text_sensor.text_sensor_schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
+        # The Link's actual panel state (DIAL_SENSOR report): on = lit, dim
+        # and the glance face included; off = display asleep OR not reported.
+        # Requires the screen: switch (enforced in _expand_max_links) —
+        # without it the controller never declares SL2_FEAT_SCREEN and no
+        # Link ever reports.
+        cv.Optional(CONF_SCREEN): binary_sensor.binary_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
     }
 )
 
@@ -349,6 +366,24 @@ def _pair_button_schema(value):
     if value is None or isinstance(value, dict):
         value = {CONF_NAME: "Pair Serin Link", **(value or {})}
     return PAIR_BUTTON_SCHEMA(value)
+
+
+# screen: — the presence gate for every paired Link's display, as one HA
+# switch. ON = someone in the room (Links never sleep darker than the glance
+# face); OFF = room empty (Links sleep at their dim threshold; local touch
+# still wakes them). Optimistic and restored (default ON, so a controller
+# that HA never touches behaves exactly as before the switch existed); the
+# state fans out in STATE's flags2 via the normal change detection.
+SCREEN_SCHEMA = switch.switch_schema(
+    ScreenSwitch,
+    default_restore_mode="RESTORE_DEFAULT_ON",
+)
+
+
+def _screen_schema(value):
+    if value is None or isinstance(value, dict):
+        value = {CONF_NAME: "Serin Link Screen", **(value or {})}
+    return SCREEN_SCHEMA(value)
 
 
 # diagnostics: connected: — "is any bonded Serin Link alive", the component-
@@ -462,6 +497,7 @@ _BASE_SCHEMA = cv.Schema(
         cv.Optional(CONF_POWER_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_ENERGY_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_PAIR_BUTTON): _pair_button_schema,
+        cv.Optional(CONF_SCREEN): _screen_schema,
         cv.Optional(CONF_LINK_SENSOR): _link_sensor_schema,
         cv.Optional(CONF_DIAGNOSTICS): _diagnostics_schema,
     }
@@ -542,6 +578,18 @@ def _expand_max_links(config):
             f"`{CONF_HVAC_LINK}:` and `{CONF_HVAC_LINK_SENSOR}:` both bind "
             f"device-link health — set one, not both"
         )
+    if CONF_SCREEN not in config:
+        # Checked HERE (not in LINK_ROW_SCHEMA, which cannot see its siblings)
+        # and BEFORE the max_links early-return, so a bare hand-written links:
+        # list is covered too.
+        for row in ((config.get(CONF_DIAGNOSTICS) or {}).get(CONF_LINKS) or ()):
+            if CONF_SCREEN in row:
+                raise cv.Invalid(
+                    f"a `{CONF_LINKS}:` row's `{CONF_SCREEN}:` status entity "
+                    f"requires `{CONF_SCREEN}:` on serin_link itself — without "
+                    f"the switch the controller never declares SL2_FEAT_SCREEN, "
+                    f"no Link ever reports, and the row would read off forever"
+                )
     n = config.get(CONF_MAX_LINKS)
     devs = config.get(CONF_LINK_DEVICES)
     if devs is not None:
@@ -582,9 +630,18 @@ def _expand_max_links(config):
             )
         return config
     generated = []
+    # The Screen status row only exists alongside the screen: switch — it is
+    # the switch that makes Links report, and generating it unconditionally
+    # would sprout a new HA entity under every existing max_links user on
+    # upgrade.
+    row_entities = (
+        _ROW_ENTITIES + ((CONF_SCREEN, "Screen"),)
+        if CONF_SCREEN in config
+        else _ROW_ENTITIES
+    )
     for i in range(n):
         row = {}
-        for key, label in _ROW_ENTITIES:
+        for key, label in row_entities:
             ent = (
                 {CONF_NAME: label, CONF_DEVICE_ID: devs[i]}
                 if devs is not None
@@ -739,6 +796,9 @@ async def to_code(config):
         btn = await button.new_button(pb)
         await cg.register_parented(btn, var)
         cg.add(btn.set_window(pb[CONF_WINDOW].total_milliseconds))
+    if CONF_SCREEN in config:
+        sw = await switch.new_switch(config[CONF_SCREEN])
+        cg.add(var.set_screen_switch(sw))
     if CONF_VANE_V_SELECT in config:
         sel = await cg.get_variable(config[CONF_VANE_V_SELECT])
         cg.add(var.set_vane_v_select(sel))
@@ -843,6 +903,9 @@ async def to_code(config):
                 else cg.nullptr
             )
             cg.add(var.add_dial_row(idx, mac, linked, last_seen, firmware))
+            if CONF_SCREEN in row:
+                scr = await binary_sensor.new_binary_sensor(row[CONF_SCREEN])
+                cg.add(var.set_dial_screen_sensor(idx, scr))
     # No IDF managed component is declared for crypto: Ed25519 + X25519 are
     # vendored (Monocypher, see the comment over the crypto hooks in
     # serin_link.cpp), and HMAC-SHA256 is pinned in-tree in sl2_sha256.h.

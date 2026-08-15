@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define SL2_PROTO_VERSION    2
+#define SL2_PROTO_VERSION    3
 #define SL2_PROTO_MIN_COMPAT 1
 
 /* esp_now_set_pmk() input: a documented PUBLIC constant (16 bytes). It only
@@ -80,6 +80,12 @@ enum sl2_preset {               /* ESPHome preset superset; 0 = none */
 
 #define SL2_DC_NA      ((int16_t)0x7FFF)   /* "no value" for optional temps */
 #define SL2_HUM_NA     ((uint8_t)0xFF)     /* "no value" for humidity fields */
+#define SL2_CC_NA      ((int16_t)0x7FFF)   /* "no value" for centi-C temps */
+#define SL2_HUM_CC_NA  ((uint16_t)0xFFFF)  /* "no value" for centi-% humidity */
+/* NB SL2_HUM_NA (0xFF) and SL2_HUM_CC_NA (0xFFFF) mean the same thing in
+ * different units and now coexist. SL2_HUM_NA is for sl2_state_pkt's
+ * room_hum_pct / hum_set_pct; SL2_HUM_CC_NA is ONLY for sl2_dial_sensor_pkt.
+ * A mixed-up sentinel compares false forever and reads as "never reports". */
 
 /* ── STATE (ctrl -> dial) ─────────────────────────────────────────────── */
 
@@ -98,7 +104,15 @@ enum {  /* sl2_state_pkt.flags */
 };
 enum {  /* sl2_state_pkt.flags2 */
     SL2_SF2_SENSOR_BATT_LOW = 1u << 0,
-    /* bits 1-7 spare */
+    /* Remote screen gate (HA presence switch on the controller). Two bits so a
+     * zero-filled legacy/unconfigured sender reads as "no gate declared" and
+     * the dial keeps its own idle behavior — one bit couldn't tell "no gate"
+     * from "gate on". CTL set: OFF clear = someone present (dial never sleeps
+     * darker than glance); OFF set = room empty (dial sleeps at its dim
+     * threshold and re-sleeps after local wakes). */
+    SL2_SF2_SCREEN_CTL      = 1u << 1,
+    SL2_SF2_SCREEN_OFF      = 1u << 2,
+    /* bits 3-7 spare */
 };
 
 struct __attribute__((packed)) sl2_state_pkt {
@@ -270,16 +284,48 @@ enum {  /* sl2_caps_pkt.features — telemetry/services the controller offers */
     SL2_FEAT_ENERGY         = 1u << 8,
     SL2_FEAT_WIFI_SETUP     = 1u << 9,  /* accepts WIFI_SETUP (on-demand setup AP) */
     SL2_FEAT_LINK_SENSOR    = 1u << 10, /* accepts DIAL_SENSOR as a room source */
-    /* bits 11-15 spare */
+    SL2_FEAT_SCREEN         = 1u << 11, /* runs a screen gate (SL2_SF2_SCREEN_*)
+                                         * and wants SL2_DSF_SCREEN_* status back */
+    /* bits 12-15 spare */
 };
 
 /* vane axis descriptor byte: low nibble = n_pos (0 = axis absent),
- * bit4 = supports auto, bit5 = supports swing. */
+ * bit4 = supports auto, bit5 = supports swing, bit6 = SPLIT_TOP (below).
+ * bit7 spare. */
 #define SL2_VANECAP(n_pos, has_auto, has_swing) \
     (uint8_t)(((n_pos) & 0x0F) | ((has_auto) ? 0x10 : 0) | ((has_swing) ? 0x20 : 0))
+
+/* OR into SL2_VANECAP(): the TOP position (n_pos) is a vendor "split/wide"
+ * PSEUDO-position, not an angle in the axis's physical travel.
+ *
+ * Mitsubishi's horizontal vane reports 6 to mean "split" — louvres fanned
+ * apart — and a receiver that draws it as a sixth angle is simply wrong. Until
+ * this bit existed the wire could not say so: SL2_VANECAP(6, ...) meant "six
+ * angles" to one adapter and "five angles plus split" to another, and each end
+ * carried its own private 6. Senders that predate the bit are read by the
+ * legacy rule below, so declaring it is an improvement, never a requirement. */
+#define SL2_VANECAP_SPLIT_TOP 0x40
+
+/* The position a pre-SPLIT_TOP sender means by "split". Only ever consulted
+ * when the bit is absent AND the axis declares at least this many positions —
+ * every shipping head with a split is the Mitsubishi horizontal axis. */
+#define SL2_VANE_SPLIT_LEGACY 6
+
 static inline uint8_t sl2_vanecap_npos(uint8_t v)      { return v & 0x0F; }
 static inline bool    sl2_vanecap_has_auto(uint8_t v)  { return (v & 0x10) != 0; }
 static inline bool    sl2_vanecap_has_swing(uint8_t v) { return (v & 0x20) != 0; }
+static inline bool    sl2_vanecap_split_top(uint8_t v) {
+    return (v & SL2_VANECAP_SPLIT_TOP) != 0;
+}
+
+/* The wire position that means "split" on this axis, or 0 when it has none.
+ * One rule, shared by every adapter, so the magic 6 lives here and nowhere
+ * else. */
+static inline uint8_t sl2_vanecap_split_pos(uint8_t v) {
+    uint8_t n = sl2_vanecap_npos(v);
+    if (sl2_vanecap_split_top(v)) return n;
+    return n >= SL2_VANE_SPLIT_LEGACY ? SL2_VANE_SPLIT_LEGACY : 0;
+}
 
 struct __attribute__((packed)) sl2_caps_pkt {
     uint8_t  type;           /* SL2_PKT_CAPS */
@@ -418,11 +464,18 @@ struct __attribute__((packed)) sl2_dial_info_pkt {
  *
  * SL2_ROOMSRC_NOEDIT is 0xFF, not 0, on purpose: the tolerant decode
  * zero-fills a short frame, and 0 means Internal. A receiver must treat
- * len < 7 as reading-only by LENGTH, never by value. */
+ * len < 8 as reading-only by LENGTH, never by value (want_src sits at
+ * offset 7 now that hum_cc widened to 16 bits). */
 enum {  /* sl2_dial_sensor_pkt.flags */
     SL2_DSF_HAS_SENSOR = 1u << 0,  /* dial has sensing hardware (reading may
-                                    * still be absent — see temp_dc) */
-    /* bits 1-7 spare */
+                                    * still be absent — see temp_cc) */
+    /* Screen status report, gated on SL2_FEAT_SCREEN in CAPS. VALID+ON is the
+     * same two-bit scheme as SL2_SF2_SCREEN_*: a zero-filled legacy dial reads
+     * as "does not report", never as "screen off". ON covers every lit state
+     * (dimmed and the glance face included); only display-sleep clears it. */
+    SL2_DSF_SCREEN_VALID = 1u << 1,
+    SL2_DSF_SCREEN_ON    = 1u << 2,
+    /* bits 3-7 spare */
 };
 
 enum sl2_room_src {
@@ -440,14 +493,22 @@ enum sl2_room_status {
 
 struct __attribute__((packed)) sl2_dial_sensor_pkt {
     uint8_t  type;           /* SL2_PKT_DIAL_SENSOR */
-    uint8_t  version;        /* SL2_PROTO_VERSION */
+    uint8_t  version;        /* SL2_PROTO_VERSION; < 3 means deci fields — reject */
     uint8_t  flags;          /* SL2_DSF_* */
-    int16_t  temp_dc;        /* deci-C; SL2_DC_NA  = no reading */
-    uint8_t  hum_pct;        /* 0..100; SL2_HUM_NA = no reading */
+    int16_t  temp_cc;        /* centi-C; SL2_CC_NA = no reading */
+    uint16_t hum_cc;         /* centi-%, 0..10000; SL2_HUM_CC_NA = no reading */
     uint8_t  want_src;       /* enum sl2_room_src; NOEDIT = reading only */
-    uint8_t  reserved[2];    /* senders zero-fill, receivers ignore */
+    uint8_t  reserved[1];    /* senders zero-fill, receivers ignore */
 };
-#define SL2_DIAL_SENSOR_MIN_LEN 6   /* through hum_pct; want_src may be absent */
+#define SL2_DIAL_SENSOR_MIN_LEN 7   /* through hum_cc; want_src may be absent */
+/* The first version whose DIAL_SENSOR temp/hum fields are centi (v2 and
+ * earlier were deci, at the same packet size — see the version comment on
+ * sl2_dial_sensor_pkt.version above). A fixed historical fact, NOT an alias
+ * for SL2_PROTO_VERSION: that constant moves at the next protocol bump, and
+ * if this one moved with it the version gate in sl2_link.c would silently
+ * stop rejecting the v2-era frames it exists to reject. Do not "simplify"
+ * this back to SL2_PROTO_VERSION. */
+#define SL2_DIAL_SENSOR_MIN_VER 3
 
 /* ── sizeof guards — every vendored copy must agree ───────────────────── */
 #define SL2_STATIC_ASSERT(c, m) typedef char sl2_sa_##m[(c) ? 1 : -1]

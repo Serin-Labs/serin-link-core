@@ -72,7 +72,7 @@ static void test_layout(void) {
     assert(offsetof(struct sl2_caps_pkt, name) == 22);
     assert(offsetof(struct sl2_pair_req_pkt, eph_pub) == 8);
     assert(offsetof(struct sl2_pair_req_pkt, sig) == 72);
-    assert(SL2_PROTO_VERSION == 2);
+    assert(SL2_PROTO_VERSION == 3);
     assert(offsetof(struct sl2_dial_info_pkt, caps_seq) == 2);
     assert(offsetof(struct sl2_dial_info_pkt, model) == 3);
     assert(offsetof(struct sl2_dial_info_pkt, fw) == 27);
@@ -226,41 +226,73 @@ static void test_dial_sensor_sizeof(void) {
     assert((char *)&p.type     - (char *)&p == 0);
     assert((char *)&p.version  - (char *)&p == 1);
     assert((char *)&p.flags    - (char *)&p == 2);
-    assert((char *)&p.temp_dc  - (char *)&p == 3);
-    assert((char *)&p.hum_pct  - (char *)&p == 5);
-    assert((char *)&p.want_src - (char *)&p == 6);
+    assert((char *)&p.temp_cc  - (char *)&p == 3);
+    assert((char *)&p.hum_cc   - (char *)&p == 5);
+    assert((char *)&p.want_src - (char *)&p == 7);
 }
 
 static void test_dial_sensor_short_frame_is_reading_only(void) {
-    /* A sender that stops after hum_pct (SL2_DIAL_SENSOR_MIN_LEN) must decode
+    /* A sender that stops after hum_cc (SL2_DIAL_SENSOR_MIN_LEN) must decode
      * as "no edit", not as an edit to source 0 (Internal). Zero-fill would
      * mean "switch to Internal" — so NOEDIT cannot be 0. */
     uint8_t wire[SL2_DIAL_SENSOR_MIN_LEN] = {
         SL2_PKT_DIAL_SENSOR, SL2_PROTO_VERSION, SL2_DSF_HAS_SENSOR,
-        0xE2, 0x00,   /* temp_dc = 226 deci-C, little-endian */
-        45            /* hum_pct */
+        0xD4, 0x08,   /* temp_cc = 2260 centi-C = 22.60 C, little-endian */
+        0x94, 0x11,   /* hum_cc = 4500 centi-% = 45.00 %, little-endian */
     };
     struct sl2_dial_sensor_pkt p;
     sl2_decode_pkt(&p, sizeof p, wire, (int)sizeof wire);
-    assert(p.temp_dc == 226);
-    assert(p.hum_pct == 45);
+    assert(p.temp_cc == 2260);
+    assert(p.hum_cc == 4500);
     assert(p.want_src == 0);   /* zero-filled by the tolerant decode */
     /* Receivers MUST therefore treat a short frame as reading-only by length,
      * not by value. Pin that the min length excludes want_src. */
-    assert(SL2_DIAL_SENSOR_MIN_LEN == 6);
+    assert(SL2_DIAL_SENSOR_MIN_LEN == 7);
     assert(SL2_ROOMSRC_NOEDIT == 0xFF);
 }
 
 static void test_dial_sensor_na_sentinels(void) {
     struct sl2_dial_sensor_pkt p = {
         .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
-        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = SL2_DC_NA,
-        .hum_pct = SL2_HUM_NA, .want_src = SL2_ROOMSRC_NOEDIT,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_cc = SL2_CC_NA,
+        .hum_cc = SL2_HUM_CC_NA, .want_src = SL2_ROOMSRC_NOEDIT,
     };
     /* "I have hardware but no reading right now" must be expressible. */
     assert(p.flags & SL2_DSF_HAS_SENSOR);
-    assert(p.temp_dc == SL2_DC_NA);
-    assert(p.hum_pct == SL2_HUM_NA);
+    assert(p.temp_cc == SL2_CC_NA);
+    assert(p.hum_cc == SL2_HUM_CC_NA);
+}
+
+static void test_dial_sensor_is_still_nine_bytes(void) {
+    /* Humidity grows 1->2, reserved shrinks 2->1. The packet must not grow:
+     * ESP-NOW framing and the static assert both depend on 9. */
+    assert(sizeof(struct sl2_dial_sensor_pkt) == 9);
+}
+
+static void test_dial_sensor_min_len_covers_hum_cc(void) {
+    /* MIN_LEN is "through the humidity field" — 7 now that humidity is 16-bit. */
+    assert(SL2_DIAL_SENSOR_MIN_LEN == 7);
+    assert(offsetof(struct sl2_dial_sensor_pkt, hum_cc) == 5);
+}
+
+static void test_want_src_moved_to_offset_seven(void) {
+    /* The length gate is offsetof-based so it tracks this automatically.
+     * Pinned here so a future "simplify to a literal 7" fails loudly: the
+     * tolerant decode zero-fills, and ROOMSRC_INTERNAL is 0, so an off-by-one
+     * turns a reading-only frame into a silent source switch. */
+    assert(offsetof(struct sl2_dial_sensor_pkt, want_src) == 7);
+}
+
+static void test_centi_sentinels_are_out_of_range(void) {
+    /* SHT4x spans -40..125 C = -4000..12500 centi; RH tops out at 10000. */
+    assert(SL2_CC_NA == (int16_t)0x7FFF);
+    assert(SL2_HUM_CC_NA == (uint16_t)0xFFFF);
+    assert(SL2_CC_NA > 12500);
+    assert(SL2_HUM_CC_NA > 10000);
+}
+
+static void test_proto_version_is_three(void) {
+    assert(SL2_PROTO_VERSION == 3);
 }
 
 static void test_room_src_tlv_round_trip(void) {
@@ -285,6 +317,59 @@ static void test_link_sensor_feature_bit_is_free(void) {
     assert((taken & SL2_FEAT_LINK_SENSOR) == 0);
 }
 
+static void test_screen_bits_are_free(void) {
+    /* Remote screen gate: STATE.flags2 CTL/OFF pair, the CAPS feature bit,
+     * and the DIAL_SENSOR status pair. Two-bit schemes throughout so a
+     * zero-filled legacy sender decodes as "not participating", never as
+     * "screen off". Values are wire-frozen once shipped — pin them. */
+    assert(SL2_SF2_SCREEN_CTL == (1u << 1));
+    assert(SL2_SF2_SCREEN_OFF == (1u << 2));
+    assert((SL2_SF2_SENSOR_BATT_LOW & (SL2_SF2_SCREEN_CTL | SL2_SF2_SCREEN_OFF)) == 0);
+    assert(SL2_FEAT_SCREEN == (1u << 11));
+    assert((SL2_FEAT_SCREEN & SL2_FEAT_LINK_SENSOR) == 0);
+    assert(SL2_DSF_SCREEN_VALID == (1u << 1));
+    assert(SL2_DSF_SCREEN_ON == (1u << 2));
+    assert((SL2_DSF_HAS_SENSOR & (SL2_DSF_SCREEN_VALID | SL2_DSF_SCREEN_ON)) == 0);
+}
+
+static void test_vanecap_split_top_is_free(void) {
+    /* Vane split-position bit, OR'd into a vane axis descriptor byte
+     * alongside SL2_VANECAP(). Ported into the canonical header from an
+     * adopter that already shipped it; homekit's espnow_link.cpp carries a
+     * static_assert pinning the same SL2_VANE_SPLIT_LEGACY number, so it
+     * can never drift out from under that adopter. Values are wire-frozen
+     * once shipped -- pin them. */
+    assert(SL2_VANECAP_SPLIT_TOP == (1u << 6));
+    assert(SL2_VANE_SPLIT_LEGACY == 6);
+    /* SL2_VANECAP() itself can never set bit6: n_pos is masked to the low
+     * nibble, and has_auto/has_swing only ever reach 0x10/0x20. */
+    assert((SL2_VANECAP(0x0F, true, true) & SL2_VANECAP_SPLIT_TOP) == 0);
+
+    /* Bit isolation. */
+    assert(sl2_vanecap_split_top(SL2_VANECAP_SPLIT_TOP));
+    assert(!sl2_vanecap_split_top(0));
+
+    /* SPLIT_TOP set: the split position is whatever n_pos the axis
+     * declares, not tied to the legacy 6 -- native_h is the exact CAPS
+     * value homekit's CN105 horizontal-vane adapter advertises. */
+    uint8_t native_h = SL2_VANECAP(6, false, true) | SL2_VANECAP_SPLIT_TOP;
+    assert(sl2_vanecap_split_pos(native_h) == 6);
+    uint8_t four_split = SL2_VANECAP(4, false, false) | SL2_VANECAP_SPLIT_TOP;
+    assert(sl2_vanecap_split_pos(four_split) == 4);
+
+    /* Pre-SPLIT_TOP sender, same axis, bit never declared: the legacy rule
+     * applies only once n_pos reaches the Mitsubishi horizontal axis's
+     * width, and always resolves to that fixed constant, never to n_pos
+     * itself. */
+    uint8_t legacy_h = SL2_VANECAP(6, false, true);
+    assert(!sl2_vanecap_split_top(legacy_h));
+    assert(sl2_vanecap_split_pos(legacy_h) == SL2_VANE_SPLIT_LEGACY);
+    uint8_t wider_legacy = SL2_VANECAP(7, false, true);
+    assert(sl2_vanecap_split_pos(wider_legacy) == SL2_VANE_SPLIT_LEGACY);
+    uint8_t narrow = SL2_VANECAP(5, false, false);
+    assert(sl2_vanecap_split_pos(narrow) == 0);
+}
+
 int main(void) {
     test_layout();
     test_tolerant_decode();
@@ -296,8 +381,15 @@ int main(void) {
     test_dial_sensor_sizeof();
     test_dial_sensor_short_frame_is_reading_only();
     test_dial_sensor_na_sentinels();
+    test_dial_sensor_is_still_nine_bytes();
+    test_dial_sensor_min_len_covers_hum_cc();
+    test_want_src_moved_to_offset_seven();
+    test_centi_sentinels_are_out_of_range();
+    test_proto_version_is_three();
     test_room_src_tlv_round_trip();
     test_link_sensor_feature_bit_is_free();
+    test_screen_bits_are_free();
+    test_vanecap_split_top_is_free();
     printf("test_sl2_proto: ALL OK\n");
     return 0;
 }

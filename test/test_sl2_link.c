@@ -1265,7 +1265,8 @@ static void test_dial_cert(void) {
 static struct {
     int      calls;
     bool     last_is_edit;
-    int16_t  last_temp_dc;
+    int16_t  last_temp_cc;
+    uint16_t last_hum_cc;
     uint8_t  last_want_src;
     uint8_t  last_mac[6];
 } s_rs;
@@ -1275,7 +1276,8 @@ static void h_room_sensor(void *ctx, const uint8_t src_mac[6],
     (void)ctx;
     s_rs.calls++;
     s_rs.last_is_edit  = is_edit;
-    s_rs.last_temp_dc  = p->temp_dc;
+    s_rs.last_temp_cc  = p->temp_cc;
+    s_rs.last_hum_cc   = p->hum_cc;
     s_rs.last_want_src = p->want_src;
     memcpy(s_rs.last_mac, src_mac, 6);
 }
@@ -1308,12 +1310,15 @@ static void test_dial_sensor_reading_only_is_not_an_edit(void) {
     pair_dial(&l, &d);
 
     uint8_t wire[SL2_DIAL_SENSOR_MIN_LEN] = {
-        SL2_PKT_DIAL_SENSOR, SL2_PROTO_VERSION, SL2_DSF_HAS_SENSOR, 0xE2, 0x00, 45
+        SL2_PKT_DIAL_SENSOR, SL2_PROTO_VERSION, SL2_DSF_HAS_SENSOR,
+        0xD4, 0x08,   /* temp_cc = 2260 centi-C = 22.60 C, little-endian */
+        0x94, 0x11,   /* hum_cc = 4500 centi-% = 45.00 %, little-endian */
     };
     sl2_link_on_recv(&l, d.mac, F.own, wire, (int)sizeof wire);
 
     assert(s_rs.calls == 1);
-    assert(s_rs.last_temp_dc == 226);
+    assert(s_rs.last_temp_cc == 2260);
+    assert(s_rs.last_hum_cc == 4500);
     assert(!s_rs.last_is_edit);          /* short frame -> reading only */
     assert(sl2_mac_eq(s_rs.last_mac, d.mac));
     printf("dial_sensor reading-only ok\n");
@@ -1331,7 +1336,7 @@ static void test_dial_sensor_noedit_sentinel_is_not_an_edit(void) {
 
     struct sl2_dial_sensor_pkt p = {
         .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
-        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = 215, .hum_pct = 40,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
         .want_src = SL2_ROOMSRC_NOEDIT,
     };
     sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
@@ -1353,7 +1358,7 @@ static void test_dial_sensor_edit_is_flagged(void) {
 
     struct sl2_dial_sensor_pkt p = {
         .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
-        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = 215, .hum_pct = 40,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
         .want_src = SL2_ROOMSRC_LINK,
     };
     sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
@@ -1377,12 +1382,62 @@ static void test_dial_sensor_from_unbonded_mac_is_dropped(void) {
     const uint8_t stranger[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
     struct sl2_dial_sensor_pkt p = {
         .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
-        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = 215, .hum_pct = 40,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
         .want_src = SL2_ROOMSRC_LINK,
     };
     sl2_link_on_recv(&l, stranger, F.own, (const uint8_t *)&p, (int)sizeof p);
     assert(s_rs.calls == 0);   /* dial_by_mac() gate, same as CMD */
     printf("dial_sensor unbonded dropped ok\n");
+}
+
+/* v3 rescaled temp/hum from deci to centi WITHOUT changing the packet size,
+ * so a stale v2 frame decodes cleanly into the wrong units. Nothing else in
+ * the stack rejects on version (peer version is only a skew warning), so
+ * the hook-never-fires assertion below is the only proof the guard runs. */
+static void test_dial_sensor_v2_frame_is_rejected(void) {
+    memset(&s_rs, 0, sizeof s_rs);
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    fdial_t d;
+    dial_make(&d, 0xE6);
+    pair_dial(&l, &d);
+
+    uint8_t frame[9] = {0};
+    frame[0] = SL2_PKT_DIAL_SENSOR;
+    frame[1] = 2;                     /* v2 -- must be dropped */
+    frame[2] = SL2_DSF_HAS_SENSOR;
+    frame[3] = 0xC7; frame[4] = 0x00; /* 199 in whatever unit */
+    sl2_link_on_recv(&l, d.mac, F.own, frame, (int)sizeof frame);
+
+    assert(s_rs.calls == 0);
+    printf("dial_sensor v2 frame rejected ok\n");
+}
+
+static void test_dial_sensor_v3_frame_is_accepted(void) {
+    memset(&s_rs, 0, sizeof s_rs);
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    fdial_t d;
+    dial_make(&d, 0xE7);
+    pair_dial(&l, &d);
+
+    uint8_t frame[9] = {0};
+    frame[0] = SL2_PKT_DIAL_SENSOR;
+    frame[1] = 3;
+    frame[2] = SL2_DSF_HAS_SENSOR;
+    frame[3] = 0xC7; frame[4] = 0x09; /* 2503 centi-C = 25.03 C */
+    frame[5] = 0x10; frame[6] = 0x17; /* 5904 centi-% = 59.04 % */
+    frame[7] = SL2_ROOMSRC_NOEDIT;
+    sl2_link_on_recv(&l, d.mac, F.own, frame, (int)sizeof frame);
+
+    assert(s_rs.calls == 1);
+    assert(s_rs.last_temp_cc == 2503);
+    assert(s_rs.last_hum_cc == 5904);
+    printf("dial_sensor v3 frame accepted ok\n");
 }
 
 static void test_dial_sensor_null_hook_is_safe(void) {
@@ -1394,12 +1449,97 @@ static void test_dial_sensor_null_hook_is_safe(void) {
 
     struct sl2_dial_sensor_pkt p = {
         .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
-        .flags = SL2_DSF_HAS_SENSOR, .temp_dc = 215, .hum_pct = 40,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
         .want_src = SL2_ROOMSRC_NOEDIT,
     };
     sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
     /* no crash = pass */
     printf("dial_sensor null hook safe ok\n");
+}
+
+/* ── remote screen gate ───────────────────────────────────────────────── */
+
+/* The HA presence switch travels as STATE.flags2 bits. The shared change
+ * detection (memcmp on the built packet) must treat a gate flip as a change,
+ * fanning it out inside SL2_STATE_MIN_INTERVAL_MS rather than waiting for
+ * the 10 s heartbeat — a motion-triggered wake that lands seconds late is
+ * the feature not working. */
+static void test_screen_gate_in_state(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xE4);
+    pair_dial(&l, &d);
+    F.n_sent = 0;
+
+    /* no gate configured -> neither bit (legacy zero-fill semantics) */
+    dial_probe(&l, &d, 0);
+    sl2_link_loop(&l);
+    int si = last_send_of(SL2_PKT_STATE);
+    assert(si >= 0);
+    struct sl2_state_pkt st;
+    sl2_decode_pkt(&st, sizeof st, F.sent[si].data, (int)F.sent[si].len);
+    assert((st.flags2 & (SL2_SF2_SCREEN_CTL | SL2_SF2_SCREEN_OFF)) == 0);
+
+    /* switch exists and says ON -> CTL set, OFF clear, sent as a change */
+    H.screen_ctl = true;
+    F.now += SL2_STATE_MIN_INTERVAL_MS + 1;
+    sl2_link_loop(&l);
+    si = last_send_of(SL2_PKT_STATE);
+    sl2_decode_pkt(&st, sizeof st, F.sent[si].data, (int)F.sent[si].len);
+    assert((st.flags2 & SL2_SF2_SCREEN_CTL) != 0);
+    assert((st.flags2 & SL2_SF2_SCREEN_OFF) == 0);
+
+    /* room empties -> both bits */
+    int sends_before = count_sends_of(SL2_PKT_STATE, d.mac);
+    H.screen_off = true;
+    F.now += SL2_STATE_MIN_INTERVAL_MS + 1;
+    sl2_link_loop(&l);
+    assert(count_sends_of(SL2_PKT_STATE, d.mac) == sends_before + 1);
+    si = last_send_of(SL2_PKT_STATE);
+    sl2_decode_pkt(&st, sizeof st, F.sent[si].data, (int)F.sent[si].len);
+    assert((st.flags2 & SL2_SF2_SCREEN_CTL) != 0);
+    assert((st.flags2 & SL2_SF2_SCREEN_OFF) != 0);
+    printf("screen gate in state ok\n");
+}
+
+/* The dial reports its actual screen state in DIAL_SENSOR flags; the core
+ * stashes it in the per-dial runtime slot and surfaces it through dial_view,
+ * so adapters publish a status entity from the existing poll — no new
+ * receive path. The stash must happen even with no room_sensor hook wired
+ * (FHVAC has none): screen status is core state, not adapter policy. */
+static void test_dial_screen_status_view(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xE5);
+    pair_dial(&l, &d);
+
+    sl2_dial_view_t v;
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(!v.screen_valid);                  /* nothing reported yet */
+
+    struct sl2_dial_sensor_pkt p = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .flags = SL2_DSF_SCREEN_VALID | SL2_DSF_SCREEN_ON,
+        .temp_cc = SL2_CC_NA, .hum_cc = SL2_HUM_CC_NA,
+        .want_src = SL2_ROOMSRC_NOEDIT,
+    };
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(v.screen_valid && v.screen_on);
+
+    p.flags = SL2_DSF_SCREEN_VALID;           /* screen went dark */
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(v.screen_valid && !v.screen_on);
+
+    /* a dial that stops reporting (legacy flags) reads unknown, never off */
+    p.flags = SL2_DSF_HAS_SENSOR;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
+    assert(sl2_link_dial_view(&l, 0, &v));
+    assert(!v.screen_valid);
+    printf("dial screen status view ok\n");
 }
 
 int main(void) {
@@ -1436,6 +1576,10 @@ int main(void) {
     test_dial_sensor_edit_is_flagged();
     test_dial_sensor_from_unbonded_mac_is_dropped();
     test_dial_sensor_null_hook_is_safe();
+    test_dial_sensor_v2_frame_is_rejected();
+    test_dial_sensor_v3_frame_is_accepted();
+    test_screen_gate_in_state();
+    test_dial_screen_status_view();
     printf("test_sl2_link: ALL OK\n");
     return 0;
 }

@@ -19,7 +19,7 @@ The repo ships two things:
 
 The wire protocol is specified in
 [`docs/serin-link-wire-spec.md`](docs/serin-link-wire-spec.md) (current wire
-version: 2, `SL2_PROTO_VERSION`) and hardware-verified against ESPHome (CN105
+version: 3, `SL2_PROTO_VERSION`) and hardware-verified against ESPHome (CN105
 and generic climate platforms) and
 [mitsubishi-cn105-homekit](https://github.com/akifbayram/mitsubishi-cn105-homekit),
 an independent open-source CN105/HomeKit firmware.
@@ -256,6 +256,35 @@ The same table is printed at boot with no configuration at all:
 [C][serin_link:...]     [0] 10:51:DB:8E:EB:38  live  last seen 3 s   model 'Serin Link' fw '1.4.2'  caps_seq 7  cert 2
 [C][serin_link:...]     [1] 10:51:DB:8E:F1:84  DOWN  last seen 412 s model 'Serin Link' fw '1.4.0'  caps_seq 7  cert 0
 ```
+
+### Screen on/off from Home Assistant
+
+`screen:` adds one switch — the *presence gate* for every paired Serin Link's
+display. ON (the restored default) means someone is in the room: the Link
+runs its normal idle ladder but never goes darker than the glance face. OFF
+means the room is empty: the display sleeps within ~30 s of the last input
+(immediately if already idle), and a touch still wakes it — the gate re-sleeps
+it, never locks it. Flipping OFF→ON while a Link is dark wakes it straight
+into the glance face. Wire it to a motion sensor and the room's Serin Link
+lights when someone walks in and goes fully dark when the room empties:
+
+```yaml
+serin_link:
+  id: serin
+  climate_id: hvac
+  max_links: 1
+  screen:          # "Serin Link Screen" switch (default name)
+
+automation:        # in Home Assistant
+  # motion on  -> switch.turn_on  (screen visible)
+  # motion clear for 5 min -> switch.turn_off (screen dark)
+```
+
+With `max_links:` set, each bond slot also grows a generated "Screen"
+binary_sensor reporting that Link's *actual* panel state (a touch-wake shows
+up in HA within a second or two — itself a usable presence signal). Links
+report only when the switch is configured; on firmware too old to know the
+feature, the switch is simply ignored and the status sensor stays off.
 
 ### Grouping each Serin Link as its own device
 

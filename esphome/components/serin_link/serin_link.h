@@ -9,6 +9,7 @@
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/sensor/sensor.h"
+#include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include <array>
 #include <cstring>
@@ -169,6 +170,20 @@ class SerinLinkComponent : public Component {
     dial_rows_[idx].declared = true;
     diagnostics_cfg_ = true;
   }
+  /* links: screen: — its own setter rather than a fifth add_dial_row arg:
+   * the entity only exists alongside the screen: switch. */
+  void set_dial_screen_sensor(int idx, binary_sensor::BinarySensor *s) {
+    if (idx < 0 || idx >= SL2_MAX_DIALS) return;
+    dial_rows_[idx].screen = s;
+    dial_rows_[idx].declared = true;
+    diagnostics_cfg_ = true;
+  }
+
+  /* screen: — the presence gate switch. The component only ever READS its
+   * published state (hvac_get_state), so the core's per-tick change
+   * detection is the whole sync story; nullptr = both wire bits stay clear
+   * and Links keep their own idle behavior. */
+  void set_screen_switch(switch_::Switch *s) { screen_switch_ = s; }
 
   /* HVAC iface backing (public: called from the C hook trampolines). */
   bool hvac_get_state(sl2_hvac_state_t *out);
@@ -228,8 +243,8 @@ class SerinLinkComponent : public Component {
   text_sensor::TextSensor *dial_mac_sensor_{nullptr};
   std::vector<Trigger<float> *> room_temp_triggers_;
   uint32_t dial_stale_ms_{90000};
-  int16_t dial_temp_dc_{SL2_DC_NA};
-  uint8_t dial_hum_pct_{SL2_HUM_NA};
+  int16_t dial_temp_cc_{SL2_CC_NA};
+  uint16_t dial_hum_cc_{SL2_HUM_CC_NA};
   /* millis() of the last frame carrying a VALID temperature; 0 = never.
    * Freshness follows the TEMPERATURE, not the frame: a dial with sensing
    * hardware but no reading yet must not hold off the stale watchdog. */
@@ -258,7 +273,7 @@ class SerinLinkComponent : public Component {
    * frames arrive at up to 3 Hz while that dial's source edit is unconfirmed. */
   uint8_t ignored_logged_[SL2_MAX_DIALS][6]{};
   uint8_t n_ignored_logged_{0};
-  int16_t dial_pub_dc_{SL2_DC_NA};   /* last value published to HA */
+  int16_t dial_pub_cc_{SL2_CC_NA};   /* last value published to HA */
   uint32_t dial_pub_ms_{0};          /* millis() of that publish; 0 = never */
   bool dial_stale_{false};           /* NAN already published */
   uint32_t last_dial_check_ms_{0};
@@ -271,10 +286,10 @@ class SerinLinkComponent : public Component {
     sensor::Sensor *hum{nullptr};
     uint8_t mac[6]{};                /* whose reading this row shows */
     bool mac_valid{false};
-    int16_t temp_dc{SL2_DC_NA};
-    uint8_t hum_pct{SL2_HUM_NA};
+    int16_t temp_cc{SL2_CC_NA};
+    uint16_t hum_cc{SL2_HUM_CC_NA};
     uint32_t temp_ms{0};             /* millis() of last valid temp; 0 = never */
-    int16_t pub_dc{SL2_DC_NA};
+    int16_t pub_cc{SL2_CC_NA};
     uint32_t pub_ms{0};
     bool stale_pub{false};           /* NAN already published */
   };
@@ -296,15 +311,19 @@ class SerinLinkComponent : public Component {
     binary_sensor::BinarySensor *linked{nullptr};
     sensor::Sensor *last_seen{nullptr};
     text_sensor::TextSensor *firmware{nullptr};
+    binary_sensor::BinarySensor *screen{nullptr};
     std::string pub_mac;
     std::string pub_fw;
     bool pub_linked{false};
     bool pub_linked_valid{false};
+    bool pub_screen{false};
+    bool pub_screen_valid{false};
     uint32_t last_seen_pub_ms{0};
   };
   void publish_diagnostics_(uint32_t now);
   bool diagnostics_cfg_{false};
   DialRow dial_rows_[SL2_MAX_DIALS];
+  switch_::Switch *screen_switch_{nullptr};
   binary_sensor::BinarySensor *connected_sensor_{nullptr};
   bool pub_any_live_{false};
   bool pub_any_live_valid_{false};
@@ -342,6 +361,17 @@ class SerinLinkComponent : public Component {
 class PrimaryLinkSelect : public select::Select, public Parented<SerinLinkComponent> {
  protected:
   void control(size_t index) override { this->parent_->primary_select_control(index); }
+};
+
+/* screen: — the presence-gate switch. Optimistic: write_state only
+ * publishes; the component polls the published state from hvac_get_state
+ * every core tick, and the STATE fan-out's change detection carries the flip
+ * to every Link inside SL2_STATE_MIN_INTERVAL_MS. Restored (schema default
+ * RESTORE_DEFAULT_ON) so a reboot resumes the last gate rather than waking
+ * an empty room. */
+class ScreenSwitch : public switch_::Switch {
+ protected:
+  void write_state(bool state) override { this->publish_state(state); }
 };
 
 /* pair_button: — press opens the pairing window the schema baked in. */

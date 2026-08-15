@@ -1,11 +1,21 @@
 # Serin Link — wire specification
 
-**Status:** normative for `SL2_PROTO_VERSION 2`; matches
+**Status:** normative for `SL2_PROTO_VERSION 3`; matches
 `include/serin_link/sl2_proto.h` (the header is the byte-level ground truth —
 every packed struct there carries a `sizeof` static assert). Wire version 1
-was a pre-release draft that never shipped; version 2 is the first released
+was a pre-release draft that never shipped; version 2 was the first released
 protocol, and `SL2_PROTO_MIN_COMPAT 1` simply marks the floor of the version
 space.
+
+**Version 3 is a breaking wire change**, scoped to one packet type:
+`DIAL_SENSOR` (§10d) now carries centi-C/centi-% instead of deci-C/whole-%,
+at the same packet size — so a version mismatch doesn't fail loudly, it
+decodes cleanly into the wrong units. **Both the dial and the controller must
+run v3.** The guard is a per-packet version floor (`SL2_DIAL_SENSOR_MIN_VER`,
+independent of `SL2_PROTO_MIN_COMPAT`): a pre-v3 dial talking to a v3
+controller has its DIAL_SENSOR frames dropped, so the controller reports no
+reading rather than a wrong one — the version gate working as designed, not a
+bug. Every other packet type is unchanged by v3.
 
 Design goals, in priority order:
 
@@ -48,7 +58,7 @@ uint8_t version;   /* SL2_PROTO_VERSION */
 ```
 
 ```c
-#define SL2_PROTO_VERSION    2
+#define SL2_PROTO_VERSION    3
 #define SL2_PROTO_MIN_COMPAT 1
 ```
 
@@ -287,8 +297,9 @@ enum sl2_preset {                  /* ESPHome preset superset; 0 = none */
   (`round(i * 100 / steps)`). Wire stays step-count-agnostic forever; a
   continuous-fan vendor needs no change.
 - **Vanes:** per axis `uint8_t`: `0 = auto`, `1..n_pos` = physical positions
-  (1 = most horizontal/left), `255 = swing`. Vendor specials (Mitsubishi
-  wide-vane split etc.) are vendor TLVs, not core positions.
+  (1 = most horizontal/left), `255 = swing`. The vendor "split/wide" pseudo
+  position (e.g. Mitsubishi's horizontal vane) is a core CAPS bit,
+  `SL2_VANECAP_SPLIT_TOP` (§8) — not a vendor TLV.
 - **Temperatures:** deci-°C `int16_t` everywhere, always. °F is a *display*
   concern: `CAPS.ftab_id` selects the dial-side mapping table
   (`0` = linear round-trip, `1` = the Mitsubishi 61–88 °F table). New vendors
@@ -333,9 +344,25 @@ enum {  /* flags */
 };
 enum {  /* flags2 */
     SL2_SF2_SENSOR_BATT_LOW = 1u<<0,
-    /* bits 1-7 spare */
+    SL2_SF2_SCREEN_CTL      = 1u<<1,  /* controller runs a screen gate */
+    SL2_SF2_SCREEN_OFF      = 1u<<2,  /* ...and it currently says "room empty" */
+    /* bits 3-7 spare */
 };
 ```
+
+**Screen gate** (`SL2_SF2_SCREEN_*`): a controller with an HA-facing presence
+switch (e.g. driven by a motion-sensor automation) carries it here as a
+LEVEL, not a command — idempotent under re-sends, repaired by the heartbeat,
+reboot-safe. Two bits so a zero-filled legacy or unconfigured sender reads as
+"no gate declared" (a single bit could not tell that from "gate on"); an OFF
+bit without CTL is a sender bug and receivers read it as no-gate. Dial
+behavior: CTL+ON = never idle darker than the glance face; CTL+OFF = the
+sleep stage replaces the dim stage (sleep at ~30 s idle, immediately if
+already idle), local input still wakes it, and an OFF→ON edge while asleep
+wakes into the glance face. A dial bonded to several controllers folds their
+gates ON-wins (it lives in one room: only unanimous "empty" may force it
+dark), and a controller that goes offline decays out of the fold. Status
+flows back per-dial via DIAL_SENSOR (§10d), gated on `SL2_FEAT_SCREEN` (§8).
 
 Send policy: on first-live, on change (≥250 ms min interval), heartbeat 10 s —
 fanned out to every bonded dial. There is no HomeKit flag (HomeKit pairing
@@ -430,7 +457,8 @@ struct sl2_caps_pkt {
     uint16_t presets;        /* bitmask: bit N = sl2_preset N (bit 0 unused) */
     uint8_t  fan_steps;      /* 0 = fan not controllable; N = discrete steps (excl. auto) */
     uint8_t  fan_flags;      /* bit0 = has auto */
-    uint8_t  vane_v;         /* low nibble n_pos (0 = axis absent); bit4 auto; bit5 swing */
+    uint8_t  vane_v;         /* low nibble n_pos (0 = axis absent); bit4 auto;
+                              * bit5 swing; bit6 SPLIT_TOP — see below */
     uint8_t  vane_h;         /* same encoding */
     int16_t  set_min_dc;     /* setpoint range + step (also bounds the band) */
     int16_t  set_max_dc;
@@ -453,7 +481,9 @@ enum {  /* features — telemetry the controller can emit (INFO TLVs / creds) */
     SL2_FEAT_RUNTIME     = 1u<<6,  SL2_FEAT_LINK_OTA_CREDS = 1u<<7,
     SL2_FEAT_ENERGY      = 1u<<8,  SL2_FEAT_WIFI_SETUP = 1u<<9, /* accepts WIFI_SETUP */
     SL2_FEAT_LINK_SENSOR = 1u<<10, /* accepts DIAL_SENSOR as a room source */
-    /* bits 11-15 spare */
+    SL2_FEAT_SCREEN      = 1u<<11, /* runs a screen gate (SL2_SF2_SCREEN_*, §5)
+                                    * and wants SL2_DSF_SCREEN_* status (§10d) */
+    /* bits 12-15 spare */
 };
 ```
 
@@ -462,6 +492,21 @@ per `fan_steps`; vane pages exist per axis; setpoint clamps/steps per range;
 HEAT_COOL renders per the mode bit (enforcing `band_min_gap_dc`); humidity
 control appears iff `SL2_CF_HUM_CTRL`; settings pages appear per `features`
 bit. Nothing is vendor-assumed.
+
+**Vane split/wide position** (`vane_v`/`vane_h` bit 6, `SL2_VANECAP_SPLIT_TOP`):
+some heads report a vendor "split" or "wide" louvre spread as a pseudo
+position rather than a physical angle — on Mitsubishi's horizontal vane this
+is wire position 6, and a receiver that draws it as a sixth angle is simply
+wrong. The bit lets a controller say so explicitly: when set, position `n_pos`
+(the axis's last position, whatever its count) means split, not an angle.
+Controllers built before the bit existed don't set it; a receiver then falls
+back to `SL2_VANE_SPLIT_LEGACY` (6) — split *only* when `n_pos >= 6`, which
+covers every shipping split-capable head today (Mitsubishi's horizontal
+axis). `sl2_vanecap_split_top()` / `sl2_vanecap_split_pos()` implement both
+the flag read and the one-rule-for-both-cases lookup, so the magic number 6
+lives in one place. Declaring the bit is always an improvement over the
+legacy guess; a sender that omits it is read by the fallback rule, never
+rejected.
 
 **Current Serin dial firmware limitations** (a capability the dial doesn't
 render yet degrades gracefully; the wire carries it regardless):
@@ -645,19 +690,24 @@ reading and reports back what it applied via the `ROOM_SRC` INFO TLV (§9).
 ```c
 struct sl2_dial_sensor_pkt {
     uint8_t  type;           /* SL2_PKT_DIAL_SENSOR */
-    uint8_t  version;        /* SL2_PROTO_VERSION */
+    uint8_t  version;        /* SL2_PROTO_VERSION; < SL2_DIAL_SENSOR_MIN_VER
+                              * (3) means deci fields — reject, don't decode */
     uint8_t  flags;          /* SL2_DSF_* */
-    int16_t  temp_dc;        /* deci-C; SL2_DC_NA  = no reading */
-    uint8_t  hum_pct;        /* 0..100; SL2_HUM_NA = no reading */
+    int16_t  temp_cc;        /* centi-C; SL2_CC_NA = no reading */
+    uint16_t hum_cc;         /* centi-%, 0..10000; SL2_HUM_CC_NA = no reading */
     uint8_t  want_src;       /* enum sl2_room_src; NOEDIT = reading only */
-    uint8_t  reserved[2];    /* senders zero-fill, receivers ignore */
+    uint8_t  reserved[1];    /* senders zero-fill, receivers ignore */
 };
-#define SL2_DIAL_SENSOR_MIN_LEN 6   /* through hum_pct; want_src may be absent */
+#define SL2_DIAL_SENSOR_MIN_LEN 7   /* through hum_cc; want_src may be absent */
+#define SL2_DIAL_SENSOR_MIN_VER 3   /* first version with centi fields (below) */
 
 enum {  /* flags */
     SL2_DSF_HAS_SENSOR = 1u<<0,  /* dial has sensing hardware (reading may
-                                  * still be absent — see temp_dc) */
-    /* bits 1-7 spare */
+                                  * still be absent — see temp_cc) */
+    SL2_DSF_SCREEN_VALID = 1u<<1, /* this frame carries screen status */
+    SL2_DSF_SCREEN_ON    = 1u<<2, /* panel lit (dim/glance count; only
+                                   * display-sleep clears it) */
+    /* bits 3-7 spare */
 };
 
 enum sl2_room_src {
@@ -678,15 +728,53 @@ enum sl2_room_status {
 message type: it is idempotent, and the dial re-sends until the controller's
 INFO reflects the change, exactly as it treats CMD.
 
+**Units.** `temp_cc` / `hum_cc` are centi-C / centi-% (0.01 resolution;
+`hum_cc` ranges 0..10000) — *not* the deci-C / whole-percent used everywhere
+else on the wire. `sl2_state_pkt.room_dc` / `room_hum_pct` remain deci-C /
+whole-percent. Only the dial→controller `DIAL_SENSOR` direction is centi. The
+asymmetry is deliberate: the controller's reading travels to the dial for its
+own display, where 0.1 °C already exceeds what the face shows.
+
+**v3 breaking change and the version gate.** Before v3, this packet carried
+`int16_t temp_dc` (deci-C) at the same offset `temp_cc` now occupies, and a
+narrower `uint8_t hum_pct` (whole-%) where `hum_cc` (centi-%, `uint16_t`) sits
+now — the wider `hum_cc` absorbed a `reserved` byte to keep the packet's
+total size at 9 B throughout, so `len >= SL2_DIAL_SENSOR_MIN_LEN` alone
+cannot tell old frames from new. A v2 sender's deci-C `247` (24.7 °C), decoded
+as v3 centi-C, reads as 2.47 °C; the reverse misread — a v3 centi-C value
+decoded as v2 deci-C — inflates a real reading 10x (24.7 °C reporting as
+247 °C). Either way a plausible-looking, wrong number, not a crash. `version`
+is otherwise only a skew warning nothing else in the stack acts on, so the
+per-packet `ver >= SL2_DIAL_SENSOR_MIN_VER` check in the DIAL_SENSOR handler
+is the *sole* guard against either misread — and why `SL2_DIAL_SENSOR_MIN_VER`
+must stay a fixed historical constant (3) rather than track
+`SL2_PROTO_VERSION`, which moves at the next bump. **Both the dial and the
+controller must run v3.** A pre-v3 dial talking to a v3-or-later controller
+has its DIAL_SENSOR frames dropped by this gate: the controller reports no
+reading for that source rather than a wrong one. That is the gate working as
+designed, not a bug — a source that reads unavailable is a smaller failure
+than a confidently wrong room temperature.
+
 Normative rules:
 
-- A receiver MUST treat `len < 7` as reading-only, by length, never by
+- A receiver MUST treat `len < 8` as reading-only, by length, never by
   inspecting `want_src`. This is why `SL2_ROOMSRC_NOEDIT` is `0xFF` rather
   than `0`: the tolerant decode zero-fills a short frame, and `0` means
   Internal, so a short frame that were read as `want_src == 0` would silently
-  switch the room source.
-- A controller that does not set `SL2_FEAT_LINK_SENSOR` MUST be assumed to
-  ignore this packet; a dial MUST NOT send it to such a controller.
+  switch the room source. (`want_src` sits at offset 7 — after `flags` +
+  `temp_cc` + the now-16-bit `hum_cc` — one byte past `SL2_DIAL_SENSOR_MIN_LEN`,
+  not equal to it.)
+- A controller that sets neither `SL2_FEAT_LINK_SENSOR` nor `SL2_FEAT_SCREEN`
+  MUST be assumed to ignore this packet; a dial MUST NOT send it to such a
+  controller. Under `SL2_FEAT_SCREEN` alone a sensorless dial still streams —
+  the sensor fields ride as their NA sentinels.
+- **Screen status** (`SL2_DSF_SCREEN_*`, gated on `SL2_FEAT_SCREEN` in CAPS):
+  the dial reports its panel state — VALID+ON is the same two-bit scheme as
+  the §5 gate, so a zero-filled legacy dial reads "does not report", never
+  "screen off". A screen-state change counts as a send trigger (it must not
+  wait out the 20 s keepalive: a touch-wake is a presence signal). Receivers
+  track the LAST frame verbatim; a dial that stops setting VALID reads
+  unknown, not stale-off.
 - `applied_src` (the `ROOM_SRC` TLV) names the *selected* source even when
   `status` is `STALE`; a reader that renders only `applied_src` will show a
   dead feed as a live one.
@@ -700,6 +788,11 @@ Normative rules:
 - **New control surfaces** (aux heat, purifier/night-mode switches): next
   `caps_flags` bits + CMD mask bits 9–15 + claimed `reserved[]` bytes; if they
   outgrow that, a new packet type (12+) without touching existing layouts.
+  The screen gate (§5) is the worked example of the *reverse* surface — HA
+  controlling the dial — done as STATE level bits + a `features` gate + a
+  DIAL_SENSOR status echo, with no new packet type. A future *per-dial* gate
+  (different rooms, one controller) is the known limit of the shared STATE
+  fan-out and would be the thing that finally claims a new packet type.
 - **Second temperature sensor / follow-me:** implemented as `DIAL_SENSOR`
   (§10d). Arbitration is per-controller and does not yet pin *which* dial's
   sensor is the source when several dials on the same controller offer one.

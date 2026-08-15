@@ -18,6 +18,7 @@ declare -A MUST_CONTAIN=(
   [pass_link_sensor_links.yaml]='Humidity'      # generated per-slot sensor rows
   [pass_link_sensor_links_bare.yaml]='Serin Link 2 Temperature'  # flat names, slot 2
   [pass_link_sensor_links_rows.yaml]='Office Temperature'        # hand-written names
+  [pass_screen.yaml]='Serin Link 2 Screen'      # switch + generated status rows
 )
 declare -A MUST_REJECT_WITH=(
   [fail_rows_mismatch.yaml]='max_links'
@@ -31,6 +32,8 @@ declare -A MUST_REJECT_WITH=(
   [fail_stale_after_removed.yaml]='report cadence'
   [fail_primary_link_removed.yaml]='internal: true'
   [fail_sensor_links_no_count.yaml]='max_links'
+  # status rows without the switch would read "off" forever (no FEAT bit)
+  [fail_screen_row_without_switch.yaml]='requires `screen:`'
 )
 
 fails=0

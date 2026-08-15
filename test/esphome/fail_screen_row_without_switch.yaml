@@ -1,0 +1,30 @@
+# A hand-written links: row asking for the Screen status entity without the
+# screen: switch must be rejected: the switch is what makes the controller
+# declare SL2_FEAT_SCREEN, and without that the Links never report status —
+# the row would sit there reading "off" forever.
+esphome:
+  name: t-screenrow
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  diagnostics:
+    links:
+      - screen:
+          name: "Office Link Screen"
