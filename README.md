@@ -221,6 +221,42 @@ occupant reports — no reading is ever shown under the wrong Link), and a Link
 silent past ~90 s (three missed reports) takes its row to unknown the same
 way the arbitrated pair does.
 
+### Self-heating telemetry (bench only)
+
+A Serin Link measures the room from inside a warm enclosure, so its reading is
+corrected by a per-unit offset before it leaves the dial. `thermal:` publishes
+the inputs behind that correction, so it can be re-fitted against a reference
+sensor from Home Assistant history instead of from a bench soak:
+
+```yaml
+  link_sensor:
+    temperature: { name: "Serin Link Temperature" }   # corrected — the product
+    thermal:                                          # the calibration inputs
+      raw_temperature: { name: "Link Raw Temperature" }
+      applied_offset:  { name: "Link Applied Offset" }
+      die_temperature: { name: "Link Die Temperature" }
+      die_rise:        { name: "Link Die Rise" }
+      brightness:      { name: "Link Brightness" }
+      # ...and raw_humidity, raw_rate, cpu_busy, cpu_frequency, rssi, uptime,
+      #    screen, idle_off, face — all optional, all diagnostic
+```
+
+**This is instrumentation, not a feature.** Only a Serin Link built with
+`CONFIG_SERIN_LINK_THERM` sends the data; against a shipping Link every entity
+here stays unknown, which is correct and not a fault. Nothing it publishes
+influences arbitration, the room source, or the heat pump.
+
+The two that matter most are `raw_temperature` — the uncorrected reading, which
+is what makes a re-fit possible at all — and `die_rise` (SoC die temperature
+minus that raw reading), which integrates panel, CPU and radio heating into one
+number without any of them needing to be modelled separately.
+
+Readings arrive on the Serin Link's existing 20 s report; the telemetry adds no
+extra traffic and no extra radio wakeups, which is the point — a self-heating
+measurement whose instrument warms the device is measuring itself. `thermal:`
+follows `primary_select:` and the same ~90 s staleness rule as the rest of
+`link_sensor:`.
+
 ### Seeing the bond table
 
 `max_links:` already generates the per-slot entities ("Serin Link 1 MAC",

@@ -19,6 +19,11 @@ declare -A MUST_CONTAIN=(
   [pass_link_sensor_links_bare.yaml]='Serin Link 2 Temperature'  # flat names, slot 2
   [pass_link_sensor_links_rows.yaml]='Office Temperature'        # hand-written names
   [pass_screen.yaml]='Serin Link 2 Screen'      # switch + generated status rows
+  # thermal: is bench telemetry, so nothing about it is generated or counted —
+  # the one thing worth asserting is that its least ordinary entity types (a
+  # text_sensor and a non-device-class unit) survive validation, which the
+  # per-hour rate covers on its own.
+  [pass_link_sensor_thermal.yaml]='°C/h'
 )
 declare -A MUST_REJECT_WITH=(
   [fail_rows_mismatch.yaml]='max_links'

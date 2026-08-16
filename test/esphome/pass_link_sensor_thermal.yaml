@@ -1,0 +1,52 @@
+# link_sensor: thermal: — the Serin Link's self-heating telemetry entities.
+#
+# Bench instrumentation for the offset-calibration campaign, not a product
+# feature: the entities exist here whether or not any bonded Link is a build
+# that sends SL2_TLV_DIAL_THERM (one that isn't leaves them unknown).
+#
+# Also pins that thermal: composes with the rest of link_sensor: — the
+# arbitrated corrected pair, primary_select:, and the per-slot rows all stay
+# declarable alongside it, because thermal: rides the same frame and the same
+# arbitration rather than forming a second, parallel source of readings.
+esphome:
+  name: t-thermal
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 2
+  link_sensor:
+    temperature: { name: "Link Temperature" }
+    humidity:    { name: "Link Humidity" }
+    primary_select:
+    thermal:
+      raw_temperature: { name: "Link Raw Temperature" }
+      raw_humidity:    { name: "Link Raw Humidity" }
+      applied_offset:  { name: "Link Applied Offset" }
+      die_temperature: { name: "Link Die Temperature" }
+      die_rise:        { name: "Link Die Rise" }
+      raw_rate:        { name: "Link Raw Rate" }
+      brightness:      { name: "Link Brightness" }
+      cpu_busy:        { name: "Link CPU Busy" }
+      cpu_frequency:   { name: "Link CPU Frequency" }
+      rssi:            { name: "Link Radio RSSI" }
+      uptime:          { name: "Link Uptime" }
+      screen:          { name: "Link Screen" }
+      idle_off:        { name: "Link Idle Off Armed" }
+      face:            { name: "Link Face" }

@@ -371,6 +371,26 @@ void sl2_link_on_recv(sl2_link_t *l, const uint8_t src[6], const uint8_t dst[6],
                 const bool is_edit = has_want && p.want_src != SL2_ROOMSRC_NOEDIT;
                 l->hvac->room_sensor(l->hvac->ctx, src, &p, is_edit);
             }
+            /* Optional TLV tail (SL2_TLV_DIAL_THERM) — bench builds only, so
+             * the common path is a frame with nothing past the fixed struct
+             * and this loop never runs. sl2_tlv_next refuses to read past
+             * `len`, so a truncated tail simply ends iteration; a tail
+             * carrying a TLV we don't know is skipped by its own length. */
+            if (l->hvac->dial_therm && (size_t)len > sizeof p) {
+                const uint8_t *tail = data + sizeof p;
+                const size_t tlen = (size_t)len - sizeof p;
+                size_t off = 0; uint8_t t, tl; const uint8_t *v;
+                while (sl2_tlv_next(tail, tlen, &off, &t, &tl, &v)) {
+                    if (t != SL2_TLV_DIAL_THERM || tl != SL2_DIAL_THERM_LEN)
+                        continue;
+                    /* memcpy, not a cast: `v` points into the receive buffer at
+                     * whatever alignment the preceding TLVs left it, and the
+                     * struct has 16- and 32-bit members. */
+                    struct sl2_dial_therm_tlv th;
+                    memcpy(&th, v, sizeof th);
+                    l->hvac->dial_therm(l->hvac->ctx, src, &th);
+                }
+            }
         }
         d->last_probe_ms = now;   /* a sensor report proves liveness */
         break;

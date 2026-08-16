@@ -34,12 +34,15 @@ from esphome.const import (
     CONF_TRIGGER_ID,
     DEVICE_CLASS_CONNECTIVITY,
     DEVICE_CLASS_DURATION,
+    DEVICE_CLASS_FREQUENCY,
     DEVICE_CLASS_HUMIDITY,
+    DEVICE_CLASS_SIGNAL_STRENGTH,
     DEVICE_CLASS_TEMPERATURE,
     ENTITY_CATEGORY_CONFIG,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
     UNIT_CELSIUS,
+    UNIT_DECIBEL_MILLIWATT,
     UNIT_PERCENT,
     UNIT_SECOND,
 )
@@ -98,6 +101,21 @@ CONF_STALE_AFTER = "stale_after"
 CONF_PRIMARY_LINK = "primary_link"
 CONF_PRIMARY_SELECT = "primary_select"
 CONF_SLOTS = "slots"
+
+CONF_THERMAL = "thermal"
+CONF_RAW_TEMPERATURE = "raw_temperature"
+CONF_RAW_HUMIDITY = "raw_humidity"
+CONF_APPLIED_OFFSET = "applied_offset"
+CONF_DIE_TEMPERATURE = "die_temperature"
+CONF_DIE_RISE = "die_rise"
+CONF_RAW_RATE = "raw_rate"
+CONF_BRIGHTNESS = "brightness"
+CONF_CPU_BUSY = "cpu_busy"
+CONF_CPU_FREQUENCY = "cpu_frequency"
+CONF_RSSI = "rssi"
+CONF_UPTIME = "uptime"
+CONF_IDLE_OFF = "idle_off"
+CONF_FACE = "face"
 
 
 CONF_DIAGNOSTICS = "diagnostics"
@@ -202,6 +220,156 @@ def _sensor_links(value):
     return cv.All(cv.ensure_list(LINK_SENSOR_ROW_SCHEMA), _max_link_rows)(value)
 
 
+# link_sensor: thermal: — the Serin Link's self-heating telemetry
+# (SL2_TLV_DIAL_THERM, a tail on the same DIAL_SENSOR frame the block below
+# already consumes).
+#
+# INTERNAL BENCH INSTRUMENTATION, not a product feature. Only a Serin Link
+# built with CONFIG_SERIN_LINK_THERM appends the tail; against any shipping
+# Link these entities stay unknown forever, which is the honest reading and not
+# a fault. Nothing here feeds arbitration, the room source, or the heat pump.
+#
+# It sits under link_sensor: rather than diagnostics: because it arrives on the
+# SAME frame and wants the SAME two policies — primary_select: arbitration and
+# the 90 s staleness rule — and re-deriving either under diagnostics: would be
+# two implementations of one question.
+#
+# Resolution is 20 s, the Link's DIAL_SENSOR keepalive. That is deliberate and
+# not raisable: the tail rides an existing frame precisely so telemetry adds no
+# radio wakeups, and a self-heating study whose instrument changes the duty
+# cycle is measuring itself. The sensor samples at 10 s and the derivative is
+# filtered on the Link from the full series, so what 20 s costs is display
+# resolution, not information.
+THERMAL_SCHEMA = cv.Schema(
+    {
+        # THE regressand. Uncorrected, unfiltered, straight off the SHT4x.
+        # Publishing only the corrected value bakes today's offset in
+        # unrecoverably — you cannot re-fit what you did not record.
+        cv.Optional(CONF_RAW_TEMPERATURE): sensor.sensor_schema(
+            unit_of_measurement=UNIT_CELSIUS,
+            accuracy_decimals=2,
+            device_class=DEVICE_CLASS_TEMPERATURE,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        # Two decimals here where the corrected humidity gets one: the RH
+        # correction is a multiplicative gain fitted from the same soaks, and
+        # re-fitting temperature without raw RH would strand it on old data.
+        cv.Optional(CONF_RAW_HUMIDITY): sensor.sensor_schema(
+            unit_of_measurement=UNIT_PERCENT,
+            accuracy_decimals=2,
+            device_class=DEVICE_CLASS_HUMIDITY,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        # What is being subtracted right now. Constant today; the moment the
+        # correction becomes dynamic this is how you watch it across a cycle.
+        cv.Optional(CONF_APPLIED_OFFSET): sensor.sensor_schema(
+            unit_of_measurement=UNIT_CELSIUS,
+            accuracy_decimals=2,
+            device_class=DEVICE_CLASS_TEMPERATURE,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_DIE_TEMPERATURE): sensor.sensor_schema(
+            unit_of_measurement=UNIT_CELSIUS,
+            accuracy_decimals=2,
+            device_class=DEVICE_CLASS_TEMPERATURE,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        # die - raw. The best single covariate there is: it integrates panel,
+        # CPU, radio and regulator without any of them needing to be modelled.
+        # Computed against RAW, never the corrected value — the corrected one
+        # already has an offset removed, so the difference would carry today's
+        # answer inside tomorrow's input.
+        cv.Optional(CONF_DIE_RISE): sensor.sensor_schema(
+            unit_of_measurement=UNIT_CELSIUS,
+            accuracy_decimals=2,
+            device_class=DEVICE_CLASS_TEMPERATURE,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        # Filtered on the Link, not here, so this is byte-identical to the
+        # derivative a future compensation filter consumes. No device_class:
+        # HA's temperature class rejects a per-hour unit.
+        cv.Optional(CONF_RAW_RATE): sensor.sensor_schema(
+            unit_of_measurement="°C/h",
+            accuracy_decimals=2,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_BRIGHTNESS): sensor.sensor_schema(
+            unit_of_measurement=UNIT_PERCENT,
+            accuracy_decimals=0,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_CPU_BUSY): sensor.sensor_schema(
+            unit_of_measurement=UNIT_PERCENT,
+            accuracy_decimals=0,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        # A WITNESS, expected to be a flat line: the Link builds with
+        # CONFIG_PM_ENABLE off, so the S3 is pinned at 240 MHz for the life of
+        # the boot. On the wire so an analyst can confirm that held for a given
+        # run instead of assuming it.
+        cv.Optional(CONF_CPU_FREQUENCY): sensor.sensor_schema(
+            unit_of_measurement="MHz",
+            accuracy_decimals=0,
+            device_class=DEVICE_CLASS_FREQUENCY,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        # The Link's RX RSSI of THIS controller. Not a heat term — the Link
+        # sends fixed-power ESP-NOW and never associates as a station, so the
+        # "weak signal -> more TX power -> more heat" mechanism is absent here.
+        # Recorded because it is free and because it distinguishes a link
+        # degrading from a Link that stopped reporting.
+        cv.Optional(CONF_RSSI): sensor.sensor_schema(
+            unit_of_measurement=UNIT_DECIBEL_MILLIWATT,
+            accuracy_decimals=0,
+            device_class=DEVICE_CLASS_SIGNAL_STRENGTH,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        # The timebase witness: a reboot mid-soak splits the dataset, and
+        # without this column you find that out by arguing about a discontinuity.
+        cv.Optional(CONF_UPTIME): sensor.sensor_schema(
+            unit_of_measurement=UNIT_SECOND,
+            accuracy_decimals=0,
+            device_class=DEVICE_CLASS_DURATION,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        # Panel lit (dim and the glance face count) vs display asleep. Carried
+        # in the thermal TLV in its own right rather than read off
+        # SL2_DSF_SCREEN_ON, which only populates when the controller declared
+        # SL2_FEAT_SCREEN — telemetry that decodes correctly only under
+        # someone else's feature gate is a trap.
+        cv.Optional(CONF_SCREEN): binary_sensor.binary_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        # Which offset regime applied_offset is in: Advanced -> Idle screen.
+        cv.Optional(CONF_IDLE_OFF): binary_sensor.binary_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        # live / glance / offline / unpaired / wifi-off / other. A thermal
+        # REGIME marker, not a UI report: warm-up, a lit home dial and a dim
+        # glance face are different populations, and without a column naming
+        # which, the fit turns into an argument about which rows to drop.
+        cv.Optional(CONF_FACE): text_sensor.text_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+    }
+)
+
+
+def _thermal_schema(value):
+    # Bare `thermal:` parses as None. Unlike link_sensor: itself there is no
+    # reason to accept the bare form — it would enable a feature that creates
+    # nothing — so map it and let the (all-optional) dict schema through,
+    # keeping the failure mode "you configured no entities", not a traceback.
+    return THERMAL_SCHEMA(value if value is not None else {})
+
+
 # link_sensor: — entities fed by the SERIN LINK's own sensor, owned by this
 # component (the bindings above point at entities the user already has; here
 # the Serin Link is the data source, so there is nothing to bind to). Presence
@@ -252,6 +420,8 @@ LINK_SENSOR_SCHEMA = cv.Schema(
         # links: — per-slot rows (see LINK_SENSOR_ROW_SCHEMA above). Presence
         # of the key is the opt-in, so existing configs grow no entities.
         cv.Optional(CONF_LINKS): _sensor_links,
+        # thermal: — bench self-heating telemetry (see THERMAL_SCHEMA above).
+        cv.Optional(CONF_THERMAL): _thermal_schema,
         cv.Optional(CONF_STALE_AFTER): _removed(
             "`stale_after:` was removed in v0.1.3-beta.11 — freshness "
             "derives from the Serin Link's fixed 20 s report cadence (a wire "
@@ -851,6 +1021,36 @@ async def to_code(config):
                 else cg.nullptr
             )
             cg.add(var.add_sensor_row(idx, temp, hum))
+        if CONF_THERMAL in ls:
+            th = ls[CONF_THERMAL]
+            cg.add(var.set_therm_enabled())
+            for key, setter in (
+                (CONF_RAW_TEMPERATURE, var.set_therm_raw_temp),
+                (CONF_RAW_HUMIDITY, var.set_therm_raw_hum),
+                (CONF_APPLIED_OFFSET, var.set_therm_offset),
+                (CONF_DIE_TEMPERATURE, var.set_therm_die_temp),
+                (CONF_DIE_RISE, var.set_therm_die_rise),
+                (CONF_RAW_RATE, var.set_therm_raw_rate),
+                (CONF_BRIGHTNESS, var.set_therm_brightness),
+                (CONF_CPU_BUSY, var.set_therm_cpu_busy),
+                (CONF_CPU_FREQUENCY, var.set_therm_cpu_freq),
+                (CONF_RSSI, var.set_therm_rssi),
+                (CONF_UPTIME, var.set_therm_uptime),
+            ):
+                if key in th:
+                    cg.add(setter(await sensor.new_sensor(th[key])))
+            for key, setter in (
+                (CONF_SCREEN, var.set_therm_screen),
+                (CONF_IDLE_OFF, var.set_therm_idle_off),
+            ):
+                if key in th:
+                    cg.add(setter(await binary_sensor.new_binary_sensor(th[key])))
+            if CONF_FACE in th:
+                cg.add(
+                    var.set_therm_face(
+                        await text_sensor.new_text_sensor(th[CONF_FACE])
+                    )
+                )
         for conf in ls.get(CONF_ON_ROOM_TEMPERATURE, []):
             trig = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
             cg.add(var.add_room_temp_trigger(trig))

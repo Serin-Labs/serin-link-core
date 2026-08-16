@@ -375,6 +375,10 @@ enum sl2_tlv_type {          /* 0x01..0x7F core; 0x80..0xFF vendor-specific */
                                   * (Serin-signed device identity); absent on
                                   * unprovisioned dials */
     SL2_TLV_ROOM_SRC    = 0x0B,  /* u8 applied_src; u8 status */
+    SL2_TLV_DIAL_THERM  = 0x0C,  /* DIAL_SENSOR tail only: struct
+                                  * sl2_dial_therm_tlv (20 B). Self-heating
+                                  * characterization telemetry, sent only by
+                                  * bench builds — see its definition below. */
 };
 
 /* Append one TLV. Returns false (and writes nothing) if it doesn't fit. */
@@ -465,7 +469,10 @@ struct __attribute__((packed)) sl2_dial_info_pkt {
  * SL2_ROOMSRC_NOEDIT is 0xFF, not 0, on purpose: the tolerant decode
  * zero-fills a short frame, and 0 means Internal. A receiver must treat
  * len < 8 as reading-only by LENGTH, never by value (want_src sits at
- * offset 7 now that hum_cc widened to 16 bits). */
+ * offset 7 now that hum_cc widened to 16 bits).
+ *
+ * Bytes past the fixed struct are an optional TLV tail, same framing as INFO
+ * and DIAL_INFO. Today: SL2_TLV_DIAL_THERM. */
 enum {  /* sl2_dial_sensor_pkt.flags */
     SL2_DSF_HAS_SENSOR = 1u << 0,  /* dial has sensing hardware (reading may
                                     * still be absent — see temp_cc) */
@@ -510,6 +517,82 @@ struct __attribute__((packed)) sl2_dial_sensor_pkt {
  * this back to SL2_PROTO_VERSION. */
 #define SL2_DIAL_SENSOR_MIN_VER 3
 
+/* ── DIAL_THERM (SL2_TLV_DIAL_THERM, DIAL_SENSOR tail only) ───────────────
+ *
+ * Self-heating characterization telemetry. INTERNAL BENCH INSTRUMENTATION:
+ * shipping dials do not send it and the controller does nothing with it but
+ * publish it. It never feeds arbitration, never influences a reading, and its
+ * absence is the normal case.
+ *
+ * It rides DIAL_SENSOR rather than getting its own packet type because the
+ * measurement must not perturb what it measures. The dial already sends this
+ * frame on a 20 s keepalive; a tail costs no extra TX, no extra wakeup, and no
+ * change to the send gating, so a dial with telemetry on has the same radio
+ * duty cycle — and therefore the same self-heating — as one without. A
+ * dedicated frame would have had to fight link_task's one-auxiliary-frame-per-
+ * pass rule, and relaxing that rule changes the thing being characterized.
+ *
+ * Corrected temperature and screen state are NOT repeated here: they are
+ * already sl2_dial_sensor_pkt.temp_cc and SL2_DSF_SCREEN_ON. The one
+ * deliberate exception is SL2_THERMF_PANEL_ASLEEP, because SL2_DSF_SCREEN_ON
+ * is only populated when the controller declared SL2_FEAT_SCREEN — a telemetry
+ * block that decodes correctly only under someone else's feature gate is a
+ * trap. Its cost is one bit.
+ *
+ * cpu_mhz and SL2_THERMF_WIFI_PS are WITNESS fields, expected to be constant:
+ * the dial builds with CONFIG_PM_ENABLE off (pinned 240 MHz) and calls
+ * esp_wifi_set_ps(WIFI_PS_NONE) because ESP-NOW reception needs the radio
+ * awake. They are on the wire so a future analyst can confirm that held for a
+ * given run instead of assuming it. */
+enum {  /* sl2_dial_therm_tlv.flags */
+    SL2_THERMF_RAW_VALID    = 1u << 0,  /* raw_cc / raw_rh_cc carry a reading */
+    SL2_THERMF_DIE_VALID    = 1u << 1,  /* die_cc carries a reading */
+    SL2_THERMF_DTDT_VALID   = 1u << 2,  /* the EMA has one time constant of
+                                         * history; clear during warm-up */
+    SL2_THERMF_IDLE_OFF     = 1u << 3,  /* Advanced -> Idle screen = Off, i.e.
+                                         * which offset regime offset_cc is in */
+    SL2_THERMF_PANEL_ASLEEP = 1u << 4,  /* display asleep (see above) */
+    SL2_THERMF_WIFI_PS      = 1u << 5,  /* Wi-Fi power-save active (witness) */
+    /* bits 6-7 spare */
+};
+
+/* Which face the dial is showing — a thermal REGIME marker, not a UI report.
+ * Warm-up, a lit home dial, and a dim glance face are different populations,
+ * and without a column saying which, an analyst is left arguing about which
+ * rows to drop. Deliberately not a reuse of ui_cal_face_t: that enum exists
+ * only in bench rig builds and enumerates what the RIG drives, not what a dial
+ * on a wall does. */
+enum sl2_therm_face {
+    SL2_THERMFACE_LIVE     = 0,  /* home dial, controller answering */
+    SL2_THERMFACE_GLANCE   = 1,  /* dim idle glance face */
+    SL2_THERMFACE_OFFLINE  = 2,  /* controller unreachable (breathing ring) */
+    SL2_THERMFACE_UNPAIRED = 3,
+    SL2_THERMFACE_WIFI_OFF = 4,  /* persistent Wi-Fi-setup face */
+    SL2_THERMFACE_OTHER    = 255,/* any settings/menu screen */
+};
+
+struct __attribute__((packed)) sl2_dial_therm_tlv {
+    int16_t  raw_cc;      /* UNCORRECTED temp, centi-C; SL2_CC_NA = no reading.
+                           * The regressand: publishing only the corrected
+                           * value bakes today's offset in unrecoverably. */
+    uint16_t raw_rh_cc;   /* UNCORRECTED RH, centi-%; SL2_HUM_CC_NA = none */
+    int16_t  offset_cc;   /* the effective correction being subtracted right
+                           * now (base -/+ idle-off delta) */
+    int16_t  die_cc;      /* ESP32-S3 die temperature, centi-C */
+    int16_t  dtdt_cch;    /* filtered d(raw)/dt in centi-C per HOUR. Per hour,
+                           * not per second: at the dial's 10 s sampling a
+                           * per-second centi rate quantizes to zero for every
+                           * drift slower than 1 C/min. */
+    uint32_t uptime_s;
+    uint8_t  bright_pct;  /* 0..100 backlight */
+    uint8_t  cpu_mhz;     /* witness — see the block comment */
+    uint8_t  busy_pct;    /* 0..100 CPU-busy proxy, both cores meaned */
+    int8_t   rssi_dbm;    /* last ESP-NOW RX RSSI from THIS controller */
+    uint8_t  flags;       /* SL2_THERMF_* */
+    uint8_t  face;        /* enum sl2_therm_face */
+};
+#define SL2_DIAL_THERM_LEN 20
+
 /* ── sizeof guards — every vendored copy must agree ───────────────────── */
 #define SL2_STATIC_ASSERT(c, m) typedef char sl2_sa_##m[(c) ? 1 : -1]
 SL2_STATIC_ASSERT(sizeof(struct sl2_state_pkt)     == 26,  state_size);
@@ -524,6 +607,7 @@ SL2_STATIC_ASSERT(sizeof(struct sl2_wifi_resp_pkt) == 103, wifi_resp_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_wifi_setup_pkt) == 4,  wifi_setup_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_dial_info_pkt) == 43,  dial_info_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_dial_sensor_pkt) == 9, dial_sensor_size);
+SL2_STATIC_ASSERT(sizeof(struct sl2_dial_therm_tlv) == SL2_DIAL_THERM_LEN, dial_therm_size);
 SL2_STATIC_ASSERT(SL2_DIAL_INFO_MIN_LEN <= (int)sizeof(struct sl2_dial_info_pkt), dial_info_minlen);
 SL2_STATIC_ASSERT(SL2_DIAL_SENSOR_MIN_LEN <= (int)sizeof(struct sl2_dial_sensor_pkt), dial_sensor_minlen);
 SL2_STATIC_ASSERT(SL2_STATE_MIN_LEN <= (int)sizeof(struct sl2_state_pkt), state_minlen);

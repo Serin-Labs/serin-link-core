@@ -76,6 +76,16 @@ typedef struct sl2_hvac_iface {
      * cannot get it wrong independently. */
     void (*room_sensor)(void *ctx, const uint8_t src_mac[6],
                         const struct sl2_dial_sensor_pkt *p, bool is_edit);
+    /* The same DIAL_SENSOR carried an SL2_TLV_DIAL_THERM tail — the dial's
+     * self-heating telemetry. Optional (may be NULL), and NORMALLY ABSENT:
+     * only a bench build with CONFIG_SERIN_LINK_THERM sends it.
+     *
+     * A second hook rather than a length + tail pointer on room_sensor()
+     * because that signature is implemented by every adapter and none of them
+     * has any business growing a TLV walk. Diagnostic only: an adapter that
+     * lets this influence which reading feeds the heat pump has misread it. */
+    void (*dial_therm)(void *ctx, const uint8_t src_mac[6],
+                       const struct sl2_dial_therm_tlv *t);
     /* Link OTA: STA creds. Return false (or NULL hook) when unavailable —
      * the core then answers ok=0 and CAPS should omit SL2_FEAT_LINK_OTA_CREDS. */
     bool (*wifi_creds)(void *ctx, char ssid[33], char psk[65]);

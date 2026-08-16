@@ -1457,6 +1457,195 @@ static void test_dial_sensor_null_hook_is_safe(void) {
     printf("dial_sensor null hook safe ok\n");
 }
 
+/* ── DIAL_SENSOR's SL2_TLV_DIAL_THERM tail ───────────────────────────────
+ *
+ * Bench telemetry, so the OVERWHELMING common case is a frame with no tail at
+ * all — which makes "the tail walk never fires and never reads past the fixed
+ * struct" the property most worth pinning. The others exist because a tail is
+ * attacker-reachable bytes on a decrypted-but-arbitrary-length frame.        */
+
+static struct {
+    int calls;
+    uint8_t last_mac[6];
+    struct sl2_dial_therm_tlv last;
+} s_th;
+
+static void h_dial_therm(void *ctx, const uint8_t src_mac[6],
+                         const struct sl2_dial_therm_tlv *t) {
+    (void)ctx;
+    s_th.calls++;
+    s_th.last = *t;
+    memcpy(s_th.last_mac, src_mac, 6);
+}
+
+/* Build DIAL_SENSOR + a therm TLV into `out`; returns the total length. */
+static int therm_frame(uint8_t *out, size_t cap, int16_t raw_cc, uint8_t flags) {
+    struct sl2_dial_sensor_pkt p = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
+        .want_src = SL2_ROOMSRC_NOEDIT,
+    };
+    struct sl2_dial_therm_tlv th = {
+        .raw_cc = raw_cc, .raw_rh_cc = 4712, .offset_cc = 245,
+        .die_cc = 3810, .dtdt_cch = -120, .uptime_s = 86400,
+        .bright_pct = 15, .cpu_mhz = 240, .busy_pct = 7,
+        .rssi_dbm = -58, .flags = flags, .face = SL2_THERMFACE_GLANCE,
+    };
+    assert(cap >= sizeof p + 2 + sizeof th);
+    memcpy(out, &p, sizeof p);
+    size_t off = sizeof p;
+    assert(sl2_tlv_put(out, cap, &off, SL2_TLV_DIAL_THERM, &th, (uint8_t)sizeof th));
+    return (int)off;
+}
+
+static void test_dial_therm_tail_is_delivered(void) {
+    memset(&s_th, 0, sizeof s_th);
+    memset(&s_rs, 0, sizeof s_rs);
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    hv.dial_therm  = h_dial_therm;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    fdial_t d;
+    dial_make(&d, 0xEA);
+    pair_dial(&l, &d);
+
+    uint8_t wire[64];
+    const int n = therm_frame(wire, sizeof wire, 2395,
+                              SL2_THERMF_RAW_VALID | SL2_THERMF_DIE_VALID);
+    sl2_link_on_recv(&l, d.mac, F.own, wire, n);
+
+    /* The tail must not disturb the reading path it rides on. */
+    assert(s_rs.calls == 1 && s_rs.last_temp_cc == 2150 && !s_rs.last_is_edit);
+
+    assert(s_th.calls == 1);
+    assert(sl2_mac_eq(s_th.last_mac, d.mac));
+    assert(s_th.last.raw_cc == 2395);
+    assert(s_th.last.raw_rh_cc == 4712);
+    assert(s_th.last.offset_cc == 245);
+    assert(s_th.last.die_cc == 3810);
+    assert(s_th.last.dtdt_cch == -120);   /* signed: a falling room must stay < 0 */
+    assert(s_th.last.uptime_s == 86400);  /* u32, and the only member whose
+                                           * alignment the TLV header shifts */
+    assert(s_th.last.rssi_dbm == -58);    /* signed too, and always negative */
+    assert(s_th.last.face == SL2_THERMFACE_GLANCE);
+    assert(s_th.last.flags == (SL2_THERMF_RAW_VALID | SL2_THERMF_DIE_VALID));
+    printf("dial_therm tail delivered ok\n");
+}
+
+static void test_dial_therm_absent_tail_is_the_common_case(void) {
+    memset(&s_th, 0, sizeof s_th);
+    memset(&s_rs, 0, sizeof s_rs);
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    hv.dial_therm  = h_dial_therm;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    fdial_t d;
+    dial_make(&d, 0xEB);
+    pair_dial(&l, &d);
+
+    /* A shipping dial's frame: the bare 9-byte struct, nothing after it. */
+    struct sl2_dial_sensor_pkt p = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
+        .want_src = SL2_ROOMSRC_NOEDIT,
+    };
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&p, (int)sizeof p);
+    assert(s_rs.calls == 1);
+    assert(s_th.calls == 0);
+
+    /* And the floor-era short frame, which is SHORTER than the fixed struct —
+     * the length arithmetic must not underflow into a huge tail. */
+    uint8_t shortf[SL2_DIAL_SENSOR_MIN_LEN] = {
+        SL2_PKT_DIAL_SENSOR, SL2_PROTO_VERSION, SL2_DSF_HAS_SENSOR,
+        0xD4, 0x08, 0x94, 0x11,
+    };
+    sl2_link_on_recv(&l, d.mac, F.own, shortf, (int)sizeof shortf);
+    assert(s_rs.calls == 2);
+    assert(s_th.calls == 0);
+    printf("dial_therm absent tail ok\n");
+}
+
+static void test_dial_therm_malformed_tail_is_ignored(void) {
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    hv.dial_therm  = h_dial_therm;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    fdial_t d;
+    dial_make(&d, 0xEC);
+    pair_dial(&l, &d);
+
+    uint8_t wire[64];
+    const int n = therm_frame(wire, sizeof wire, 2395, SL2_THERMF_RAW_VALID);
+
+    /* (a) truncated mid-value: sl2_tlv_next must end iteration, not read on. */
+    for (int cut = 1; cut <= SL2_DIAL_THERM_LEN; cut++) {
+        memset(&s_th, 0, sizeof s_th);
+        sl2_link_on_recv(&l, d.mac, F.own, wire, n - cut);
+        assert(s_th.calls == 0);
+    }
+
+    /* (b) right type, wrong length: a future 24-byte revision decoded into a
+     * 20-byte struct would silently misreport, so the length must gate. */
+    memset(&s_th, 0, sizeof s_th);
+    wire[sizeof(struct sl2_dial_sensor_pkt) + 1] = SL2_DIAL_THERM_LEN - 2;
+    sl2_link_on_recv(&l, d.mac, F.own, wire, n - 2);
+    assert(s_th.calls == 0);
+
+    /* (c) an unknown TLV ahead of ours is skipped by its own length, and the
+     * therm TLV behind it still lands — the whole point of TLV framing, and
+     * the case that puts uptime_s on an odd offset. */
+    memset(&s_th, 0, sizeof s_th);
+    struct sl2_dial_sensor_pkt p = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
+        .want_src = SL2_ROOMSRC_NOEDIT,
+    };
+    struct sl2_dial_therm_tlv th = { .raw_cc = 1234, .uptime_s = 7 };
+    uint8_t mixed[80];
+    memcpy(mixed, &p, sizeof p);
+    size_t off = sizeof p;
+    const uint8_t junk[3] = { 1, 2, 3 };
+    assert(sl2_tlv_put(mixed, sizeof mixed, &off, 0x7E, junk, sizeof junk));
+    assert(sl2_tlv_put(mixed, sizeof mixed, &off, SL2_TLV_DIAL_THERM, &th, sizeof th));
+    sl2_link_on_recv(&l, d.mac, F.own, mixed, (int)off);
+    assert(s_th.calls == 1);
+    assert(s_th.last.raw_cc == 1234 && s_th.last.uptime_s == 7);
+    printf("dial_therm malformed tail ignored ok\n");
+}
+
+static void test_dial_therm_null_hook_and_rejected_frame(void) {
+    /* NULL hook: the shared FHVAC has neither room_sensor nor dial_therm. */
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xED);
+    pair_dial(&l, &d);
+    uint8_t wire[64];
+    const int n = therm_frame(wire, sizeof wire, 2395, SL2_THERMF_RAW_VALID);
+    sl2_link_on_recv(&l, d.mac, F.own, wire, n);   /* no crash = pass */
+
+    /* A v2 frame is dropped whole. The tail must go with it: the version gate
+     * exists because v2's fields mean something else, and a tail attached to a
+     * frame we refuse to trust has no better claim than the frame did. */
+    memset(&s_th, 0, sizeof s_th);
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.dial_therm = h_dial_therm;
+    sl2_link_t l2;
+    fresh_hvac(&l2, &hv);
+    fdial_t d2;
+    dial_make(&d2, 0xEE);
+    pair_dial(&l2, &d2);
+    uint8_t old[64];
+    const int m = therm_frame(old, sizeof old, 2395, SL2_THERMF_RAW_VALID);
+    old[1] = 2;                                   /* v2 */
+    sl2_link_on_recv(&l2, d2.mac, F.own, old, m);
+    assert(s_th.calls == 0);
+    printf("dial_therm null hook + version gate ok\n");
+}
+
 /* ── remote screen gate ───────────────────────────────────────────────── */
 
 /* The HA presence switch travels as STATE.flags2 bits. The shared change
@@ -1578,6 +1767,10 @@ int main(void) {
     test_dial_sensor_null_hook_is_safe();
     test_dial_sensor_v2_frame_is_rejected();
     test_dial_sensor_v3_frame_is_accepted();
+    test_dial_therm_tail_is_delivered();
+    test_dial_therm_absent_tail_is_the_common_case();
+    test_dial_therm_malformed_tail_is_ignored();
+    test_dial_therm_null_hook_and_rejected_frame();
     test_screen_gate_in_state();
     test_dial_screen_status_view();
     printf("test_sl2_link: ALL OK\n");

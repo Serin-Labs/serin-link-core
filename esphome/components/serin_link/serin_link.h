@@ -93,6 +93,32 @@ class SerinLinkComponent : public Component {
     sensor_rows_[idx].declared = true;
     sensor_rows_cfg_ = true;
   }
+  /* link_sensor: thermal: — the Serin Link's self-heating telemetry
+   * (SL2_TLV_DIAL_THERM, a tail on the same DIAL_SENSOR the block above
+   * consumes). INTERNAL BENCH INSTRUMENTATION: only a Link built with
+   * CONFIG_SERIN_LINK_THERM sends it, so on a normal install these entities
+   * simply stay unknown. Nothing here influences arbitration, the room source,
+   * or the heat pump — it is published and nothing else.
+   *
+   * It lives under link_sensor: rather than diagnostics: because it is fed by
+   * the SAME frame and wants the SAME two policies: primary-Link arbitration
+   * (primary_select:) and the 90 s staleness rule. */
+  void set_therm_enabled() { therm_cfg_ = true; }
+  void set_therm_raw_temp(sensor::Sensor *s) { th_raw_temp_ = s; }
+  void set_therm_raw_hum(sensor::Sensor *s) { th_raw_hum_ = s; }
+  void set_therm_offset(sensor::Sensor *s) { th_offset_ = s; }
+  void set_therm_die_temp(sensor::Sensor *s) { th_die_ = s; }
+  void set_therm_die_rise(sensor::Sensor *s) { th_die_rise_ = s; }
+  void set_therm_raw_rate(sensor::Sensor *s) { th_rate_ = s; }
+  void set_therm_brightness(sensor::Sensor *s) { th_bright_ = s; }
+  void set_therm_cpu_busy(sensor::Sensor *s) { th_busy_ = s; }
+  void set_therm_cpu_freq(sensor::Sensor *s) { th_freq_ = s; }
+  void set_therm_rssi(sensor::Sensor *s) { th_rssi_ = s; }
+  void set_therm_uptime(sensor::Sensor *s) { th_uptime_ = s; }
+  void set_therm_screen(binary_sensor::BinarySensor *s) { th_screen_ = s; }
+  void set_therm_idle_off(binary_sensor::BinarySensor *s) { th_idle_off_ = s; }
+  void set_therm_face(text_sensor::TextSensor *s) { th_face_ = s; }
+
   /* on_room_temperature: — fired from publish_dial_() so it inherits the
    * frame-driven dedup gate; only for fresh readings while the Serin Link is
    * the selected room source (the guards the YAML recipe used to carry). */
@@ -111,6 +137,11 @@ class SerinLinkComponent : public Component {
   /* A bonded dial reported its own room sensor (called from the trampoline). */
   void room_sensor_feed(const uint8_t src_mac[6],
                         const struct sl2_dial_sensor_pkt *p, bool is_edit);
+  /* ...and the same frame carried thermal telemetry. Fires AFTER
+   * room_sensor_feed for a given frame (the core's dispatch order), so the
+   * arbitration state it reads is already this frame's. */
+  void dial_therm_feed(const uint8_t src_mac[6],
+                       const struct sl2_dial_therm_tlv *t);
 
   /* For actuation automations in YAML: only feed the heat pump when the
    * dial actually selected itself as the room source. */
@@ -250,6 +281,30 @@ class SerinLinkComponent : public Component {
    * hardware but no reading yet must not hold off the stale watchdog. */
   uint32_t dial_temp_ms_{0};
   bool dial_has_sensor_{false};
+  /* link_sensor: thermal: — see set_therm_enabled(). Its own timestamp and
+   * its own stale latch, NOT dial_temp_ms_/dial_stale_: a production Serin
+   * Link sends DIAL_SENSOR forever and never a therm tail, and folding the two
+   * would make these entities read "fresh" off a frame that carried none of
+   * their data. */
+  void publish_therm_(bool stale);
+  bool therm_cfg_{false};
+  sensor::Sensor *th_raw_temp_{nullptr};
+  sensor::Sensor *th_raw_hum_{nullptr};
+  sensor::Sensor *th_offset_{nullptr};
+  sensor::Sensor *th_die_{nullptr};
+  sensor::Sensor *th_die_rise_{nullptr};
+  sensor::Sensor *th_rate_{nullptr};
+  sensor::Sensor *th_bright_{nullptr};
+  sensor::Sensor *th_busy_{nullptr};
+  sensor::Sensor *th_freq_{nullptr};
+  sensor::Sensor *th_rssi_{nullptr};
+  sensor::Sensor *th_uptime_{nullptr};
+  binary_sensor::BinarySensor *th_screen_{nullptr};
+  binary_sensor::BinarySensor *th_idle_off_{nullptr};
+  text_sensor::TextSensor *th_face_{nullptr};
+  struct sl2_dial_therm_tlv therm_{};
+  uint32_t therm_ms_{0};             /* millis() of the last tail; 0 = never */
+  bool therm_stale_{true};           /* start latched: unknown until a tail */
   uint8_t dial_mac_[6]{};
   uint8_t primary_dial_[6]{};
   bool has_primary_dial_{false};

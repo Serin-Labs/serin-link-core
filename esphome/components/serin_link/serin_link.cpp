@@ -911,6 +911,97 @@ void SerinLinkComponent::publish_dial_(bool stale) {
   }
 }
 
+/* ── link_sensor: thermal: ────────────────────────────────────────────────
+ *
+ * Bench telemetry for the self-heating calibration campaign. A Serin Link
+ * built without CONFIG_SERIN_LINK_THERM never sends the tail, so on a normal
+ * install this function is never called and every entity stays unknown — which
+ * is the correct reading, not a failure.
+ *
+ * The arbitration gate below is a deliberate copy of room_sensor_feed's, not a
+ * refactor of it into something shared: that one runs before dial_mac_ adopts
+ * the frame's sender and has an edit path to protect, this one has neither. */
+void SerinLinkComponent::dial_therm_feed(const uint8_t src_mac[6],
+                                         const struct sl2_dial_therm_tlv *t) {
+  if (!link_sensor_cfg_ || !therm_cfg_) return;
+  if (has_primary_dial_ && src_mac != nullptr &&
+      std::memcmp(src_mac, primary_dial_, 6) != 0)
+    return;   /* non-primary Link: its reading is not the one on display */
+
+  therm_ = *t;
+  therm_ms_ = millis();
+  /* Publish EVERY numeric field on EVERY frame, with no change gate. This is
+   * the one place in the component where that is right: the entities exist to
+   * be a regression dataset, and a sample dropped because it equalled the last
+   * one is a missing row in the fit, not saved bandwidth. The frame itself is
+   * the rate limit — 20 s, set by the Serin Link's keepalive, which is exactly
+   * why the tail rides that frame instead of getting a cadence of its own. */
+  publish_therm_(false);
+}
+
+void SerinLinkComponent::publish_therm_(bool stale) {
+  therm_stale_ = stale;
+  const struct sl2_dial_therm_tlv &t = therm_;
+  const bool raw_ok = !stale && (t.flags & SL2_THERMF_RAW_VALID) &&
+                      t.raw_cc != SL2_CC_NA;
+  const bool die_ok = !stale && (t.flags & SL2_THERMF_DIE_VALID) &&
+                      t.die_cc != SL2_CC_NA;
+
+  if (th_raw_temp_ != nullptr)
+    th_raw_temp_->publish_state(raw_ok ? t.raw_cc / 100.0f : NAN);
+  if (th_raw_hum_ != nullptr)
+    th_raw_hum_->publish_state(
+        raw_ok && t.raw_rh_cc != SL2_HUM_CC_NA ? t.raw_rh_cc / 100.0f : NAN);
+  if (th_offset_ != nullptr)
+    th_offset_->publish_state(stale ? NAN : t.offset_cc / 100.0f);
+  if (th_die_ != nullptr)
+    th_die_->publish_state(die_ok ? t.die_cc / 100.0f : NAN);
+  /* die - raw: the self-heating integrator. Computed here because it is free
+   * here and because deriving it in HA would need both entities to land in the
+   * same recorder row, which nothing guarantees. Against RAW, never against
+   * the corrected value — the corrected one already has an offset subtracted,
+   * so the difference would carry today's answer inside tomorrow's input. */
+  if (th_die_rise_ != nullptr)
+    th_die_rise_->publish_state(raw_ok && die_ok ? (t.die_cc - t.raw_cc) / 100.0f
+                                                 : NAN);
+  if (th_rate_ != nullptr)
+    th_rate_->publish_state(
+        !stale && (t.flags & SL2_THERMF_DTDT_VALID) ? t.dtdt_cch / 100.0f : NAN);
+  if (th_bright_ != nullptr)
+    th_bright_->publish_state(stale ? NAN : t.bright_pct);
+  if (th_busy_ != nullptr) th_busy_->publish_state(stale ? NAN : t.busy_pct);
+  if (th_freq_ != nullptr) th_freq_->publish_state(stale ? NAN : t.cpu_mhz);
+  if (th_rssi_ != nullptr) th_rssi_->publish_state(stale ? NAN : t.rssi_dbm);
+  if (th_uptime_ != nullptr)
+    th_uptime_->publish_state(stale ? NAN : static_cast<float>(t.uptime_s));
+
+  /* Binary and text entities DO gate on change: unlike the numerics they carry
+   * no information between transitions, and HA renders a repeated state as a
+   * fresh event in the logbook. */
+  if (th_screen_ != nullptr) {
+    const bool on = !stale && !(t.flags & SL2_THERMF_PANEL_ASLEEP);
+    if (!th_screen_->has_state() || th_screen_->state != on)
+      th_screen_->publish_state(on);
+  }
+  if (th_idle_off_ != nullptr) {
+    const bool off = !stale && (t.flags & SL2_THERMF_IDLE_OFF);
+    if (!th_idle_off_->has_state() || th_idle_off_->state != off)
+      th_idle_off_->publish_state(off);
+  }
+  if (th_face_ != nullptr) {
+    const char *f = "unknown";
+    if (!stale) switch (t.face) {
+      case SL2_THERMFACE_LIVE:     f = "live";     break;
+      case SL2_THERMFACE_GLANCE:   f = "glance";   break;
+      case SL2_THERMFACE_OFFLINE:  f = "offline";  break;
+      case SL2_THERMFACE_UNPAIRED: f = "unpaired"; break;
+      case SL2_THERMFACE_WIFI_OFF: f = "wifi-off"; break;
+      default:                     f = "other";    break;
+    }
+    if (th_face_->state != f) th_face_->publish_state(f);
+  }
+}
+
 void SerinLinkComponent::feed_sensor_row_(const uint8_t src_mac[6],
                                           const struct sl2_dial_sensor_pkt *p) {
   /* The row is the sender's bond SLOT — resolved per frame, because a
@@ -1005,6 +1096,11 @@ static size_t t_tlvs(void *ctx, uint8_t *buf, size_t cap) {
 static void t_room_sensor(void *ctx, const uint8_t src_mac[6],
                           const struct sl2_dial_sensor_pkt *p, bool is_edit) {
   static_cast<SerinLinkComponent *>(ctx)->room_sensor_feed(src_mac, p, is_edit);
+}
+
+static void t_dial_therm(void *ctx, const uint8_t src_mac[6],
+                         const struct sl2_dial_therm_tlv *t) {
+  static_cast<SerinLinkComponent *>(ctx)->dial_therm_feed(src_mac, t);
 }
 
 /* ── component ────────────────────────────────────────────────────────── */
@@ -1191,6 +1287,10 @@ void SerinLinkComponent::setup() {
    * never sends DIAL_SENSOR at all, so an unconfigured node simply never
    * calls this — no need for a second gate here. */
   hvac_.room_sensor = t_room_sensor;
+  /* Same reasoning, one step further out: only a bench Serin Link appends the
+   * SL2_TLV_DIAL_THERM tail, so on every normal install this trampoline is
+   * installed and never called. */
+  hvac_.dial_therm = t_dial_therm;
   hvac_.wifi_creds = nullptr;  /* Link-OTA creds relay: future work */
 
   sl2_link_init(&link_, &port_, &crypto_, &hvac_);
@@ -1260,6 +1360,18 @@ void SerinLinkComponent::loop() {
       publish_dial_(true);
     }
     if (sensor_rows_cfg_) check_sensor_rows_(now);
+    /* Thermal telemetry gets its own latch on the same 1 Hz tick. It has to:
+     * a production Serin Link keeps DIAL_SENSOR flowing forever while sending
+     * no tail, so leaning on dial_stale_ would hold these entities at their
+     * last bench values indefinitely after a reflash. therm_stale_ starts
+     * latched, so an install that never sees a tail publishes nothing at all
+     * rather than a burst of unknowns at boot. */
+    if (therm_cfg_ && !therm_stale_ && therm_ms_ != 0 &&
+        now - therm_ms_ >= dial_stale_ms_) {
+      ESP_LOGW(TAG, "Serin Link thermal telemetry stale (%" PRIu32 " ms) — publishing unknown",
+               now - therm_ms_);
+      publish_therm_(true);
+    }
   }
   /* Its own tick: the block above is gated on link_sensor_cfg_, and
    * diagnostics are useful without a Serin Link room sensor configured. */

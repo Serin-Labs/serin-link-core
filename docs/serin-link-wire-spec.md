@@ -558,6 +558,10 @@ unknown types in both ranges):
 | 0x09 | `ENERGY` | `u16 input_w; u32 wh_total` (0xFFFF/0xFFFFFFFF = n/a) |
 | 0x0B | `ROOM_SRC` | `u8 applied_src; u8 status` |
 
+The registry is shared across every packet that carries a tail, so a type
+number means one thing everywhere. Two are defined only for a specific tail and
+never appear in INFO: `0x0A DIAL_CERT` (§10c) and `0x0C DIAL_THERM` (§10d).
+
 Rules: dial renders "—" for any TLV absent; `l` is authoritative (forward-compat:
 longer payloads than the dial knows are prefix-read); a TLV never changes
 meaning, new fields append, new facts get new types. `COMPRESSOR.stage/
@@ -778,6 +782,63 @@ Normative rules:
 - `applied_src` (the `ROOM_SRC` TLV) names the *selected* source even when
   `status` is `STALE`; a reader that renders only `applied_src` will show a
   dead feed as a live one.
+
+### TLV tail (optional)
+
+Bytes past the 9-byte fixed struct are a TLV tail, same framing as §9 and
+§10c. Tolerant decode copies `min(len, sizeof)`, so appending one is
+compatible by construction: a receiver that predates a tail drops it unread.
+Today the tail carries exactly one type.
+
+**`SL2_TLV_DIAL_THERM` (0x0C, 20 B) — dial self-heating telemetry.**
+
+```c
+struct __attribute__((packed)) sl2_dial_therm_tlv {
+    int16_t  raw_cc;      /* UNCORRECTED temp, centi-C; SL2_CC_NA = none  */
+    uint16_t raw_rh_cc;   /* UNCORRECTED RH, centi-%; SL2_HUM_CC_NA       */
+    int16_t  offset_cc;   /* the correction currently being subtracted    */
+    int16_t  die_cc;      /* SoC die temperature, centi-C                 */
+    int16_t  dtdt_cch;    /* filtered d(raw)/dt, centi-C per HOUR         */
+    uint32_t uptime_s;
+    uint8_t  bright_pct;  /* 0..100 backlight                             */
+    uint8_t  cpu_mhz;     /* witness — see below                          */
+    uint8_t  busy_pct;    /* 0..100 CPU-busy proxy                        */
+    int8_t   rssi_dbm;    /* dial's RX RSSI of THIS controller            */
+    uint8_t  flags;       /* SL2_THERMF_*                                 */
+    uint8_t  face;        /* enum sl2_therm_face                          */
+};
+```
+
+`SL2_THERMF_RAW_VALID | DIE_VALID | DTDT_VALID | IDLE_OFF | PANEL_ASLEEP |
+WIFI_PS`; `face` ∈ `{LIVE, GLANCE, OFFLINE, UNPAIRED, WIFI_OFF, OTHER=255}`.
+
+This is **bench instrumentation for self-heating characterization**, not a
+product feature. It is emitted only by a dial built with `CONFIG_SERIN_LINK_THERM`
+(off in every shipping build), and a controller does nothing with it but
+publish it. Normative:
+
+- A receiver MUST NOT let this TLV influence which room-temperature source
+  feeds the equipment, or any control decision. It is diagnostic output.
+- A sender MUST NOT give the tail a cadence of its own. It rides whatever
+  `DIAL_SENSOR` frame the §10d triggers already produce — the whole reason it
+  is a tail rather than a packet type is that a self-heating measurement whose
+  instrument adds radio wakeups is measuring itself. Resolution is therefore
+  the 20 s keepalive.
+- `raw_cc` is the **uncorrected** reading and `sl2_dial_sensor_pkt.temp_cc` the
+  corrected one; both are on the wire on purpose. A receiver that records only
+  the corrected value has made the offset unrecoverable and cannot re-fit.
+- Corrected temperature and screen state are not repeated here, with one
+  deliberate exception: `SL2_THERMF_PANEL_ASLEEP` duplicates `SL2_DSF_SCREEN_ON`
+  because the latter is only populated under `SL2_FEAT_SCREEN`, and telemetry
+  that decodes correctly only under an unrelated feature gate is a trap.
+- `cpu_mhz` and `SL2_THERMF_WIFI_PS` are **witness** fields, expected constant
+  on current dial hardware (`CONFIG_PM_ENABLE` off; `esp_wifi_set_ps(WIFI_PS_NONE)`
+  because ESP-NOW reception needs the radio awake). They are on the wire so a
+  later analysis can confirm that held for a given run rather than assume it.
+- `dtdt_cch` is per **hour**: at the dial's 10 s sampling a per-second centi-C
+  rate quantizes to zero for any drift slower than 1 °C/min. Its filter (an EMA,
+  τ = 60 s, differenced) is part of this contract, so the value a controller
+  records is the same one a future compensation filter consumes.
 
 ## 11. Future-proofing inventory (what's deliberately left room for)
 
