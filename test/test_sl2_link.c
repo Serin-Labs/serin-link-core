@@ -1503,6 +1503,60 @@ static void test_screen_gate_in_state(void) {
     printf("screen gate in state ok\n");
 }
 
+/* ── sun-down night gate ─────────────────────────────────────────────── */
+
+/* The sun gate travels as STATE.flags2 bits, same two-bit scheme as the
+ * screen gate (zero-fill legacy sender = not declared). A flip must fan out
+ * as a change inside SL2_STATE_MIN_INTERVAL_MS — sunset landing 10 s late is
+ * fine, but the change-detection contract is what this pins. */
+static void test_night_gate_in_state(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xE5);
+    pair_dial(&l, &d);
+    F.n_sent = 0;
+
+    /* no gate computed -> neither bit (legacy zero-fill semantics) */
+    dial_probe(&l, &d, 0);
+    sl2_link_loop(&l);
+    int si = last_send_of(SL2_PKT_STATE);
+    assert(si >= 0);
+    struct sl2_state_pkt st;
+    sl2_decode_pkt(&st, sizeof st, F.sent[si].data, (int)F.sent[si].len);
+    assert((st.flags2 & (SL2_SF2_NIGHT_CTL | SL2_SF2_NIGHT)) == 0);
+
+    /* gate computed, sun up -> CTL set, NIGHT clear */
+    H.night_ctl = true;
+    F.now += SL2_STATE_MIN_INTERVAL_MS + 1;
+    sl2_link_loop(&l);
+    si = last_send_of(SL2_PKT_STATE);
+    sl2_decode_pkt(&st, sizeof st, F.sent[si].data, (int)F.sent[si].len);
+    assert((st.flags2 & SL2_SF2_NIGHT_CTL) != 0);
+    assert((st.flags2 & SL2_SF2_NIGHT) == 0);
+
+    /* sun sets -> both bits, sent as a change */
+    int sends_before = count_sends_of(SL2_PKT_STATE, d.mac);
+    H.night = true;
+    F.now += SL2_STATE_MIN_INTERVAL_MS + 1;
+    sl2_link_loop(&l);
+    assert(count_sends_of(SL2_PKT_STATE, d.mac) == sends_before + 1);
+    si = last_send_of(SL2_PKT_STATE);
+    sl2_decode_pkt(&st, sizeof st, F.sent[si].data, (int)F.sent[si].len);
+    assert((st.flags2 & SL2_SF2_NIGHT_CTL) != 0);
+    assert((st.flags2 & SL2_SF2_NIGHT) != 0);
+    assert(st.night_ceil == 0);   /* no opinion declared -> zero on the wire */
+
+    /* ceiling opinion rides the claimed reserved byte, change-detected */
+    H.night_ceil_pct = 35;
+    F.now += SL2_STATE_MIN_INTERVAL_MS + 1;
+    sl2_link_loop(&l);
+    si = last_send_of(SL2_PKT_STATE);
+    sl2_decode_pkt(&st, sizeof st, F.sent[si].data, (int)F.sent[si].len);
+    assert(st.night_ceil == 35);
+    printf("night gate in state ok\n");
+}
+
 /* The dial reports its actual screen state in DIAL_SENSOR flags; the core
  * stashes it in the per-dial runtime slot and surfaces it through dial_view,
  * so adapters publish a status entity from the existing poll — no new
@@ -1579,6 +1633,7 @@ int main(void) {
     test_dial_sensor_v2_frame_is_rejected();
     test_dial_sensor_v3_frame_is_accepted();
     test_screen_gate_in_state();
+    test_night_gate_in_state();
     test_dial_screen_status_view();
     printf("test_sl2_link: ALL OK\n");
     return 0;

@@ -19,6 +19,7 @@ declare -A MUST_CONTAIN=(
   [pass_link_sensor_links_bare.yaml]='Serin Link 2 Temperature'  # flat names, slot 2
   [pass_link_sensor_links_rows.yaml]='Office Temperature'        # hand-written names
   [pass_screen.yaml]='Serin Link 2 Screen'      # switch + generated status rows
+  [pass_night.yaml]='Serin Link Night'          # sun-down gate switch
 )
 declare -A MUST_REJECT_WITH=(
   [fail_rows_mismatch.yaml]='max_links'

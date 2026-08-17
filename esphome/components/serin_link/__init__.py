@@ -62,6 +62,7 @@ PairLinkButton = serin_link_ns.class_(
     "PairLinkButton", button.Button, cg.Parented.template(SerinLinkComponent)
 )
 ScreenSwitch = serin_link_ns.class_("ScreenSwitch", switch.Switch)
+NightSwitch = serin_link_ns.class_("NightSwitch", switch.Switch)
 
 PairStartAction = serin_link_ns.class_("PairStartAction", automation.Action)
 PairCancelAction = serin_link_ns.class_("PairCancelAction", automation.Action)
@@ -111,6 +112,7 @@ CONF_FIRMWARE = "firmware"
 CONF_SLOT = "slot"
 CONF_WINDOW = "window"
 CONF_SCREEN = "screen"
+CONF_NIGHT = "night"
 
 # Mirrors SL2_MAX_DIALS in sl2_bond.h. If that #define ever changes, change
 # this with it: the C side silently ignores rows past the limit, so the error
@@ -386,6 +388,23 @@ def _screen_schema(value):
     return SCREEN_SCHEMA(value)
 
 
+# night: — the sun-down gate for every paired Link's display, as one HA
+# switch. ON = sun below civil twilight (Links cap their wake brightness);
+# OFF = daytime. Drive it from sun.sun / a schedule / any automation.
+# Restored OFF, so a controller HA never touches behaves exactly as before
+# the switch existed.
+NIGHT_SCHEMA = switch.switch_schema(
+    NightSwitch,
+    default_restore_mode="RESTORE_DEFAULT_OFF",
+)
+
+
+def _night_schema(value):
+    if value is None or isinstance(value, dict):
+        value = {CONF_NAME: "Serin Link Night", **(value or {})}
+    return NIGHT_SCHEMA(value)
+
+
 # diagnostics: connected: — "is any bonded Serin Link alive", the component-
 # owned form of the template binary_sensor over any_dial_live() the examples
 # used to declare. Not per-slot (the links: rows carry that); this is the one
@@ -498,6 +517,7 @@ _BASE_SCHEMA = cv.Schema(
         cv.Optional(CONF_ENERGY_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_PAIR_BUTTON): _pair_button_schema,
         cv.Optional(CONF_SCREEN): _screen_schema,
+        cv.Optional(CONF_NIGHT): _night_schema,
         cv.Optional(CONF_LINK_SENSOR): _link_sensor_schema,
         cv.Optional(CONF_DIAGNOSTICS): _diagnostics_schema,
     }
@@ -799,6 +819,9 @@ async def to_code(config):
     if CONF_SCREEN in config:
         sw = await switch.new_switch(config[CONF_SCREEN])
         cg.add(var.set_screen_switch(sw))
+    if CONF_NIGHT in config:
+        sw = await switch.new_switch(config[CONF_NIGHT])
+        cg.add(var.set_night_switch(sw))
     if CONF_VANE_V_SELECT in config:
         sel = await cg.get_variable(config[CONF_VANE_V_SELECT])
         cg.add(var.set_vane_v_select(sel))

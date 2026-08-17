@@ -346,7 +346,9 @@ enum {  /* flags2 */
     SL2_SF2_SENSOR_BATT_LOW = 1u<<0,
     SL2_SF2_SCREEN_CTL      = 1u<<1,  /* controller runs a screen gate */
     SL2_SF2_SCREEN_OFF      = 1u<<2,  /* ...and it currently says "room empty" */
-    /* bits 3-7 spare */
+    SL2_SF2_NIGHT_CTL       = 1u<<3,  /* sender computes solar elevation */
+    SL2_SF2_NIGHT           = 1u<<4,  /* ...and it's below civil twilight */
+    /* bits 5-7 spare */
 };
 ```
 
@@ -363,6 +365,21 @@ wakes into the glance face. A dial bonded to several controllers folds their
 gates ON-wins (it lives in one room: only unanimous "empty" may force it
 dark), and a controller that goes offline decays out of the fold. Status
 flows back per-dial via DIAL_SENSOR (§10d), gated on `SL2_FEAT_SCREEN` (§8).
+
+**Sun-down night gate** (`SL2_SF2_NIGHT_*`): a sender with a valid UTC clock
+and a configured location sets `NIGHT_CTL` and reports in `NIGHT` whether
+solar elevation is below civil twilight (−6°). Zero-filled legacy senders —
+and capable senders that lose their clock or have no location — read as "no
+gate computed"; receivers must treat `NIGHT` without `NIGHT_CTL` as absent,
+never as night. The receiver owns all policy (Serin Link dials cap
+wake-brightness restores while any online zone reports night). Additive in
+wire version 3; no version bump.
+
+The STATE byte at offset 23 (formerly `reserved[1]`, claimed per the growth
+policy) carries `night_ceil`: the sender's wake-brightness ceiling opinion in
+percent, 1..100, meaningful only under `NIGHT_CTL`. 0 — the legacy zero-fill —
+means "no opinion" and the receiver uses its own default. Receivers fold
+multiple online zones darkest-wins (minimum of the nonzero opinions).
 
 Send policy: on first-live, on change (≥250 ms min interval), heartbeat 10 s —
 fanned out to every bonded dial. There is no HomeKit flag (HomeKit pairing

@@ -185,6 +185,8 @@ class SerinLinkComponent : public Component {
    * and Links keep their own idle behavior. */
   void set_screen_switch(switch_::Switch *s) { screen_switch_ = s; }
 
+  void set_night_switch(switch_::Switch *s) { night_switch_ = s; }
+
   /* HVAC iface backing (public: called from the C hook trampolines). */
   bool hvac_get_state(sl2_hvac_state_t *out);
   bool hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd);
@@ -324,6 +326,7 @@ class SerinLinkComponent : public Component {
   bool diagnostics_cfg_{false};
   DialRow dial_rows_[SL2_MAX_DIALS];
   switch_::Switch *screen_switch_{nullptr};
+  switch_::Switch *night_switch_{nullptr};
   binary_sensor::BinarySensor *connected_sensor_{nullptr};
   bool pub_any_live_{false};
   bool pub_any_live_valid_{false};
@@ -370,6 +373,15 @@ class PrimaryLinkSelect : public select::Select, public Parented<SerinLinkCompon
  * RESTORE_DEFAULT_ON) so a reboot resumes the last gate rather than waking
  * an empty room. */
 class ScreenSwitch : public switch_::Switch {
+ protected:
+  void write_state(bool state) override { this->publish_state(state); }
+};
+
+/* night: — the sun-down gate switch. Same optimistic contract as
+ * ScreenSwitch above; restored OFF (schema default) so a reboot in a
+ * controller HA never touches keeps daytime behavior rather than waking
+ * the house to a capped dial. */
+class NightSwitch : public switch_::Switch {
  protected:
   void write_state(bool state) override { this->publish_state(state); }
 };

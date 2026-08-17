@@ -339,6 +339,10 @@ bool SerinLinkComponent::hvac_get_state(sl2_hvac_state_t *out) {
   out->screen_ctl = screen_switch_ != nullptr;
   out->screen_off = screen_switch_ != nullptr && !screen_switch_->state;
 
+  /* Sun gate: same read-each-tick contract as the presence gate above. */
+  out->night_ctl = night_switch_ != nullptr;
+  out->night     = night_switch_ != nullptr && night_switch_->state;
+
   if (climate_ == nullptr) {                 /* spike: canned device */
     out->hvac_link = true;
     out->mode = SL2_MODE_HEAT;

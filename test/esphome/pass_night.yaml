@@ -1,0 +1,27 @@
+# night: — the sun-down gate for the paired Serin Links' displays. HA (or an
+# on-device sun: trigger) drives the switch; ON caps every Link's wake
+# brightness. Restored OFF so a controller HA never touches keeps daytime
+# behavior.
+esphome:
+  name: t-night
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  night:

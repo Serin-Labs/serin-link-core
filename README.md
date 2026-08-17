@@ -274,6 +274,18 @@ serin_link:
   climate_id: hvac
   max_links: 1
   screen:          # "Serin Link Screen" switch (default name)
+  # Sun-down gate: cap every Link's wake brightness after dark.
+  # Drive from HA:  automation on sun.sun below_horizon -> switch.turn_on
+  #                 both edge-triggered, so a controller reboot loses the
+  #                 gate (switch restores OFF) until next sunset/sunrise —
+  #                 also trigger on Home Assistant start / device-available
+  #                 and set the switch from the CURRENT sun.sun state, not
+  #                 just the transition.
+  # HA-less:        sun: + on_elevation (-6°, both directions) -> this switch
+  #                 same reboot gap without HA to re-assert it — add an
+  #                 on_boot (or interval: 5min) block that publishes
+  #                 elevation < -6° to the switch alongside on_elevation.
+  night:
 
 automation:        # in Home Assistant
   # motion on  -> switch.turn_on  (screen visible)
