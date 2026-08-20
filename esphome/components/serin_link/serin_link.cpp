@@ -620,6 +620,7 @@ bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
   if (runtime_sensor_ != nullptr) out->features |= SL2_FEAT_RUNTIME;
   if (power_sensor_ != nullptr || energy_sensor_ != nullptr)
     out->features |= SL2_FEAT_ENERGY;
+  if (link_ota_credentials_) out->features |= SL2_FEAT_LINK_OTA_CREDS;
   if (climate_ == nullptr) {                 /* spike: canned CAPS */
     out->modes = (1u << SL2_MODE_OFF) | (1u << SL2_MODE_HEAT) |
                  (1u << SL2_MODE_COOL) | (1u << SL2_MODE_DRY) |
@@ -670,6 +671,34 @@ bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
     out->hum_step_pct = 1;
   }
   copy_zone_name(out->name, sizeof out->name);
+  return true;
+}
+
+/* WIFI_REQ -> WIFI_RESP: hand a bonded Serin Link this node's STA
+ * credentials for its firmware update (`link_ota_credentials:`).
+ *
+ * Read from the DRIVER, not from ESPHome's `wifi:` model: this is whatever
+ * network the node is configured for, which is the one the Link needs —
+ * correct under multi-network roaming and for credentials saved through the
+ * captive portal, neither of which appears in YAML. The core zeroizes the
+ * response packet after sending it; the Link holds the creds in RAM for one
+ * attempt and scrubs them after the join. */
+bool SerinLinkComponent::hvac_wifi_creds(char ssid[33], char psk[65]) {
+  wifi_config_t wc;
+  if (esp_wifi_get_config(WIFI_IF_STA, &wc) != ESP_OK) return false;
+  if (wc.sta.ssid[0] == 0) return false;   /* nothing stored yet */
+  /* The driver's fields are fixed-width and NOT guaranteed NUL-terminated;
+   * copy the full width and terminate past it. Pin those widths: in the same
+   * IDF header wifi_ap_record_t.ssid is [33] while wifi_sta_config_t.ssid is
+   * [32] — if the STA field ever grew to match, this memcpy would overflow
+   * the caller's ssid[33] inside a packed wire struct. */
+  static_assert(sizeof(((wifi_config_t *)0)->sta.ssid) == 32, "STA ssid width");
+  static_assert(sizeof(((wifi_config_t *)0)->sta.password) == 64, "STA password width");
+  memcpy(ssid, wc.sta.ssid, sizeof(wc.sta.ssid));
+  ssid[sizeof(wc.sta.ssid)] = '\0';
+  memcpy(psk, wc.sta.password, sizeof(wc.sta.password));
+  psk[sizeof(wc.sta.password)] = '\0';
+  memset(&wc, 0, sizeof wc);   /* success path only: no PSK copy left on our stack */
   return true;
 }
 
@@ -1010,6 +1039,9 @@ static void t_room_sensor(void *ctx, const uint8_t src_mac[6],
                           const struct sl2_dial_sensor_pkt *p, bool is_edit) {
   static_cast<SerinLinkComponent *>(ctx)->room_sensor_feed(src_mac, p, is_edit);
 }
+static bool t_wifi_creds(void *ctx, char ssid[33], char psk[65]) {
+  return static_cast<SerinLinkComponent *>(ctx)->hvac_wifi_creds(ssid, psk);
+}
 
 /* ── component ────────────────────────────────────────────────────────── */
 
@@ -1195,7 +1227,10 @@ void SerinLinkComponent::setup() {
    * never sends DIAL_SENSOR at all, so an unconfigured node simply never
    * calls this — no need for a second gate here. */
   hvac_.room_sensor = t_room_sensor;
-  hvac_.wifi_creds = nullptr;  /* Link-OTA creds relay: future work */
+  /* Installed only when the config opted in: a null hook makes the core
+   * answer ok=0, which is the right degraded behavior if the hook and the
+   * CAPS bit ever disagree. */
+  hvac_.wifi_creds = link_ota_credentials_ ? t_wifi_creds : nullptr;
 
   sl2_link_init(&link_, &port_, &crypto_, &hvac_);
   started_ = sl2_link_start(&link_);

@@ -32,6 +32,12 @@ external_components:
 packages:
   serin_cn105: !include packages/cn105.yaml
 
+serin_link:
+  # Let a bonded Serin Link fetch its own firmware — relays this node's Wi-Fi
+  # credentials to it on request. See README, "Letting the Serin Link update
+  # itself", for what that hands to whom.
+  # link_ota_credentials: true
+
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password

@@ -187,10 +187,16 @@ class SerinLinkComponent : public Component {
 
   void set_night_switch(switch_::Switch *s) { night_switch_ = s; }
 
+  /* Answer a bonded Serin Link's WIFI_REQ with this node's STA credentials
+   * (`link_ota_credentials:`), so the Link's own update flow can join the
+   * network. Off by default — see hvac_wifi_creds. */
+  void set_link_ota_credentials(bool v) { link_ota_credentials_ = v; }
+
   /* HVAC iface backing (public: called from the C hook trampolines). */
   bool hvac_get_state(sl2_hvac_state_t *out);
   bool hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd);
   bool hvac_get_caps(struct sl2_caps_pkt *out);
+  bool hvac_wifi_creds(char ssid[33], char psk[65]);
   size_t fill_info_tlvs(uint8_t *buf, size_t cap);
   void copy_zone_name(char *dst, size_t cap) const;
 
@@ -240,6 +246,7 @@ class SerinLinkComponent : public Component {
    * reading arrives. */
   void publish_dial_(bool stale);
   bool link_sensor_cfg_{false};
+  bool link_ota_credentials_{false};
   sensor::Sensor *dial_temp_sensor_{nullptr};
   sensor::Sensor *dial_hum_sensor_{nullptr};
   text_sensor::TextSensor *dial_mac_sensor_{nullptr};

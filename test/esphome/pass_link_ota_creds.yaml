@@ -1,0 +1,27 @@
+# link_ota_credentials: — the node hands its STA creds to a bonded Serin Link
+# so the Link's own Update flow can join the network and fetch its firmware.
+# Opt-in: without this key the CAPS feature bit stays clear and the Link hides
+# its update path entirely.
+esphome:
+  name: t-linkota
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  link_ota_credentials: true

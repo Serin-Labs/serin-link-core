@@ -1,0 +1,32 @@
+# A working WPA2-PSK network alongside an eap: one still rejects — the guard
+# is "any network is eap", not "every network is eap". The node could
+# associate to the EAP network at runtime regardless of which one is listed
+# first, and the relay must not promise credentials it can't always deliver.
+esphome:
+  name: t-linkotamixed
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  networks:
+    - ssid: "home"
+      password: "testpass123"
+    - ssid: "corp"
+      eap:
+        username: "user"
+        password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  link_ota_credentials: true

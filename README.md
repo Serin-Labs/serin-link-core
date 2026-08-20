@@ -33,7 +33,7 @@ esp32:
     type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
-  - source: github://Serin-Labs/serin-link-core@v0.1.3-beta.11
+  - source: github://Serin-Labs/serin-link-core@v0.1.4-beta.2
     components: [serin_link]
 
 climate:
@@ -385,6 +385,10 @@ Honest summary — the spec's §3 has the full story:
   window is trust-on-first-use, the same posture as Zigbee permit-join. There
   is no CA and no "genuine device" gating — any firmware may implement this
   protocol.
+- `link_ota_credentials:` (default **off**) is the one setting that sends a
+  secret *outward*: it relays the node's Wi-Fi SSID and PSK to a bonded Serin
+  Link, encrypted, on request, so the Link can fetch its own firmware. Off
+  unless a config asks for it.
 
 ## Layout
 
@@ -459,9 +463,50 @@ Notes:
   `energy_sensor`) — each group sets its CAPS feature bit and INFO TLV; Wi-Fi,
   firmware, and system info are always served. Any platform's entities
   work; `example_cn105.yaml` shows the cn105 set.
-- The Link-OTA credential relay (`SL2_FEAT_LINK_OTA_CREDS`) is not wired yet —
-  the Serin Link hides its firmware-update path against this controller.
 - Compile-verified against ESPHome 2026.6.5 / IDF 5.5.
+
+### Letting the Serin Link update itself
+
+A Serin Link installs its own firmware: Settings → About → Details → Update.
+It has no Wi-Fi credentials of its own, so it asks the controller it is
+bonded to. Opt in and the Link grows that update path:
+
+```yaml
+serin_link:
+  id: serin
+  climate_id: hvac
+  link_ota_credentials: true   # default false
+```
+
+The node answers with the network it is configured for. The Link pauses
+its ESP-NOW link, joins, fetches Serin's firmware manifest over HTTPS,
+asks the user to confirm the version, then downloads, decrypts, and
+hash-verifies the image before switching boot partitions — the node supplies
+a network and nothing else, and never touches the firmware or its trust
+chain.
+
+Bonded Links pick this up on their own: the capability fingerprint bumps
+`caps_seq` when you reflash the node, every Link re-pulls, and the update
+path appears. No re-pairing, and no firmware update needed on the Link to
+enable Link firmware updates.
+
+What you are agreeing to, plainly:
+
+- **The Wi-Fi PSK goes to the Link.** Only to a Link that completed signed
+  pairing and is in the bond table, only over LMK-encrypted unicast, only
+  when it asks. It is held in RAM at both ends and zeroized after the join —
+  never written to flash on the Link. This is the same posture as the Serin
+  Controller firmware, made explicit here because on an ESPHome node it is
+  your network and your decision.
+- **WPA-Enterprise is rejected at config time.** An `eap:` network has no PSK
+  to relay, so combining it with `link_ota_credentials:` is refused rather
+  than shipping an update button that always fails.
+- **The Link needs internet.** It resolves and fetches over HTTPS and needs
+  NTP for certificate validation; on an IoT VLAN with no route out the check
+  fails at "Update check failed".
+- **The Link drops off the link while it updates.** Its `connected` and
+  per-slot diagnostics rows go down for the download and reboot, then
+  recover — bonds are persistent, so nothing needs re-pairing.
 
 ## Adapting any controller firmware
 

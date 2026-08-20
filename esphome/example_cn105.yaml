@@ -114,6 +114,10 @@ serin_link:
   id: serin          # NB: `id: link` collides with libc link() in generated code
   climate_id: hvac
   # zone_name: "Living Room"   # defaults to the climate entity's name
+  # Let a bonded Serin Link fetch its own firmware — relays this node's Wi-Fi
+  # credentials to it on request. See README, "Letting the Serin Link update
+  # itself", for what that hands to whom.
+  # link_ota_credentials: true
   # How many Serin Links this install holds — the single source of truth.
   # Generates the four per-slot diagnostics entities (MAC / Connected /
   # Last Seen / Firmware) for each slot and sizes the primary-Link dropdown.
@@ -189,6 +193,3 @@ button:
     name: "Forget All Serin Links"
     on_press:
       - serin_link.forget_all_links:
-
-# Known gaps against a native Serin Controller:
-#  - Link OTA credential relay: not wired (dial hides its update entry).

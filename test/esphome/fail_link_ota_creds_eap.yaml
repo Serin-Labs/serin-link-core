@@ -1,0 +1,29 @@
+# WPA-Enterprise has no PSK to relay, so a Serin Link handed these
+# "credentials" could never join. Reject at config time rather than let the
+# Link grow an Update button that dies at "WiFi failed".
+esphome:
+  name: t-linkotaeap
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  networks:
+    - ssid: "corp"
+      eap:
+        username: "user"
+        password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  link_ota_credentials: true

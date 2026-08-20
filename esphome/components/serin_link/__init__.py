@@ -113,6 +113,7 @@ CONF_SLOT = "slot"
 CONF_WINDOW = "window"
 CONF_SCREEN = "screen"
 CONF_NIGHT = "night"
+CONF_LINK_OTA_CREDENTIALS = "link_ota_credentials"
 
 # Mirrors SL2_MAX_DIALS in sl2_bond.h. If that #define ever changes, change
 # this with it: the C side silently ignores rows past the limit, so the error
@@ -518,6 +519,14 @@ _BASE_SCHEMA = cv.Schema(
         cv.Optional(CONF_PAIR_BUTTON): _pair_button_schema,
         cv.Optional(CONF_SCREEN): _screen_schema,
         cv.Optional(CONF_NIGHT): _night_schema,
+        # link_ota_credentials: — answer a bonded Serin Link's WIFI_REQ with
+        # this node's STA credentials, so the Link's own update flow can join
+        # the network and pull its firmware. Off by default: it hands the
+        # Wi-Fi PSK to the Link (encrypted unicast, RAM-only both ends,
+        # zeroized after use), which is a decision each config makes for
+        # itself. Unset = CAPS omits SL2_FEAT_LINK_OTA_CREDS and the Link
+        # hides its update path.
+        cv.Optional(CONF_LINK_OTA_CREDENTIALS, default=False): cv.boolean,
         cv.Optional(CONF_LINK_SENSOR): _link_sensor_schema,
         cv.Optional(CONF_DIAGNOSTICS): _diagnostics_schema,
     }
@@ -688,7 +697,33 @@ def _no_builtin_espnow(config):
     return config
 
 
-FINAL_VALIDATE_SCHEMA = _no_builtin_espnow
+def _ota_creds_need_a_psk(config):
+    """WPA-Enterprise has no PSK, so there is nothing a Serin Link could join
+    with. Reject the pair at config time instead of shipping an Update button
+    that always dies at "WiFi failed". Strict on ANY eap: network, not "every
+    network is eap": ESPHome folds a bare `ssid:` into `networks:`, and the
+    node may associate to the EAP one at runtime — at which point the relay
+    would hand out credentials that cannot work."""
+    if not config.get(CONF_LINK_OTA_CREDENTIALS):
+        return config
+    wifi_conf = fv.full_config.get().get("wifi") or {}
+    if any("eap" in net for net in (wifi_conf.get("networks") or [])):
+        raise cv.Invalid(
+            "`link_ota_credentials:` relays an SSID and PSK to the Serin Link, "
+            "and a WPA-Enterprise (`eap:`) network has no PSK to relay — the "
+            "Link could never join it. Remove `link_ota_credentials:`, or the "
+            "`eap:` network."
+        )
+    return config
+
+
+def _final_validate(config):
+    _no_builtin_espnow(config)
+    _ota_creds_need_a_psk(config)
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 # ── automation actions ────────────────────────────────────────────────────
@@ -822,6 +857,8 @@ async def to_code(config):
     if CONF_NIGHT in config:
         sw = await switch.new_switch(config[CONF_NIGHT])
         cg.add(var.set_night_switch(sw))
+    if config[CONF_LINK_OTA_CREDENTIALS]:
+        cg.add(var.set_link_ota_credentials(True))
     if CONF_VANE_V_SELECT in config:
         sel = await cg.get_variable(config[CONF_VANE_V_SELECT])
         cg.add(var.set_vane_v_select(sel))

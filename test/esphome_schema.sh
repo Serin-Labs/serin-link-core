@@ -20,6 +20,7 @@ declare -A MUST_CONTAIN=(
   [pass_link_sensor_links_rows.yaml]='Office Temperature'        # hand-written names
   [pass_screen.yaml]='Serin Link 2 Screen'      # switch + generated status rows
   [pass_night.yaml]='Serin Link Night'          # sun-down gate switch
+  [pass_link_ota_creds.yaml]='link_ota_credentials: true'   # key survives validation
 )
 declare -A MUST_REJECT_WITH=(
   [fail_rows_mismatch.yaml]='max_links'
@@ -35,6 +36,13 @@ declare -A MUST_REJECT_WITH=(
   [fail_sensor_links_no_count.yaml]='max_links'
   # status rows without the switch would read "off" forever (no FEAT bit)
   [fail_screen_row_without_switch.yaml]='requires `screen:`'
+  # not 'link_ota_credentials': the dumped config echo contains that literal
+  [fail_link_ota_creds_eap.yaml]='no PSK to relay'
+  # pins the corrected remedy text (not the old, unworkable "give the node a
+  # WPA2-PSK network" advice) and, via the mixed pass/fail network list in
+  # the fixture, the guard's any()-not-all() semantics; backtick-guarded so
+  # it can't collide with the YAML config echo
+  [fail_link_ota_creds_mixed.yaml]='or the `eap:` network'
 )
 
 fails=0
