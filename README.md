@@ -127,30 +127,30 @@ serin_link:
 ```
 
 That single number generates the four per-slot diagnostics entities (MAC /
-Connected / Last Seen / Firmware) for each slot and sizes the primary-Link
-dropdown below — no other part of the config repeats it. Everything that
+Connected / Last Seen / Firmware) for each slot and sizes the room-temperature
+source dropdown below — no other part of the config repeats it. Everything that
 follows describes what the multi-Link machinery does underneath.
 
 All bonded Links get the STATE stream, and a
 command from any of them is accepted — but the `link_sensor:` entities above
 are a *single* set, and by default whichever one reported last owns them. Two
 Links in two rooms therefore make that temperature — and any heat pump fed
-from it — alternate between rooms. Pin one with `primary_select:` — a Home
-Assistant dropdown listing `Auto (last reporting)` and one entry per
-`max_links:` slot:
+from it — alternate between rooms. Configure one controller-owned dropdown:
 
 ```yaml
-  link_sensor:
-    primary_select:
-      name: "Primary Serin Link"    # bare `primary_select:` = this default
+  room_temperature_source:
+    name: "Room Temperature Source"
 ```
 
-On `Auto`, the old last-reporting-wins behavior is unchanged. Pinned, only
-that Link's readings are used; the others are still bonded, still control the
-heat pump, and their room-source selection is still honored — only their
-*measurement* is ignored, with one log line per ignored Serin Link. Add
-`internal: true` if you want the pin without an HA entity — the choice is
-stored on the controller either way.
+The same confirmed selection is shown in Home Assistant and on every paired
+Serin Link. Options are `Internal`, `Auto (last reporting)`, and one entry per
+`max_links:` slot. On `Auto`, the old last-reporting-wins behavior is unchanged.
+Pinned, only that Link's readings are used; the others remain bonded and can
+still control the heat pump. The selection is stored on the controller.
+
+`link_sensor: primary_select:` is retained as a migration-only compatibility
+option. Do not configure both; new configurations should use
+`room_temperature_source:`.
 
 (The dropdown's length is fixed at build time — ESPHome sets a select's
 options once and Home Assistant caches them — which is why it follows
@@ -163,7 +163,7 @@ consequences you can watch for:
 
 - Forget an *earlier* Link and the pinned one shifts down a slot. The pin holds
   — the dropdown just relabels itself from "Serin Link 2" to "Serin Link 1".
-- Forget the *pinned* Link and the pin reverts to `Auto`, with a warning in the
+- Forget the *pinned* Link and the source reverts to `Internal`, with a warning in the
   log. Leaving it would strand the room source at unavailable with no way back
   short of a reflash. Note this is about **forgetting**, not going offline: an
   offline pinned Link keeps its pin, which is the entire feature.
@@ -188,10 +188,10 @@ add `links:` to `link_sensor:` — per-slot temperature/humidity rows, one per
 bond slot, that show **every** bonded Link's reading, non-primary included:
 
 ```yaml
+  room_temperature_source:
   link_sensor:
     temperature:                 # the arbitrated pair: the primary's reading,
       name: "Serin Link Temperature"   # the one on_room_temperature feeds from
-    primary_select:
     links:                       # per-slot rows: one temperature + one
                                  # humidity per bond slot, every Link visible
 ```

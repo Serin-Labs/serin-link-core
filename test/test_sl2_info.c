@@ -115,6 +115,31 @@ static void test_room_src(void) {
     assert(v[1] == SL2_ROOMST_OK);
 }
 
+static void test_room_source_v2(void) {
+    uint8_t buf[32];
+    size_t off = 0;
+    const uint8_t mac[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
+    const uint64_t id = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac);
+    assert(sl2_info_put_room_source_v2(buf, sizeof buf, &off,
+                                       0x11223344u, id, SL2_ROOMST_OK));
+    const uint8_t *v = expect_tlv(buf, off, SL2_TLV_ROOM_SOURCE_V2, 13);
+    /* Little-endian on the wire regardless of host order — this helper is
+     * why the payload is built byte-wise rather than memcpy'd from a struct. */
+    assert(v[0] == 0x44 && v[1] == 0x33 && v[2] == 0x22 && v[3] == 0x11);
+    uint64_t back = 0;
+    for (int i = 0; i < 8; i++) back |= (uint64_t) v[4 + i] << (i * 8);
+    assert(back == id);
+    assert(v[12] == SL2_ROOMST_OK);
+
+    /* Whole-TLV-or-nothing, like every other put_*: 15 bytes on the wire. */
+    uint8_t small[14];
+    off = 0;
+    assert(!sl2_info_put_room_source_v2(small, sizeof small, &off,
+                                        1, SL2_ROOM_SOURCE_INTERNAL_ID,
+                                        SL2_ROOMST_UNAVAILABLE));
+    assert(off == 0);
+}
+
 static void test_bounds_whole_tlv_or_nothing(void) {
     uint8_t buf[8];                          /* too small for WIFI_INFO */
     size_t off = 0;
@@ -199,6 +224,7 @@ int main(void) {
     test_sys();
     test_energy();
     test_room_src();
+    test_room_source_v2();
     test_bounds_whole_tlv_or_nothing();
     test_string_tables();
     test_full_packet_stream();

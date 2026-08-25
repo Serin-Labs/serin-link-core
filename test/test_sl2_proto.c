@@ -72,7 +72,7 @@ static void test_layout(void) {
     assert(offsetof(struct sl2_caps_pkt, name) == 22);
     assert(offsetof(struct sl2_pair_req_pkt, eph_pub) == 8);
     assert(offsetof(struct sl2_pair_req_pkt, sig) == 72);
-    assert(SL2_PROTO_VERSION == 3);
+    assert(SL2_PROTO_VERSION == 4);
     assert(offsetof(struct sl2_dial_info_pkt, caps_seq) == 2);
     assert(offsetof(struct sl2_dial_info_pkt, model) == 3);
     assert(offsetof(struct sl2_dial_info_pkt, fw) == 27);
@@ -291,8 +291,64 @@ static void test_centi_sentinels_are_out_of_range(void) {
     assert(SL2_HUM_CC_NA > 10000);
 }
 
-static void test_proto_version_is_three(void) {
-    assert(SL2_PROTO_VERSION == 3);
+/* v4 room-source catalog. The sizeof asserts live in the header; these pin the
+ * field OFFSETS, which is what a peer decoding the wire actually depends on —
+ * same guarantee test_layout() gives the v2/v3 packets. */
+static void test_room_catalog_layout(void) {
+    assert(offsetof(struct sl2_room_source_entry, kind) == 8);
+    assert(offsetof(struct sl2_room_source_entry, flags) == 9);
+    assert(offsetof(struct sl2_room_source_entry, name) == 10);
+    assert(offsetof(struct sl2_room_catalog_req_pkt, cursor) == 2);
+    assert(offsetof(struct sl2_room_catalog_req_pkt, known_revision) == 4);
+    assert(offsetof(struct sl2_room_catalog_resp_pkt, next_cursor) == 4);
+    assert(offsetof(struct sl2_room_catalog_resp_pkt, revision) == 8);
+    assert(offsetof(struct sl2_room_catalog_resp_pkt, entries) ==
+           SL2_ROOM_CATALOG_RESP_HDR_LEN);
+    assert(offsetof(struct sl2_room_source_set_pkt, revision) == 4);
+    assert(offsetof(struct sl2_room_source_set_pkt, source_id) == 8);
+    assert(offsetof(struct sl2_room_source_ack_pkt, revision) == 4);
+    assert(offsetof(struct sl2_room_source_ack_pkt, source_id) == 8);
+    assert(offsetof(struct sl2_room_source_ack_pkt, status) == 16);
+    assert(offsetof(struct sl2_room_source_v2, source_id) == 4);
+    assert(offsetof(struct sl2_room_source_v2, status) == 12);
+    /* A full page must still fit the 250-byte ESP-NOW MTU — this is what caps
+     * SL2_ROOM_CATALOG_PAGE_MAX, so it must fail if either constant grows. */
+    assert(sizeof(struct sl2_room_catalog_resp_pkt) <= 250);
+    printf("room catalog layout ok\n");
+}
+
+/* Namespaced ids: the high byte is the namespace, the low 6 the MAC, so an
+ * id survives bond-table compaction and never collides across namespaces. */
+static void test_room_source_mac_id(void) {
+    const uint8_t mac[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
+    uint64_t link = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac);
+    assert(link == (UINT64_C(1) << 56 | UINT64_C(0xDEADBEEF0001)));
+    assert(sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_SENSOR, mac) != link);
+    assert(link != SL2_ROOM_SOURCE_INTERNAL_ID &&
+           link != SL2_ROOM_SOURCE_AVERAGE_ID &&
+           link != SL2_ROOM_SOURCE_LINK_AUTO_ID);
+    assert(SL2_ROOM_SOURCE_LINK_AUTO_ID ==
+           (uint64_t) SL2_ROOM_SOURCE_NS_LINK_AUTO << 56);
+
+    /* Round trip: the id is a lossless encoding of (namespace, MAC), which is
+     * what lets a controller store the id alone. */
+    uint8_t back[6];
+    assert(sl2_room_source_id_mac(link, SL2_ROOM_SOURCE_NS_LINK, back));
+    assert(memcmp(back, mac, 6) == 0);
+    /* Wrong namespace, and the well-known ids, are not MAC ids. */
+    assert(!sl2_room_source_id_mac(link, SL2_ROOM_SOURCE_NS_SENSOR, back));
+    assert(!sl2_room_source_id_mac(SL2_ROOM_SOURCE_INTERNAL_ID,
+                                   SL2_ROOM_SOURCE_NS_LINK, back));
+    assert(!sl2_room_source_id_mac(SL2_ROOM_SOURCE_LINK_AUTO_ID,
+                                   SL2_ROOM_SOURCE_NS_LINK, back));
+    /* All-zero and broadcast MACs survive the round trip too. */
+    const uint8_t zero[6] = {0}, bcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    for (const uint8_t *m = zero; m; m = (m == zero) ? bcast : NULL) {
+        uint64_t id = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, m);
+        assert(sl2_room_source_id_mac(id, SL2_ROOM_SOURCE_NS_LINK, back));
+        assert(memcmp(back, m, 6) == 0);
+    }
+    printf("room source mac id ok\n");
 }
 
 static void test_room_src_tlv_round_trip(void) {
@@ -385,7 +441,8 @@ int main(void) {
     test_dial_sensor_min_len_covers_hum_cc();
     test_want_src_moved_to_offset_seven();
     test_centi_sentinels_are_out_of_range();
-    test_proto_version_is_three();
+    test_room_catalog_layout();
+    test_room_source_mac_id();
     test_room_src_tlv_round_trip();
     test_link_sensor_feature_bit_is_free();
     test_screen_bits_are_free();

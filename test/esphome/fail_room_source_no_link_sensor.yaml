@@ -1,0 +1,26 @@
+# Without link_sensor: no Serin Link reading is ever accepted, so every option
+# in the dropdown below Internal would be unselectable in practice. Reject at
+# validation rather than shipping a dropdown that cannot do anything.
+esphome:
+  name: t-room-source-no-sensor
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  max_links: 2
+  room_temperature_source:
+    name: "Room Temperature Source"

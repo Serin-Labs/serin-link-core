@@ -103,6 +103,13 @@ class SerinLinkComponent : public Component {
    * "dial" vocabulary; only the YAML key and HA-visible text say
    * "Serin Link". */
   void set_primary_select(select::Select *s) { primary_select_ = s; }
+  void set_room_source_select(select::Select *s) { room_source_select_ = s; }
+  void room_source_select_control(size_t index);
+  bool room_catalog_page(uint16_t cursor, struct sl2_room_source_entry *entries,
+                         uint8_t cap, uint8_t *count, uint16_t *next,
+                         uint32_t *revision);
+  bool room_source_get(uint32_t *revision, uint64_t *source_id, uint8_t *status);
+  uint8_t room_source_set(uint32_t revision, uint64_t source_id);
   /* index 0 = Auto (no pin); 1..SL2_MAX_DIALS = bond slot 0..N-1. Driven by
    * index rather than label so the option STRINGS live only in the Python
    * schema and rewording one can never silently change the mapping. */
@@ -263,6 +270,19 @@ class SerinLinkComponent : public Component {
   uint8_t primary_dial_[6]{};
   bool has_primary_dial_{false};
   select::Select *primary_select_{nullptr};
+  select::Select *room_source_select_{nullptr};
+  int pub_room_source_idx_{-1};
+  /* The ONE stored copy of the room-source choice. selected_src_ and
+   * primary_dial_ above are projections of it (room_source_project_), not
+   * independent state, so nothing has to keep three fields in step. */
+  uint64_t selected_source_id_{SL2_ROOM_SOURCE_INTERNAL_ID};
+  ESPPreferenceObject room_source_id_pref_;
+  uint32_t room_catalog_revision_() const;
+  bool room_source_slot_(uint64_t id, int *slot) const;
+  bool room_catalog_entry_(int idx, struct sl2_room_source_entry *e) const;
+  void room_source_apply_(uint64_t id);
+  void room_source_project_();
+  void refresh_room_source_select_();
   ESPPreferenceObject primary_pref_;
   /* Republish the dropdown from the CURRENT bond table, and drop a pin whose
    * Serin Link has been forgotten. Offline is not forgotten: an offline pin is
@@ -371,6 +391,11 @@ class SerinLinkComponent : public Component {
 class PrimaryLinkSelect : public select::Select, public Parented<SerinLinkComponent> {
  protected:
   void control(size_t index) override { this->parent_->primary_select_control(index); }
+};
+
+class RoomSourceSelect : public select::Select, public Parented<SerinLinkComponent> {
+ protected:
+  void control(size_t index) override { this->parent_->room_source_select_control(index); }
 };
 
 /* screen: — the presence-gate switch. Optimistic: write_state only

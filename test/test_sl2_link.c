@@ -185,10 +185,64 @@ static bool h_creds(void *c, char ssid[33], char psk[65]) {
 }
 static int n_wifi_setups;
 static bool h_wifi_setup(void *c) { (void)c; n_wifi_setups++; return true; }
+static uint32_t h_room_revision = 0x10203040u;
+static uint64_t h_room_source = SL2_ROOM_SOURCE_INTERNAL_ID;
+static uint8_t h_room_status;
+static int n_room_sets;
+/* Deliberately longer than SL2_ROOM_CATALOG_PAGE_MAX so the paging contract in
+ * wire spec 10e is exercised: a full first page with a live cursor, then a
+ * short final page terminated by SL2_ROOM_CATALOG_DONE. */
+#define H_ROOM_CATALOG_N (SL2_ROOM_CATALOG_PAGE_MAX + 2)
+static bool h_room_catalog(void *c, uint16_t cursor,
+                           struct sl2_room_source_entry *entries, uint8_t cap,
+                           uint8_t *count, uint16_t *next, uint32_t *revision) {
+    (void)c;
+    struct sl2_room_source_entry catalog[H_ROOM_CATALOG_N];
+    memset(catalog, 0, sizeof catalog);
+    catalog[0] = (struct sl2_room_source_entry){
+        SL2_ROOM_SOURCE_INTERNAL_ID, SL2_ROOM_KIND_INTERNAL,
+        SL2_ROOM_SOURCE_F_SELECTABLE, "Internal" };
+    catalog[1] = (struct sl2_room_source_entry){
+        SL2_ROOM_SOURCE_LINK_AUTO_ID, SL2_ROOM_KIND_AUTO,
+        SL2_ROOM_SOURCE_F_SELECTABLE, "Auto (last reporting)" };
+    for (int i = 2; i < H_ROOM_CATALOG_N; i++) {
+        const uint8_t mac[6] = { 0x02, 0, 0, 0, 0, (uint8_t)i };
+        catalog[i].id = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac);
+        catalog[i].kind = SL2_ROOM_KIND_LINK;
+        catalog[i].flags = SL2_ROOM_SOURCE_F_SELECTABLE;
+        snprintf(catalog[i].name, SL2_ROOM_SOURCE_NAME_LEN, "Serin Link %d", i - 1);
+    }
+    *revision = h_room_revision;
+    *count = 0;
+    while (cursor < H_ROOM_CATALOG_N && *count < cap)
+        entries[(*count)++] = catalog[cursor++];
+    *next = cursor < H_ROOM_CATALOG_N ? cursor : SL2_ROOM_CATALOG_DONE;
+    return true;
+}
+static bool h_room_get(void *c, uint32_t *revision, uint64_t *source_id,
+                       uint8_t *status) {
+    (void)c;
+    *revision = h_room_revision;
+    *source_id = h_room_source;
+    *status = h_room_status;
+    return true;
+}
+static uint8_t h_room_set(void *c, uint32_t revision, uint64_t source_id) {
+    (void)c;
+    n_room_sets++;
+    if (revision != h_room_revision) return SL2_ROOM_SET_STALE_CATALOG;
+    if (source_id != SL2_ROOM_SOURCE_INTERNAL_ID &&
+        source_id != SL2_ROOM_SOURCE_LINK_AUTO_ID)
+        return SL2_ROOM_SET_BAD_SOURCE;
+    h_room_source = source_id;
+    return SL2_ROOM_SET_OK;
+}
 static const sl2_hvac_iface_t FHVAC = {
     .ctx = NULL, .get_state = h_get_state, .apply = h_apply,
     .get_caps = h_get_caps, .fill_info_tlvs = h_tlvs, .wifi_creds = h_creds,
     .wifi_setup = h_wifi_setup,
+    .room_catalog_page = h_room_catalog, .room_source_get = h_room_get,
+    .room_source_set = h_room_set,
 };
 
 /* ── dial-side simulation helpers ─────────────────────────────────────── */
@@ -285,9 +339,113 @@ static void fresh(sl2_link_t *l) {
     H.set_low_dc = SL2_DC_NA; H.set_high_dc = SL2_DC_NA;
     H.room_hum_pct = 40; H.hum_set_pct = SL2_HUM_NA;
     n_applies = 0;
+    n_room_sets = 0;
+    h_room_revision = 0x10203040u;
+    h_room_source = SL2_ROOM_SOURCE_INTERNAL_ID;
+    h_room_status = 0;
     F.now = 1000;
     sl2_link_init(l, &FPORT, &FCRYPTO, &FHVAC);
     assert(sl2_link_start(l));
+}
+
+static void test_room_source_catalog_and_set(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xE6);
+    pair_dial(&l, &d);
+    F.n_sent = 0;
+
+    struct sl2_room_catalog_req_pkt q = {
+        .type = SL2_PKT_ROOM_CATALOG_REQ, .version = SL2_PROTO_VERSION,
+        .cursor = 0, .known_revision = 0,
+    };
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&q, sizeof q);
+    sl2_link_loop(&l);
+    int si = last_send_of(SL2_PKT_ROOM_CATALOG_RESP);
+    assert(si >= 0);
+    struct sl2_room_catalog_resp_pkt r;
+    sl2_decode_pkt(&r, sizeof r, F.sent[si].data, (int)F.sent[si].len);
+    /* First page: full, and next_cursor points at the remainder — NOT done. */
+    assert(r.revision == h_room_revision);
+    assert(r.count == SL2_ROOM_CATALOG_PAGE_MAX);
+    assert(r.next_cursor == SL2_ROOM_CATALOG_PAGE_MAX);
+    /* Only the entries actually filled are on the wire — a full 250-byte
+     * struct is never sent when the page is short. */
+    assert(F.sent[si].len == SL2_ROOM_CATALOG_RESP_HDR_LEN +
+                             r.count * sizeof(struct sl2_room_source_entry));
+    assert(F.sent[si].len <= SL2_MTU);
+    assert(r.entries[0].id == SL2_ROOM_SOURCE_INTERNAL_ID);
+    assert(strcmp(r.entries[1].name, "Auto (last reporting)") == 0);
+
+    /* Final page: short, and terminated by DONE so a staging client knows to
+     * swap its visible list in (wire spec 10e). */
+    q.cursor = r.next_cursor;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&q, sizeof q);
+    sl2_link_loop(&l);
+    si = last_send_of(SL2_PKT_ROOM_CATALOG_RESP);
+    sl2_decode_pkt(&r, sizeof r, F.sent[si].data, (int)F.sent[si].len);
+    assert(r.count == H_ROOM_CATALOG_N - SL2_ROOM_CATALOG_PAGE_MAX);
+    assert(r.next_cursor == SL2_ROOM_CATALOG_DONE);
+    assert(F.sent[si].len == SL2_ROOM_CATALOG_RESP_HDR_LEN +
+                             r.count * sizeof(struct sl2_room_source_entry));
+
+    /* Below the v4 floor: both room-source types are dropped outright, no
+     * reply of any kind — same discipline as the DIAL_SENSOR v2 gate. */
+    F.n_sent = 0;
+    q.cursor = 0;
+    q.version = SL2_ROOM_CATALOG_MIN_VER - 1;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&q, sizeof q);
+    sl2_link_loop(&l);
+    assert(last_send_of(SL2_PKT_ROOM_CATALOG_RESP) < 0);
+    q.version = SL2_PROTO_VERSION;
+
+    /* A cursor past the end is answered, not dropped: empty and DONE. */
+    q.cursor = H_ROOM_CATALOG_N + 5;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&q, sizeof q);
+    sl2_link_loop(&l);
+    si = last_send_of(SL2_PKT_ROOM_CATALOG_RESP);
+    sl2_decode_pkt(&r, sizeof r, F.sent[si].data, (int)F.sent[si].len);
+    assert(r.count == 0 && r.next_cursor == SL2_ROOM_CATALOG_DONE);
+    assert(F.sent[si].len == SL2_ROOM_CATALOG_RESP_HDR_LEN);
+
+    struct sl2_room_source_set_pkt set = {
+        .type = SL2_PKT_ROOM_SOURCE_SET, .version = SL2_PROTO_VERSION,
+        .request_id = 7, .revision = h_room_revision,
+        .source_id = SL2_ROOM_SOURCE_LINK_AUTO_ID,
+    };
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, sizeof set);
+    sl2_link_loop(&l);
+    si = last_send_of(SL2_PKT_ROOM_SOURCE_ACK);
+    assert(si >= 0);
+    struct sl2_room_source_ack_pkt a;
+    sl2_decode_pkt(&a, sizeof a, F.sent[si].data, (int)F.sent[si].len);
+    assert(a.request_id == 7 && a.result == SL2_ROOM_SET_OK);
+    assert(a.revision == h_room_revision && a.source_id == SL2_ROOM_SOURCE_LINK_AUTO_ID);
+    assert(n_room_sets == 1);
+
+    /* Below the floor a SET must not reach the hook at all — no ack, and, more
+     * importantly, no state change. */
+    F.n_sent = 0;
+    set.request_id = 9;
+    set.version = SL2_ROOM_CATALOG_MIN_VER - 1;
+    set.source_id = SL2_ROOM_SOURCE_INTERNAL_ID;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, sizeof set);
+    sl2_link_loop(&l);
+    assert(last_send_of(SL2_PKT_ROOM_SOURCE_ACK) < 0);
+    assert(n_room_sets == 1 && h_room_source == SL2_ROOM_SOURCE_LINK_AUTO_ID);
+    set.version = SL2_PROTO_VERSION;
+
+    set.request_id = 8;
+    set.revision--;
+    set.source_id = SL2_ROOM_SOURCE_INTERNAL_ID;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, sizeof set);
+    sl2_link_loop(&l);
+    si = last_send_of(SL2_PKT_ROOM_SOURCE_ACK);
+    sl2_decode_pkt(&a, sizeof a, F.sent[si].data, (int)F.sent[si].len);
+    assert(a.request_id == 8 && a.result == SL2_ROOM_SET_STALE_CATALOG);
+    assert(a.source_id == SL2_ROOM_SOURCE_LINK_AUTO_ID);
+    printf("room source catalog + set ok\n");
 }
 
 static void test_identity_persists(void) {
@@ -1635,6 +1793,7 @@ int main(void) {
     test_screen_gate_in_state();
     test_night_gate_in_state();
     test_dial_screen_status_view();
+    test_room_source_catalog_and_set();
     printf("test_sl2_link: ALL OK\n");
     return 0;
 }

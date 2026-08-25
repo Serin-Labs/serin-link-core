@@ -21,6 +21,9 @@ declare -A MUST_CONTAIN=(
   [pass_screen.yaml]='Serin Link 2 Screen'      # switch + generated status rows
   [pass_night.yaml]='Serin Link Night'          # sun-down gate switch
   [pass_link_ota_creds.yaml]='link_ota_credentials: true'   # key survives validation
+  # key survives validation alongside link_sensor: and max_links: (the option
+  # list itself is built in to_code, which `esphome config` does not run)
+  [pass_room_temperature_source.yaml]='Room Temperature Source'
 )
 declare -A MUST_REJECT_WITH=(
   [fail_rows_mismatch.yaml]='max_links'
@@ -43,6 +46,10 @@ declare -A MUST_REJECT_WITH=(
   # the fixture, the guard's any()-not-all() semantics; backtick-guarded so
   # it can't collide with the YAML config echo
   [fail_link_ota_creds_mixed.yaml]='or the `eap:` network'
+  # not 'room_temperature_source': the dumped config echo contains that
+  # literal, so these pin the explanation instead
+  [fail_room_source_with_primary_select.yaml]='declare only the unified'
+  [fail_room_source_no_link_sensor.yaml]='requires `link_sensor:`'
 )
 
 fails=0

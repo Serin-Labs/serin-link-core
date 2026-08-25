@@ -615,7 +615,8 @@ bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
       sub_mode_sensor_ != nullptr || auto_sub_mode_sensor_ != nullptr)
     out->features |= SL2_FEAT_COMPRESSOR;
   if (battery_sensor_ != nullptr) out->features |= SL2_FEAT_SENSOR_BATT;
-  if (link_sensor_cfg_) out->features |= SL2_FEAT_LINK_SENSOR;
+  if (link_sensor_cfg_)
+    out->features |= SL2_FEAT_LINK_SENSOR | SL2_FEAT_ROOM_CATALOG;
   if (screen_switch_ != nullptr) out->features |= SL2_FEAT_SCREEN;
   if (runtime_sensor_ != nullptr) out->features |= SL2_FEAT_RUNTIME;
   if (power_sensor_ != nullptr || energy_sensor_ != nullptr)
@@ -774,8 +775,15 @@ size_t SerinLinkComponent::fill_info_tlvs(uint8_t *buf, size_t cap) {
   }
   /* Feature bit = capability, TLV presence = current validity (spec §9): a
    * node that did not opt in emits neither. */
-  if (link_sensor_cfg_)
-    sl2_info_put_room_src(buf, cap, &off, selected_src_, room_src_status_());
+  if (link_sensor_cfg_) {
+    /* Both TLVs describe one selection: ROOM_SRC is the coarse v3 view kept
+     * for pre-v4 dials, ROOM_SOURCE_V2 the stable-id view v4 dials converge
+     * on. One status read feeds both so they can never disagree. */
+    const uint8_t status = room_src_status_();
+    sl2_info_put_room_src(buf, cap, &off, selected_src_, status);
+    sl2_info_put_room_source_v2(buf, cap, &off, room_catalog_revision_(),
+                                selected_source_id_, status);
+  }
   return off;
 }
 
@@ -833,8 +841,25 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
    * means, ends the retry, and tells the user the truth on the dial's face.
    * See the design doc §3. */
   if (is_edit && is_room_src_valid(p->want_src) && selected_src_ != p->want_src) {
-    selected_src_ = p->want_src;
-    room_src_pref_.save(&selected_src_);
+    if (p->want_src == SL2_ROOMSRC_BLE) {
+      /* BLE has no entry in this adapter's catalog, so there is no id to
+       * apply. Record the coarse choice verbatim the way v3 did — the guard
+       * above is on selected_src_, and routing BLE through the catalog would
+       * store LINK instead, leave the guard permanently true, and repeat this
+       * branch at ~3 Hz forever. room_src_status_() then reports UNAVAILABLE,
+       * which is the truth and ends the dial's retry. */
+      selected_src_ = SL2_ROOMSRC_BLE;
+      selected_source_id_ = SL2_ROOM_SOURCE_INTERNAL_ID;
+      has_primary_dial_ = false;
+      std::memset(primary_dial_, 0, sizeof primary_dial_);
+      room_src_pref_.save(&selected_src_);
+      room_source_id_pref_.save(&selected_source_id_);
+      refresh_room_source_select_();
+    } else {
+      room_source_apply_(p->want_src == SL2_ROOMSRC_INTERNAL
+                             ? SL2_ROOM_SOURCE_INTERNAL_ID
+                             : SL2_ROOM_SOURCE_LINK_AUTO_ID);
+    }
     ESP_LOGI(TAG, "room source -> %u (set from Serin Link)",
              static_cast<unsigned>(selected_src_));
   }
@@ -1042,6 +1067,19 @@ static void t_room_sensor(void *ctx, const uint8_t src_mac[6],
 static bool t_wifi_creds(void *ctx, char ssid[33], char psk[65]) {
   return static_cast<SerinLinkComponent *>(ctx)->hvac_wifi_creds(ssid, psk);
 }
+static bool t_room_catalog(void *ctx, uint16_t cursor,
+                           struct sl2_room_source_entry *entries, uint8_t cap,
+                           uint8_t *count, uint16_t *next, uint32_t *revision) {
+  return static_cast<SerinLinkComponent *>(ctx)->room_catalog_page(
+      cursor, entries, cap, count, next, revision);
+}
+static bool t_room_source_get(void *ctx, uint32_t *revision, uint64_t *id,
+                              uint8_t *status) {
+  return static_cast<SerinLinkComponent *>(ctx)->room_source_get(revision, id, status);
+}
+static uint8_t t_room_source_set(void *ctx, uint32_t revision, uint64_t id) {
+  return static_cast<SerinLinkComponent *>(ctx)->room_source_set(revision, id);
+}
 
 /* ── component ────────────────────────────────────────────────────────── */
 
@@ -1053,6 +1091,180 @@ void SerinLinkComponent::publish_primary_(size_t index) {
   if (pub_primary_idx_ == static_cast<int>(index)) return;
   pub_primary_idx_ = static_cast<int>(index);
   primary_select_->publish_state(index);
+}
+
+/* FNV-1a over the catalog's ids, in order. The value is opaque — all that
+ * matters is that it changes when the catalog does, so a ROOM_SOURCE_SET
+ * computed against an older list is rejected as STALE_CATALOG. Derived rather
+ * than counted so it needs no invalidation hook on every bond add/forget.
+ * Never returns 0, which peers may treat as "no catalog". */
+uint32_t SerinLinkComponent::room_catalog_revision_() const {
+  uint32_t h = 2166136261u;
+  auto mix_id = [&h](uint64_t id) {
+    for (int i = 0; i < 8; i++) h = (h ^ (uint8_t)(id >> (i * 8))) * 16777619u;
+  };
+  mix_id(SL2_ROOM_SOURCE_INTERNAL_ID);
+  mix_id(SL2_ROOM_SOURCE_LINK_AUTO_ID);
+  const int n = sl2_link_dial_count(const_cast<sl2_link_t *>(&link_));
+  for (int slot = 0; slot < n; slot++) {
+    uint8_t mac[6];
+    if (!sl2_link_dial_mac(const_cast<sl2_link_t *>(&link_), slot, mac)) continue;
+    mix_id(sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac));
+  }
+  return h ? h : 1;
+}
+
+bool SerinLinkComponent::room_source_slot_(uint64_t id, int *out) const {
+  int n = sl2_link_dial_count(const_cast<sl2_link_t *>(&link_));
+  for (int slot = 0; slot < n; slot++) {
+    uint8_t mac[6];
+    if (sl2_link_dial_mac(const_cast<sl2_link_t *>(&link_), slot, mac) &&
+        sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac) == id) {
+      if (out) *out = slot;
+      return true;
+    }
+  }
+  return false;
+}
+
+/* One catalog entry by POSITION: 0 = Internal, 1 = Auto, 2+k = bond slot k.
+ * A pure function of the index so room_catalog_page can fill the caller's
+ * window directly — no staging array, no copy. Returns false past the end. */
+bool SerinLinkComponent::room_catalog_entry_(int idx,
+                                             struct sl2_room_source_entry *e) const {
+  const int bonds = sl2_link_dial_count(const_cast<sl2_link_t *>(&link_));
+  if (idx < 0 || idx >= bonds + 2) return false;
+  std::memset(e, 0, sizeof *e);
+  e->flags = SL2_ROOM_SOURCE_F_SELECTABLE;
+  if (idx == 0) {
+    e->id = SL2_ROOM_SOURCE_INTERNAL_ID;
+    e->kind = SL2_ROOM_KIND_INTERNAL;
+    std::snprintf(e->name, SL2_ROOM_SOURCE_NAME_LEN, "Internal");
+    return true;
+  }
+  if (idx == 1) {
+    e->id = SL2_ROOM_SOURCE_LINK_AUTO_ID;
+    e->kind = SL2_ROOM_KIND_AUTO;
+    std::snprintf(e->name, SL2_ROOM_SOURCE_NAME_LEN, "Auto (last reporting)");
+    return true;
+  }
+  const int slot = idx - 2;
+  uint8_t mac[6];
+  if (!sl2_link_dial_mac(const_cast<sl2_link_t *>(&link_), slot, mac)) return false;
+  e->id = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac);
+  e->kind = SL2_ROOM_KIND_LINK;
+  /* Numbered even when only one Link is bonded: the Python option list is
+   * sized at BUILD time from max_links, so a live-count-dependent label would
+   * name the same Link differently in Home Assistant and on the dial. */
+  std::snprintf(e->name, SL2_ROOM_SOURCE_NAME_LEN, "Serin Link %d", slot + 1);
+  return true;
+}
+
+bool SerinLinkComponent::room_catalog_page(uint16_t cursor,
+                                           struct sl2_room_source_entry *out,
+                                           uint8_t cap, uint8_t *count,
+                                           uint16_t *next, uint32_t *revision) {
+  *revision = room_catalog_revision_();
+  uint8_t n = 0;
+  while (n < cap && room_catalog_entry_(cursor + n, &out[n])) n++;
+  *count = n;
+  /* Short page (or an out-of-range cursor) means the catalog ended here. A
+   * full page needs one look-ahead to say whether more follows — into a
+   * scratch entry, never out[0], which already holds a returned entry. */
+  struct sl2_room_source_entry probe;
+  *next = (n == cap && room_catalog_entry_(cursor + n, &probe))
+              ? static_cast<uint16_t>(cursor + n)
+              : SL2_ROOM_CATALOG_DONE;
+  return true;
+}
+
+bool SerinLinkComponent::room_source_get(uint32_t *revision, uint64_t *id,
+                                         uint8_t *status) {
+  *revision = room_catalog_revision_();
+  *id = selected_source_id_;
+  *status = room_src_status_();
+  return true;
+}
+
+/* Commit a source that has already been validated. selected_source_id_ is the
+ * ONLY thing persisted: selected_src_ and primary_dial_ are projections of it
+ * (see room_source_project_), so they cannot drift out of step with it or
+ * survive a reboot disagreeing with it. */
+void SerinLinkComponent::room_source_apply_(uint64_t id) {
+  selected_source_id_ = id;
+  room_source_project_();
+  room_source_id_pref_.save(&selected_source_id_);
+  /* Kept in step so a v3 peer (and a downgrade) reads the same choice — and so
+   * an explicit selection clears a stuck BLE value. */
+  room_src_pref_.save(&selected_src_);
+  refresh_room_source_select_();
+}
+
+/* Recompute the v3-shaped view (selected_src_ + the pinned MAC) from the
+ * canonical id. Called after every write and once at boot. */
+void SerinLinkComponent::room_source_project_() {
+  selected_src_ = selected_source_id_ == SL2_ROOM_SOURCE_INTERNAL_ID
+                      ? SL2_ROOMSRC_INTERNAL
+                      : SL2_ROOMSRC_LINK;
+  has_primary_dial_ = sl2_room_source_id_mac(selected_source_id_,
+                                             SL2_ROOM_SOURCE_NS_LINK,
+                                             primary_dial_);
+  if (!has_primary_dial_) std::memset(primary_dial_, 0, sizeof primary_dial_);
+}
+
+uint8_t SerinLinkComponent::room_source_set(uint32_t revision, uint64_t id) {
+  if (revision != room_catalog_revision_()) return SL2_ROOM_SET_STALE_CATALOG;
+  if (id != SL2_ROOM_SOURCE_INTERNAL_ID && id != SL2_ROOM_SOURCE_LINK_AUTO_ID &&
+      !room_source_slot_(id, nullptr))
+    return SL2_ROOM_SET_BAD_SOURCE;
+  room_source_apply_(id);
+  return SL2_ROOM_SET_OK;
+}
+
+void SerinLinkComponent::room_source_select_control(size_t index) {
+  uint64_t id = SL2_ROOM_SOURCE_INTERNAL_ID;
+  if (index == 1) {
+    id = SL2_ROOM_SOURCE_LINK_AUTO_ID;
+  } else if (index >= 2) {
+    uint8_t mac[6];
+    /* The option list is sized at build time, so a slot can be offered before
+     * anything is bonded to it. Re-publish what is actually in force rather
+     * than leaving Home Assistant showing a selection never taken. */
+    if (!sl2_link_dial_mac(&link_, static_cast<int>(index) - 2, mac)) {
+      ESP_LOGW(TAG, "room source: Serin Link slot %u is empty — selection ignored",
+               static_cast<unsigned>(index) - 1);
+      refresh_room_source_select_();
+      return;
+    }
+    id = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac);
+  }
+  /* Local edit: the revision is current by construction, so this cannot be
+   * stale — the check exists for the wire path. */
+  room_source_apply_(id);
+}
+
+void SerinLinkComponent::refresh_room_source_select_() {
+  if (room_source_select_ == nullptr) return;
+  int idx = 0, slot = -1;
+  if (selected_source_id_ == SL2_ROOM_SOURCE_LINK_AUTO_ID) {
+    idx = 1;
+  } else if (room_source_slot_(selected_source_id_, &slot)) {
+    idx = slot + 2;
+  } else if (selected_source_id_ != SL2_ROOM_SOURCE_INTERNAL_ID) {
+    /* Pinned Serin Link is gone from the bond table (forgotten, not merely
+     * offline): fall back rather than strand the room source at unavailable
+     * with no way back except a reflash. */
+    char s[18];
+    sl2_fmt_mac(primary_dial_, s);
+    ESP_LOGW(TAG, "room source %s is no longer bonded — reverting to Internal", s);
+    room_source_apply_(SL2_ROOM_SOURCE_INTERNAL_ID);
+    return;                                /* apply_ re-enters and publishes */
+  }
+  /* select::publish_state does NOT dedup and this runs at 1 Hz — gate it. */
+  if (pub_room_source_idx_ != idx) {
+    pub_room_source_idx_ = idx;
+    room_source_select_->publish_state(static_cast<size_t>(idx));
+  }
 }
 
 /* Which bond slot currently holds the pinned MAC. False when nothing is
@@ -1164,7 +1376,10 @@ void SerinLinkComponent::setup() {
    * primary_select: entity exists — with the static primary_link: key the YAML
    * is the single source of truth and the two are mutually exclusive anyway. */
   primary_pref_ = global_preferences->make_preference<uint8_t[7]>(0x5332504C /* 'S2PL' */);
-  if (primary_select_ != nullptr) {
+  /* Loaded unconditionally, not only when primary_select: exists: the v3->v4
+   * migration below reads it, and that migration runs for exactly the users
+   * who are moving OFF primary_select:. */
+  {
     uint8_t blob[7] = {0};
     if (primary_pref_.load(&blob) && blob[0] == 1) {
       std::memcpy(primary_dial_, blob + 1, 6);
@@ -1175,6 +1390,28 @@ void SerinLinkComponent::setup() {
   room_src_pref_ = global_preferences->make_preference<uint8_t>(0x53325253 /* 'S2RS' */);
   if (!room_src_pref_.load(&selected_src_) || !is_room_src_valid(selected_src_))
     selected_src_ = SL2_ROOMSRC_INTERNAL;
+  room_source_id_pref_ = global_preferences->make_preference<uint64_t>(0x53325249 /* 'S2RI' */);
+  if (room_source_id_pref_.load(&selected_source_id_)) {
+    /* v4 store wins, and the v3-shaped fields are rebuilt from it — otherwise
+     * a pinned Link would come back with has_primary_dial_ false and the
+     * measurement filter would silently behave as Auto. */
+    if (room_source_select_ != nullptr) {
+      const uint8_t stored = selected_src_;
+      room_source_project_();
+      /* BLE is the one coarse value with no catalog id; it lives in the v3
+       * blob alone, so the projection must not erase it. */
+      if (stored == SL2_ROOMSRC_BLE) selected_src_ = SL2_ROOMSRC_BLE;
+    }
+  } else {
+    /* First boot on v4: fold the two v3 blobs into the canonical id. */
+    if (selected_src_ != SL2_ROOMSRC_LINK)
+      selected_source_id_ = SL2_ROOM_SOURCE_INTERNAL_ID;
+    else if (has_primary_dial_)
+      selected_source_id_ = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, primary_dial_);
+    else
+      selected_source_id_ = SL2_ROOM_SOURCE_LINK_AUTO_ID;
+    room_source_id_pref_.save(&selected_source_id_);
+  }
 
   esp_err_t err = esp_now_init();
   if (err != ESP_OK) {
@@ -1231,6 +1468,9 @@ void SerinLinkComponent::setup() {
    * answer ok=0, which is the right degraded behavior if the hook and the
    * CAPS bit ever disagree. */
   hvac_.wifi_creds = link_ota_credentials_ ? t_wifi_creds : nullptr;
+  hvac_.room_catalog_page = t_room_catalog;
+  hvac_.room_source_get = t_room_source_get;
+  hvac_.room_source_set = t_room_source_set;
 
   sl2_link_init(&link_, &port_, &crypto_, &hvac_);
   started_ = sl2_link_start(&link_);
@@ -1311,9 +1551,11 @@ void SerinLinkComponent::loop() {
    * identity (the label follows it), and a pin whose Link was forgotten
    * reverts to auto. Quiet because publish_primary_() gates on change —
    * select::publish_state itself does NOT dedup. */
-  if (primary_select_ != nullptr && now - last_primary_ms_ >= 1000) {
+  if ((primary_select_ != nullptr || room_source_select_ != nullptr) &&
+      now - last_primary_ms_ >= 1000) {
     last_primary_ms_ = now;
-    refresh_primary_select_();
+    if (primary_select_ != nullptr) refresh_primary_select_();
+    if (room_source_select_ != nullptr) refresh_room_source_select_();
   }
   sl2_rxq_frame_t f;
   while (sl2_rxq_pop(&rxq_, &f)) {

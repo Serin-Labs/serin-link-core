@@ -1,6 +1,6 @@
 # Serin Link — wire specification
 
-**Status:** normative for `SL2_PROTO_VERSION 3`; matches
+**Status:** normative for `SL2_PROTO_VERSION 4`; matches
 `include/serin_link/sl2_proto.h` (the header is the byte-level ground truth —
 every packed struct there carries a `sizeof` static assert). Wire version 1
 was a pre-release draft that never shipped; version 2 was the first released
@@ -15,7 +15,11 @@ run v3.** The guard is a per-packet version floor (`SL2_DIAL_SENSOR_MIN_VER`,
 independent of `SL2_PROTO_MIN_COMPAT`): a pre-v3 dial talking to a v3
 controller has its DIAL_SENSOR frames dropped, so the controller reports no
 reading rather than a wrong one — the version gate working as designed, not a
-bug. Every other packet type is unchanged by v3.
+bug. Version 4 adds the controller-owned room-source catalog (§10e); all v3
+packet layouts remain unchanged. The four new packet types carry their own
+floor (`SL2_ROOM_CATALOG_MIN_VER`, 4) on the same principle — nothing below v4
+can legitimately send them, and if a v4 field is ever rescaled in place the
+floor is already the constant that gate keys off.
 
 Design goals, in priority order:
 
@@ -58,7 +62,7 @@ uint8_t version;   /* SL2_PROTO_VERSION */
 ```
 
 ```c
-#define SL2_PROTO_VERSION    3
+#define SL2_PROTO_VERSION    4
 #define SL2_PROTO_MIN_COMPAT 1
 ```
 
@@ -87,8 +91,12 @@ ignored, never errors.
 | 10 | `WIFI_SETUP` | dial→ctrl | yes | raise setup hotspot (change network) |
 | 11 | `DIAL_INFO` | dial→ctrl | yes | dial identity (model/fw/caps_seq) for the controller's UI |
 | 12 | `DIAL_SENSOR` | dial→ctrl | yes | Dial's own room sensor reading + source edit |
+| 13 | `ROOM_CATALOG_REQ` | dial→ctrl | yes | Request a page of named room sources |
+| 14 | `ROOM_CATALOG_RESP` | ctrl→dial | yes | Catalog revision and source entries |
+| 15 | `ROOM_SOURCE_SET` | dial→ctrl | yes | Select one catalog entry |
+| 16 | `ROOM_SOURCE_ACK` | ctrl→dial | yes | Confirm or reject a selection |
 
-Types 13–127 are reserved for core growth; 128–255 are reserved for experiments
+Types 17–127 are reserved for core growth; 128–255 are reserved for experiments
 (never shipped semantics).
 
 ## 3. Pairing: signed X25519 + TOFU pinning
@@ -574,6 +582,7 @@ unknown types in both ranges):
 | 0x08 | `SYS` | `u32 uptime_s; u8 reset_reason` |
 | 0x09 | `ENERGY` | `u16 input_w; u32 wh_total` (0xFFFF/0xFFFFFFFF = n/a) |
 | 0x0B | `ROOM_SRC` | `u8 applied_src; u8 status` |
+| 0x0C | `ROOM_SOURCE_V2` | `u32 catalog_revision; u64 source_id; u8 status` |
 
 Rules: dial renders "—" for any TLV absent; `l` is authoritative (forward-compat:
 longer payloads than the dial knows are prefix-read); a TLV never changes
@@ -795,6 +804,36 @@ Normative rules:
 - `applied_src` (the `ROOM_SRC` TLV) names the *selected* source even when
   `status` is `STALE`; a reader that renders only `applied_src` will show a
   dead feed as a live one.
+
+## 10e. Controller-owned room-temperature source catalog
+
+Controllers advertising `SL2_FEAT_ROOM_CATALOG` own the available choices,
+their names, persistence, validation, and health. A dial requests pages with
+`ROOM_CATALOG_REQ`; the controller returns at most seven fixed-size entries per
+`ROOM_CATALOG_RESP`. Each entry has a stable `u64 id`, a presentation `kind`, a
+flags byte, and a 24-byte NUL-terminated display name. IDs are identities, not
+array positions: `0` is Internal, `1` is Average, and namespaced MAC-derived
+IDs identify physical sensors and Serin Links. Not every controller produces
+every ID — a receiver renders the catalog it is given and must not assume any
+particular entry exists. Requests below `SL2_ROOM_CATALOG_MIN_VER` are dropped
+without a reply.
+
+The `u32 revision` identifies the complete catalog. Receivers stage every page
+and replace their visible list only after the terminating page
+(`next_cursor == SL2_ROOM_CATALOG_DONE`, `0xFFFF`) arrives. A cursor past the
+end is answered with an empty terminating page, never dropped. A selection
+sends its request id, catalog revision, and source id in `ROOM_SOURCE_SET`.
+The controller always answers
+with `ROOM_SOURCE_ACK`, including the authoritative current selection and one
+of `OK`, `BAD_SOURCE`, `STALE_CATALOG`, or `UNSUPPORTED`. A stale-catalog result
+causes the dial to refetch before retrying.
+
+`ROOM_SOURCE_V2` in INFO is the convergence path shared by all clients: it
+reports the confirmed source ID, current catalog revision, and health. The
+legacy `ROOM_SRC` TLV and `DIAL_SENSOR.want_src` remain for v3 peers. A source
+that is merely offline remains selected and reports stale/unavailable; if a
+selected source is permanently removed, controller policy falls back to
+Internal and immediately publishes the new confirmed state.
 
 ## 11. Future-proofing inventory (what's deliberately left room for)
 

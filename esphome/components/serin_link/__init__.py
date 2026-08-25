@@ -58,6 +58,9 @@ SerinLinkComponent = serin_link_ns.class_("SerinLinkComponent", cg.Component)
 PrimaryLinkSelect = serin_link_ns.class_(
     "PrimaryLinkSelect", select.Select, cg.Parented.template(SerinLinkComponent)
 )
+RoomSourceSelect = serin_link_ns.class_(
+    "RoomSourceSelect", select.Select, cg.Parented.template(SerinLinkComponent)
+)
 PairLinkButton = serin_link_ns.class_(
     "PairLinkButton", button.Button, cg.Parented.template(SerinLinkComponent)
 )
@@ -98,6 +101,7 @@ CONF_DIAL_MAC = "dial_mac"        # deprecated alias for link_mac (shipped v0.1.
 CONF_STALE_AFTER = "stale_after"
 CONF_PRIMARY_LINK = "primary_link"
 CONF_PRIMARY_SELECT = "primary_select"
+CONF_ROOM_TEMPERATURE_SOURCE = "room_temperature_source"
 CONF_SLOTS = "slots"
 
 
@@ -162,8 +166,41 @@ _PRIMARY_SELECT_SCHEMA = select.select_schema(
 )
 
 
+def link_slot_labels(slots):
+    """Per-slot dropdown labels. Always numbered, matching room_catalog_page in
+    serin_link.cpp — this list is sized at BUILD time from max_links while the
+    dial's catalog is built from the LIVE bond count, so a label that varied
+    with the count would name the same Link differently in the two places."""
+    return [f"Serin Link {i + 1}" for i in range(slots)]
+
+
+def slot_count(config):
+    """How many bond slots the dropdowns cover. One formula for every select:
+    _expand_max_links has already turned `max_links:` into diagnostics rows by
+    the time to_code runs, so those rows are the primary answer; a hand-written
+    `link_sensor: links:` list is the fallback, and SL2_MAX_DIALS the floor."""
+    rows = (config.get(CONF_DIAGNOSTICS) or {}).get(CONF_LINKS) or []
+    sensor_rows = (config.get(CONF_LINK_SENSOR) or {}).get(CONF_LINKS) or []
+    return len(rows) or len(sensor_rows) or config.get(CONF_MAX_LINKS) or SL2_MAX_DIALS
+
+
 def primary_select_options(slots):
-    return [PRIMARY_AUTO_LABEL] + [f"Serin Link {i + 1}" for i in range(slots)]
+    return [PRIMARY_AUTO_LABEL] + link_slot_labels(slots)
+
+
+ROOM_SOURCE_SELECT_SCHEMA = select.select_schema(
+    RoomSourceSelect, entity_category=ENTITY_CATEGORY_CONFIG
+)
+
+
+def _room_source_schema(value):
+    if value is None or isinstance(value, dict):
+        value = {CONF_NAME: "Room Temperature Source", **(value or {})}
+    return ROOM_SOURCE_SELECT_SCHEMA(value)
+
+
+def room_source_options(slots):
+    return ["Internal", PRIMARY_AUTO_LABEL] + link_slot_labels(slots)
 
 # link_sensor: links: — per-slot temperature/humidity, one row per bond slot.
 # The arbitrated pair below shows ONE reading (the primary Link's); these rows
@@ -528,6 +565,7 @@ _BASE_SCHEMA = cv.Schema(
         # hides its update path.
         cv.Optional(CONF_LINK_OTA_CREDENTIALS, default=False): cv.boolean,
         cv.Optional(CONF_LINK_SENSOR): _link_sensor_schema,
+        cv.Optional(CONF_ROOM_TEMPERATURE_SOURCE): _room_source_schema,
         cv.Optional(CONF_DIAGNOSTICS): _diagnostics_schema,
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -607,6 +645,17 @@ def _expand_max_links(config):
             f"`{CONF_HVAC_LINK}:` and `{CONF_HVAC_LINK_SENSOR}:` both bind "
             f"device-link health — set one, not both"
         )
+    if CONF_ROOM_TEMPERATURE_SOURCE in config:
+        if CONF_LINK_SENSOR not in config:
+            raise cv.Invalid(
+                "`room_temperature_source:` requires `link_sensor:` so at least "
+                "one remote room-temperature source exists"
+            )
+        if CONF_PRIMARY_SELECT in config[CONF_LINK_SENSOR]:
+            raise cv.Invalid(
+                "`room_temperature_source:` replaces `link_sensor: primary_select:`; "
+                "declare only the unified room-temperature source"
+            )
     if CONF_SCREEN not in config:
         # Checked HERE (not in LINK_ROW_SCHEMA, which cannot see its siblings)
         # and BEFORE the max_links early-return, so a bare hand-written links:
@@ -884,9 +933,9 @@ async def to_code(config):
         cg.add(var.set_link_sensor_enabled())
         if CONF_PRIMARY_SELECT in ls:
             ps = ls[CONF_PRIMARY_SELECT]
-            rows = (config.get(CONF_DIAGNOSTICS) or {}).get(CONF_LINKS) or []
-            slots = len(rows) or len(ls.get(CONF_LINKS) or []) or SL2_MAX_DIALS
-            sel = await select.new_select(ps, options=primary_select_options(slots))
+            sel = await select.new_select(
+                ps, options=primary_select_options(slot_count(config))
+            )
             await cg.register_parented(sel, var)
             cg.add(var.set_primary_select(sel))
         if CONF_TEMPERATURE in ls:
@@ -915,6 +964,13 @@ async def to_code(config):
             trig = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
             cg.add(var.add_room_temp_trigger(trig))
             await automation.build_automation(trig, [(cg.float_, "x")], conf)
+    if CONF_ROOM_TEMPERATURE_SOURCE in config:
+        sel = await select.new_select(
+            config[CONF_ROOM_TEMPERATURE_SOURCE],
+            options=room_source_options(slot_count(config)),
+        )
+        await cg.register_parented(sel, var)
+        cg.add(var.set_room_source_select(sel))
     if CONF_DIAGNOSTICS in config:
         diag = config[CONF_DIAGNOSTICS]
         if CONF_CONNECTED in diag:

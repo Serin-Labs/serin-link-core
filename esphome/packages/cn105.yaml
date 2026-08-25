@@ -111,7 +111,8 @@ serin_link:
       name: "Serin Link Temperature"
     humidity:
       name: "Serin Link Humidity"
-    primary_select:
+  room_temperature_source:
+    name: "Room Temperature Source"
     # With max_links > 1, add `links:` (bare) in your device YAML's
     # serin_link: link_sensor: block for per-slot temperature/humidity rows —
     # every Link's reading in HA, not just the primary's. Not defaulted here:
