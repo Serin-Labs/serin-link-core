@@ -351,6 +351,28 @@ static void test_room_source_mac_id(void) {
     printf("room source mac id ok\n");
 }
 
+/* External (YAML-declared) sources have no MAC. Their id is a 56-bit FNV-1a of
+ * the display name under namespace 4 — stable across reflashes and list
+ * reorderings, and the same function on the Python side (codegen detects
+ * collisions) and the C side (the wire), so this pins the algorithm. */
+static void test_room_source_name_id(void) {
+    uint64_t ha = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "Home Assistant");
+    assert(ha == UINT64_C(0x043d164670e68fd6));
+    assert((uint8_t)(ha >> 56) == SL2_ROOM_SOURCE_NS_EXTERNAL);
+    uint64_t hall = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "Hallway");
+    assert(hall == UINT64_C(0x04dddd7232305c79));
+    assert(hall != ha);
+    /* Deterministic, and never one of the well-known or retired ids. */
+    assert(sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "Home Assistant") == ha);
+    assert(ha != SL2_ROOM_SOURCE_INTERNAL_ID && ha != SL2_ROOM_SOURCE_AVERAGE_ID &&
+           ha != SL2_ROOM_SOURCE_LINK_AUTO_ID);
+    /* Not a MAC id in any MAC namespace. */
+    uint8_t back[6];
+    assert(!sl2_room_source_id_mac(ha, SL2_ROOM_SOURCE_NS_LINK, back));
+    assert(!sl2_room_source_id_mac(ha, SL2_ROOM_SOURCE_NS_SENSOR, back));
+    printf("room source name id ok\n");
+}
+
 static void test_room_src_tlv_round_trip(void) {
     uint8_t buf[16]; size_t off = 0;
     const uint8_t v[2] = { SL2_ROOMSRC_LINK, SL2_ROOMST_STALE };
@@ -443,6 +465,7 @@ int main(void) {
     test_centi_sentinels_are_out_of_range();
     test_room_catalog_layout();
     test_room_source_mac_id();
+    test_room_source_name_id();
     test_room_src_tlv_round_trip();
     test_link_sensor_feature_bit_is_free();
     test_screen_bits_are_free();

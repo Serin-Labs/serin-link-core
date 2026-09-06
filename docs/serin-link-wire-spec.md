@@ -816,7 +816,10 @@ array positions: `0` is Internal, `1` is Average, and namespaced MAC-derived
 IDs identify physical sensors and Serin Links. Not every controller produces
 every ID — a receiver renders the catalog it is given and must not assume any
 particular entry exists. Requests below `SL2_ROOM_CATALOG_MIN_VER` are dropped
-without a reply.
+without a reply. Namespace 3 (`SL2_ROOM_SOURCE_LINK_AUTO_ID`, the automatic
+"last reporting Link wins" source) was retired 2026-09-05: no controller
+lists it in the catalog, and a `ROOM_SOURCE_SET` naming it is answered
+`SL2_ROOM_SET_BAD_SOURCE`.
 
 The `u32 revision` identifies the complete catalog. Receivers stage every page
 and replace their visible list only after the terminating page

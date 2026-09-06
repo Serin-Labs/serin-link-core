@@ -1,8 +1,8 @@
-# room_temperature_source: supersedes link_sensor: primary_select: — they are
-# two dropdowns editing one stored choice, so setting both must be rejected
-# rather than silently letting one win.
+# primary_select: was removed along with the automatic "last reporting" room
+# source; room_temperature_source: (with sources: for external readings)
+# replaces it.
 esphome:
-  name: t-room-source-both
+  name: t-primary-select-removed
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -13,6 +13,8 @@ wifi:
   ssid: "test"
   password: "testpass123"
 
+logger:
+
 external_components:
   - source:
       type: local
@@ -21,10 +23,7 @@ external_components:
 
 serin_link:
   id: serin
-  max_links: 2
   link_sensor:
     temperature:
       name: "Serin Link Temperature"
     primary_select:
-  room_temperature_source:
-    name: "Room Temperature Source"

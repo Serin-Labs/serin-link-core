@@ -1,0 +1,42 @@
+# room_temperature_source: sources: — external readings (any ESPHome sensor)
+# offered in the same controller-owned dropdown/catalog as the Serin Links.
+# One inherits its label from the sensor's name; one overrides it.
+esphome:
+  name: t-room-sources
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+sensor:
+  - platform: template
+    id: ha_room_temp
+    name: "Home Assistant"
+  - platform: template
+    id: hall_temp
+    name: "Hallway Template"
+
+serin_link:
+  id: serin
+  max_links: 2
+  link_sensor:
+    temperature:
+      name: "Serin Link Temperature"
+  room_temperature_source:
+    sources:
+      - sensor: ha_room_temp
+      - sensor: hall_temp
+        name: "Hallway"

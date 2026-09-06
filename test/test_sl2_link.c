@@ -201,10 +201,10 @@ static bool h_room_catalog(void *c, uint16_t cursor,
     memset(catalog, 0, sizeof catalog);
     catalog[0] = (struct sl2_room_source_entry){
         SL2_ROOM_SOURCE_INTERNAL_ID, SL2_ROOM_KIND_INTERNAL,
-        SL2_ROOM_SOURCE_F_SELECTABLE, "Internal" };
+        SL2_ROOM_SOURCE_F_SELECTABLE, "Heat pump" };
     catalog[1] = (struct sl2_room_source_entry){
-        SL2_ROOM_SOURCE_LINK_AUTO_ID, SL2_ROOM_KIND_AUTO,
-        SL2_ROOM_SOURCE_F_SELECTABLE, "Auto (last reporting)" };
+        sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "Home Assistant"),
+        SL2_ROOM_KIND_SENSOR, SL2_ROOM_SOURCE_F_SELECTABLE, "Home Assistant" };
     for (int i = 2; i < H_ROOM_CATALOG_N; i++) {
         const uint8_t mac[6] = { 0x02, 0, 0, 0, 0, (uint8_t)i };
         catalog[i].id = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac);
@@ -227,12 +227,13 @@ static bool h_room_get(void *c, uint32_t *revision, uint64_t *source_id,
     *status = h_room_status;
     return true;
 }
+#define H_ROOM_HA_ID sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "Home Assistant")
 static uint8_t h_room_set(void *c, uint32_t revision, uint64_t source_id) {
     (void)c;
     n_room_sets++;
     if (revision != h_room_revision) return SL2_ROOM_SET_STALE_CATALOG;
-    if (source_id != SL2_ROOM_SOURCE_INTERNAL_ID &&
-        source_id != SL2_ROOM_SOURCE_LINK_AUTO_ID)
+    /* The retired automatic id is deliberately NOT accepted. */
+    if (source_id != SL2_ROOM_SOURCE_INTERNAL_ID && source_id != H_ROOM_HA_ID)
         return SL2_ROOM_SET_BAD_SOURCE;
     h_room_source = source_id;
     return SL2_ROOM_SET_OK;
@@ -375,8 +376,8 @@ static void test_room_source_catalog_and_set(void) {
     assert(F.sent[si].len == SL2_ROOM_CATALOG_RESP_HDR_LEN +
                              r.count * sizeof(struct sl2_room_source_entry));
     assert(F.sent[si].len <= SL2_MTU);
-    assert(r.entries[0].id == SL2_ROOM_SOURCE_INTERNAL_ID);
-    assert(strcmp(r.entries[1].name, "Auto (last reporting)") == 0);
+    assert(strcmp(r.entries[0].name, "Heat pump") == 0);
+    assert(r.entries[1].id == H_ROOM_HA_ID && r.entries[1].kind == SL2_ROOM_KIND_SENSOR);
 
     /* Final page: short, and terminated by DONE so a staging client knows to
      * swap its visible list in (wire spec 10e). */
@@ -412,7 +413,7 @@ static void test_room_source_catalog_and_set(void) {
     struct sl2_room_source_set_pkt set = {
         .type = SL2_PKT_ROOM_SOURCE_SET, .version = SL2_PROTO_VERSION,
         .request_id = 7, .revision = h_room_revision,
-        .source_id = SL2_ROOM_SOURCE_LINK_AUTO_ID,
+        .source_id = H_ROOM_HA_ID,
     };
     sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, sizeof set);
     sl2_link_loop(&l);
@@ -421,7 +422,7 @@ static void test_room_source_catalog_and_set(void) {
     struct sl2_room_source_ack_pkt a;
     sl2_decode_pkt(&a, sizeof a, F.sent[si].data, (int)F.sent[si].len);
     assert(a.request_id == 7 && a.result == SL2_ROOM_SET_OK);
-    assert(a.revision == h_room_revision && a.source_id == SL2_ROOM_SOURCE_LINK_AUTO_ID);
+    assert(a.revision == h_room_revision && a.source_id == H_ROOM_HA_ID);
     assert(n_room_sets == 1);
 
     /* Below the floor a SET must not reach the hook at all — no ack, and, more
@@ -433,7 +434,7 @@ static void test_room_source_catalog_and_set(void) {
     sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, sizeof set);
     sl2_link_loop(&l);
     assert(last_send_of(SL2_PKT_ROOM_SOURCE_ACK) < 0);
-    assert(n_room_sets == 1 && h_room_source == SL2_ROOM_SOURCE_LINK_AUTO_ID);
+    assert(n_room_sets == 1 && h_room_source == H_ROOM_HA_ID);
     set.version = SL2_PROTO_VERSION;
 
     set.request_id = 8;
@@ -444,7 +445,19 @@ static void test_room_source_catalog_and_set(void) {
     si = last_send_of(SL2_PKT_ROOM_SOURCE_ACK);
     sl2_decode_pkt(&a, sizeof a, F.sent[si].data, (int)F.sent[si].len);
     assert(a.request_id == 8 && a.result == SL2_ROOM_SET_STALE_CATALOG);
-    assert(a.source_id == SL2_ROOM_SOURCE_LINK_AUTO_ID);
+    assert(a.source_id == H_ROOM_HA_ID);
+
+    /* The retired automatic id: current revision, well-formed, and refused.
+     * The ack still carries the authoritative (unchanged) selection. */
+    set.request_id = 10;
+    set.revision = h_room_revision;
+    set.source_id = SL2_ROOM_SOURCE_LINK_AUTO_ID;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, sizeof set);
+    sl2_link_loop(&l);
+    si = last_send_of(SL2_PKT_ROOM_SOURCE_ACK);
+    sl2_decode_pkt(&a, sizeof a, F.sent[si].data, (int)F.sent[si].len);
+    assert(a.request_id == 10 && a.result == SL2_ROOM_SET_BAD_SOURCE);
+    assert(a.source_id == H_ROOM_HA_ID);
     printf("room source catalog + set ok\n");
 }
 

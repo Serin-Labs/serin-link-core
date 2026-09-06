@@ -1,7 +1,7 @@
 # primary_link: (the compile-time MAC pin) was removed in v0.1.3-beta.11 —
-# primary_select: strictly dominates (runtime, persisted by MAC, survives
-# compaction; internal: true if no HA entity is wanted). The schema must
-# point there, not just say "invalid option".
+# room_temperature_source: strictly dominates (runtime, persisted by MAC,
+# survives compaction; internal: true if no HA entity is wanted). The schema
+# must point there, not just say "invalid option".
 esphome:
   name: t-primary-link-removed
 

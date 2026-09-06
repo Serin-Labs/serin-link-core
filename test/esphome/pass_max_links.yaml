@@ -1,7 +1,7 @@
 # max_links as the single source of truth, with sub-device grouping:
 # link_devices maps each generated slot onto a declared esphome: device, the
 # per-slot diagnostics entities are generated (short names, device-scoped),
-# and the primary-Link dropdown sizes itself from the same number.
+# and the room-source dropdown sizes itself from the same number.
 esphome:
   name: t-multilink
   devices:
@@ -37,7 +37,6 @@ serin_link:
   link_sensor:
     temperature:
       name: "Serin Link Temperature"
-    primary_select:
     on_room_temperature:
       - logger.log: "room temp from link"
   diagnostics:

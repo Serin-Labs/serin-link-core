@@ -24,6 +24,7 @@ declare -A MUST_CONTAIN=(
   # key survives validation alongside link_sensor: and max_links: (the option
   # list itself is built in to_code, which `esphome config` does not run)
   [pass_room_temperature_source.yaml]='Room Temperature Source'
+  [pass_room_sources.yaml]='Room Temperature Source'
 )
 declare -A MUST_REJECT_WITH=(
   [fail_rows_mismatch.yaml]='max_links'
@@ -48,8 +49,10 @@ declare -A MUST_REJECT_WITH=(
   [fail_link_ota_creds_mixed.yaml]='or the `eap:` network'
   # not 'room_temperature_source': the dumped config echo contains that
   # literal, so these pin the explanation instead
-  [fail_room_source_with_primary_select.yaml]='declare only the unified'
   [fail_room_source_no_link_sensor.yaml]='requires `link_sensor:`'
+  [fail_room_sources_duplicate_name.yaml]='same label'
+  [fail_room_sources_no_link_sensor.yaml]='requires `link_sensor:`'
+  [fail_primary_select_removed.yaml]='room_temperature_source: sources'
 )
 
 fails=0

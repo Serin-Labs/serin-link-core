@@ -1,6 +1,6 @@
 # room_temperature_source: — the single controller-owned dropdown that picks
-# which reading feeds the room temperature. Options are Internal, Auto (last
-# reporting), and one row per bond slot, so max_links: sizes it the same way it
+# which reading feeds the room temperature. Options are Heat pump, any
+# `sources:`, and one row per bond slot, so max_links: sizes it the same way it
 # sizes the diagnostics rows. The same selection is what paired Serin Links
 # show, via the v4 catalog.
 esphome:

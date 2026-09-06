@@ -12,6 +12,7 @@
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -97,30 +98,25 @@ class SerinLinkComponent : public Component {
    * frame-driven dedup gate; only for fresh readings while the Serin Link is
    * the selected room source (the guards the YAML recipe used to carry). */
   void add_room_temp_trigger(Trigger<float> *t) { room_temp_triggers_.push_back(t); }
-  /* primary_select: (YAML) — pin the room source to one Serin Link, as a
-   * dropdown in HA; the choice persists by MAC. Unset = last reporting one
-   * wins (the historical behavior). The C++/core side keeps the wire spec's
-   * "dial" vocabulary; only the YAML key and HA-visible text say
-   * "Serin Link". */
-  void set_primary_select(select::Select *s) { primary_select_ = s; }
   void set_room_source_select(select::Select *s) { room_source_select_ = s; }
+  /* room_temperature_source: sources: — an external reading (any ESPHome
+   * sensor) offered as a selectable room source. Registered in YAML order;
+   * the position is the dropdown index (after Heat pump) and the catalog
+   * position on the dial. The id is a hash of the label (sl2_proto.h). */
+  void add_room_source(const std::string &name, sensor::Sensor *s);
   void room_source_select_control(size_t index);
   bool room_catalog_page(uint16_t cursor, struct sl2_room_source_entry *entries,
                          uint8_t cap, uint8_t *count, uint16_t *next,
                          uint32_t *revision);
   bool room_source_get(uint32_t *revision, uint64_t *source_id, uint8_t *status);
   uint8_t room_source_set(uint32_t revision, uint64_t source_id);
-  /* index 0 = Auto (no pin); 1..SL2_MAX_DIALS = bond slot 0..N-1. Driven by
-   * index rather than label so the option STRINGS live only in the Python
-   * schema and rewording one can never silently change the mapping. */
-  void primary_select_control(size_t index);
 
   /* A bonded dial reported its own room sensor (called from the trampoline). */
   void room_sensor_feed(const uint8_t src_mac[6],
                         const struct sl2_dial_sensor_pkt *p, bool is_edit);
 
-  /* For actuation automations in YAML: only feed the heat pump when the
-   * dial actually selected itself as the room source. */
+  /* True while a Serin Link (always a specific, pinned one) is the selected
+   * room source. */
   bool room_src_is_link() const { return selected_src_ == SL2_ROOMSRC_LINK; }
 
   /* For template buttons / lambdas in YAML. */
@@ -269,7 +265,6 @@ class SerinLinkComponent : public Component {
   uint8_t dial_mac_[6]{};
   uint8_t primary_dial_[6]{};
   bool has_primary_dial_{false};
-  select::Select *primary_select_{nullptr};
   select::Select *room_source_select_{nullptr};
   int pub_room_source_idx_{-1};
   /* The ONE stored copy of the room-source choice. selected_src_ and
@@ -277,26 +272,33 @@ class SerinLinkComponent : public Component {
    * independent state, so nothing has to keep three fields in step. */
   uint64_t selected_source_id_{SL2_ROOM_SOURCE_INTERNAL_ID};
   ESPPreferenceObject room_source_id_pref_;
+  struct ext_source_t {
+    std::string name;
+    sensor::Sensor *sensor;
+    uint64_t id;
+    float last{NAN};
+    uint32_t last_ms{0};   /* millis() of the last non-NaN value; 0 = never */
+  };
+  std::vector<ext_source_t> ext_sources_;
+  /* Third projection of selected_source_id_ (with has_primary_dial_ and
+   * selected_src_): index into ext_sources_, or -1. */
+  int selected_ext_{-1};
+  int ext_index_(uint64_t id) const;
+  void ext_state_(int idx, float v);
+  /* on_room_temperature: fan-out. Every feed path goes through here. */
+  void fire_room_temperature_(float t);
+  /* After a selection change: push the new source's last known value (or 0
+   * for Heat pump) so the heat pump does not wait for the next sample. */
+  void room_source_changed_();
   uint32_t room_catalog_revision_() const;
   bool room_source_slot_(uint64_t id, int *slot) const;
   bool room_catalog_entry_(int idx, struct sl2_room_source_entry *e) const;
-  void room_source_apply_(uint64_t id);
+  void room_source_apply_(uint64_t id, bool fire = true);
   void room_source_project_();
+  void room_source_reconcile_();
   void refresh_room_source_select_();
+  /* Read once at boot for the v3->v4 migration; never written any more. */
   ESPPreferenceObject primary_pref_;
-  /* Republish the dropdown from the CURRENT bond table, and drop a pin whose
-   * Serin Link has been forgotten. Offline is not forgotten: an offline pin is
-   * kept (reporting stale beats silently switching rooms), but a Link removed
-   * from the bond table can never come back to that slot, and leaving the pin
-   * would strand the room source at unavailable forever. */
-  void refresh_primary_select_();
-  bool primary_slot_(int *out_idx) const;
-  /* select::Select::publish_state does NOT dedup — it fires the state callback
-   * and notifies the API on every call — so the 1 Hz refresh below has to gate
-   * itself or it streams one state per second to Home Assistant. Every other
-   * entity here carries the same explicit gate; this one is not special. */
-  void publish_primary_(size_t index);
-  int pub_primary_idx_{-1};          /* -1 = nothing published yet */
   uint32_t last_primary_ms_{0};
   /* One log line per ignored dial, not per frame: non-primary DIAL_SENSOR
    * frames arrive at up to 3 Hz while that dial's source edit is unconfirmed. */
@@ -383,14 +385,6 @@ class SerinLinkComponent : public Component {
   uint32_t cmd_debounce_ms_{300};
   uint32_t last_ps_check_ms_{0};
   bool started_{false};
-};
-
-/* The "Primary Serin Link" dropdown. Overriding the index-based control() is
- * the API's own preferred form (select.h says so) and keeps the option labels
- * out of the C++ entirely. */
-class PrimaryLinkSelect : public select::Select, public Parented<SerinLinkComponent> {
- protected:
-  void control(size_t index) override { this->parent_->primary_select_control(index); }
 };
 
 class RoomSourceSelect : public select::Select, public Parented<SerinLinkComponent> {

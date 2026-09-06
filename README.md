@@ -143,14 +143,39 @@ from it — alternate between rooms. Configure one controller-owned dropdown:
 ```
 
 The same confirmed selection is shown in Home Assistant and on every paired
-Serin Link. Options are `Internal`, `Auto (last reporting)`, and one entry per
-`max_links:` slot. On `Auto`, the old last-reporting-wins behavior is unchanged.
-Pinned, only that Link's readings are used; the others remain bonded and can
-still control the heat pump. The selection is stored on the controller.
+Serin Link. Options are `Heat pump` (the unit's own sensor), any external
+sources you declare, and one `Serin Link N` entry per `max_links:` slot. A
+Serin Link entry always means that specific Link; there is no automatic
+"last reporting" mode. The selection is stored on the controller.
 
-`link_sensor: primary_select:` is retained as a migration-only compatibility
-option. Do not configure both; new configurations should use
-`room_temperature_source:`.
+To offer a reading that lives outside the controller — a Home Assistant
+temperature, for example — bind the sensor as a source. The component
+subscribes to it, lists it on the dial, reports it stale after 90 s of
+silence, and feeds it through `on_room_temperature:` while it is selected.
+No guard lambdas are needed anywhere:
+
+```yaml
+sensor:
+  - platform: homeassistant
+    id: ha_room_temp
+    name: "Home Assistant"
+    entity_id: sensor.living_room_temperature
+
+serin_link:
+  link_sensor:
+    on_room_temperature:
+      - lambda: 'id(hvac).set_remote_temperature(x);'
+  room_temperature_source:
+    sources:
+      - sensor: ha_room_temp          # label defaults to the sensor's name
+```
+
+`on_room_temperature:` receives the selected source's reading in °C, and `0`
+when `Heat pump` is chosen — cn105's own "use the built-in sensor" value, so
+the switch is immediate.
+
+`link_sensor: primary_select:` has been removed; `room_temperature_source:`
+replaces it.
 
 (The dropdown's length is fixed at build time — ESPHome sets a select's
 options once and Home Assistant caches them — which is why it follows

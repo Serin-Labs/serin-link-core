@@ -110,6 +110,16 @@ climate:
       id: runtime_h
       entity_category: diagnostic
 
+sensor:
+  # An external room-temperature reading, bound below as a
+  # room_temperature_source: selectable alongside Heat pump and the bonded
+  # Serin Links. No guard lambda needed — serin_link only feeds
+  # on_room_temperature: while this source is the one selected.
+  - platform: homeassistant
+    id: ha_room_temp
+    name: "Home Assistant"
+    entity_id: sensor.living_room_temperature
+
 serin_link:
   id: serin          # NB: `id: link` collides with libc link() in generated code
   climate_id: hvac
@@ -166,18 +176,20 @@ serin_link:
       name: "Serin Link Temperature"
     humidity:
       name: "Serin Link Humidity"
-    # With more than one Serin Link bonded, pin which one feeds the entities
-    # above — otherwise whichever reported last wins, and the value (plus the
-    # heat pump fed from it) alternates between rooms. The dropdown offers
-    # Auto + one entry per max_links slot, persists by MAC, and follows its
-    # Link when a forget renumbers the slots.
-    primary_select:
-    # Feed the heat pump the Serin Link's reading. Fires only for a fresh,
-    # non-NaN reading from the arbitrated primary Link while the Serin Link
-    # is the selected room source — cycling back to Internal on it stops the
-    # feed, no conditions needed here.
+    # Feed the heat pump the SELECTED room source's reading: a pinned Serin
+    # Link, or any `sources:` entry below. Fires 0 when Heat pump is chosen.
     on_room_temperature:
       - lambda: 'id(hvac).set_remote_temperature(x);'
+  # With more than one Serin Link bonded, or a source that lives outside the
+  # controller, this dropdown is the one control surface for what feeds the
+  # heat pump and Home Assistant. It always offers Heat pump plus one entry
+  # per max_links slot, persists the pick by MAC (not slot number), and
+  # follows a Link when a forget renumbers the slots.
+  room_temperature_source:
+    # Optional external readings. Each is any ESPHome sensor; its name is
+    # the label on the dial and in the dropdown.
+    sources:
+      - sensor: ha_room_temp
 
 button:
   # Forgetting drops ONE Serin Link. slot: 0 is the first bond; because

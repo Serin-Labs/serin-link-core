@@ -1,0 +1,32 @@
+# `sources:` still lives under room_temperature_source:, which still requires
+# link_sensor: so at least one remote room-temperature source exists.
+esphome:
+  name: t-room-sources-no-sensor
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+sensor:
+  - platform: template
+    id: a_temp
+    name: "Home Assistant"
+
+serin_link:
+  id: serin
+  room_temperature_source:
+    sources:
+      - sensor: a_temp

@@ -797,7 +797,54 @@ static bool is_room_src_valid(uint8_t v) {
   return v == SL2_ROOMSRC_INTERNAL || v == SL2_ROOMSRC_BLE || v == SL2_ROOMSRC_LINK;
 }
 
+void SerinLinkComponent::add_room_source(const std::string &name, sensor::Sensor *s) {
+  ext_source_t e;
+  e.name = name;
+  e.sensor = s;
+  e.id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, name.c_str());
+  const int idx = static_cast<int>(ext_sources_.size());
+  ext_sources_.push_back(e);
+  s->add_on_state_callback([this, idx](float v) { this->ext_state_(idx, v); });
+}
+
+int SerinLinkComponent::ext_index_(uint64_t id) const {
+  for (size_t i = 0; i < ext_sources_.size(); i++)
+    if (ext_sources_[i].id == id) return static_cast<int>(i);
+  return -1;
+}
+
+void SerinLinkComponent::ext_state_(int idx, float v) {
+  if (idx < 0 || idx >= static_cast<int>(ext_sources_.size())) return;
+  if (std::isnan(v)) return;             /* NaN is "no reading", not a reading */
+  ext_sources_[idx].last = v;
+  ext_sources_[idx].last_ms = millis();
+  if (selected_ext_ == idx) fire_room_temperature_(v);
+}
+
+void SerinLinkComponent::fire_room_temperature_(float t) {
+  for (auto *trig : room_temp_triggers_) trig->trigger(t);
+}
+
+void SerinLinkComponent::room_source_changed_() {
+  if (selected_ext_ >= 0) {
+    const ext_source_t &e = ext_sources_[selected_ext_];
+    if (e.last_ms != 0) fire_room_temperature_(e.last);
+  } else if (has_primary_dial_) {
+    if (dial_temp_ms_ != 0 && std::memcmp(dial_mac_, primary_dial_, 6) == 0)
+      fire_room_temperature_(dial_temp_cc_ / 100.0f);
+  } else {
+    /* Heat pump: 0 is cn105's own "drop the remote temperature" value, and
+     * takes effect immediately instead of after remote_temperature_timeout. */
+    fire_room_temperature_(0.0f);
+  }
+}
+
 uint8_t SerinLinkComponent::room_src_status_() const {
+  if (selected_ext_ >= 0) {
+    const ext_source_t &e = ext_sources_[selected_ext_];
+    if (e.last_ms == 0) return SL2_ROOMST_UNAVAILABLE;
+    return (millis() - e.last_ms >= dial_stale_ms_) ? SL2_ROOMST_STALE : SL2_ROOMST_OK;
+  }
   switch (selected_src_) {
     case SL2_ROOMSRC_LINK:
       /* No sensing hardware is a permanent no, not a pending timeout: report
@@ -852,13 +899,16 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
       selected_source_id_ = SL2_ROOM_SOURCE_INTERNAL_ID;
       has_primary_dial_ = false;
       std::memset(primary_dial_, 0, sizeof primary_dial_);
+      selected_ext_ = -1;
       room_src_pref_.save(&selected_src_);
       room_source_id_pref_.save(&selected_source_id_);
       refresh_room_source_select_();
+    } else if (p->want_src == SL2_ROOMSRC_INTERNAL || src_mac == nullptr) {
+      room_source_apply_(SL2_ROOM_SOURCE_INTERNAL_ID);
     } else {
-      room_source_apply_(p->want_src == SL2_ROOMSRC_INTERNAL
-                             ? SL2_ROOM_SOURCE_INTERNAL_ID
-                             : SL2_ROOM_SOURCE_LINK_AUTO_ID);
+      /* A pre-catalog dial asking for "Link" means "use me": pin the sender.
+       * The automatic id this used to map to is retired. */
+      room_source_apply_(sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, src_mac));
     }
     ESP_LOGI(TAG, "room source -> %u (set from Serin Link)",
              static_cast<unsigned>(selected_src_));
@@ -963,10 +1013,7 @@ void SerinLinkComponent::publish_dial_(bool stale) {
   /* on_room_temperature: — same gate as the HA publish (frame-driven,
    * deduped), plus the selected-source guard: cycling the Serin Link's room
    * source back to Internal must stop the feed, with no YAML condition. */
-  if (room_src_is_link()) {
-    const float t = dial_temp_cc_ / 100.0f;
-    for (auto *trig : room_temp_triggers_) trig->trigger(t);
-  }
+  if (room_src_is_link()) fire_room_temperature_(dial_temp_cc_ / 100.0f);
 }
 
 void SerinLinkComponent::feed_sensor_row_(const uint8_t src_mac[6],
@@ -1083,16 +1130,6 @@ static uint8_t t_room_source_set(void *ctx, uint32_t revision, uint64_t id) {
 
 /* ── component ────────────────────────────────────────────────────────── */
 
-/* Publish the dropdown only when it actually changes. select::publish_state
- * has no dedup of its own (it fires the state callback and notifies the API
- * unconditionally), and this is called at 1 Hz. */
-void SerinLinkComponent::publish_primary_(size_t index) {
-  if (primary_select_ == nullptr) return;
-  if (pub_primary_idx_ == static_cast<int>(index)) return;
-  pub_primary_idx_ = static_cast<int>(index);
-  primary_select_->publish_state(index);
-}
-
 /* FNV-1a over the catalog's ids, in order. The value is opaque — all that
  * matters is that it changes when the catalog does, so a ROOM_SOURCE_SET
  * computed against an older list is rejected as STALE_CATALOG. Derived rather
@@ -1104,7 +1141,7 @@ uint32_t SerinLinkComponent::room_catalog_revision_() const {
     for (int i = 0; i < 8; i++) h = (h ^ (uint8_t)(id >> (i * 8))) * 16777619u;
   };
   mix_id(SL2_ROOM_SOURCE_INTERNAL_ID);
-  mix_id(SL2_ROOM_SOURCE_LINK_AUTO_ID);
+  for (const auto &e : ext_sources_) mix_id(e.id);
   const int n = sl2_link_dial_count(const_cast<sl2_link_t *>(&link_));
   for (int slot = 0; slot < n; slot++) {
     uint8_t mac[6];
@@ -1127,28 +1164,31 @@ bool SerinLinkComponent::room_source_slot_(uint64_t id, int *out) const {
   return false;
 }
 
-/* One catalog entry by POSITION: 0 = Internal, 1 = Auto, 2+k = bond slot k.
- * A pure function of the index so room_catalog_page can fill the caller's
- * window directly — no staging array, no copy. Returns false past the end. */
+/* One catalog entry by POSITION: 0 = Heat pump, 1..E = sources: in YAML
+ * order, E+1+k = bond slot k. A pure function of the index so
+ * room_catalog_page can fill the caller's window directly. Returns false
+ * past the end. */
 bool SerinLinkComponent::room_catalog_entry_(int idx,
                                              struct sl2_room_source_entry *e) const {
+  const int ext = static_cast<int>(ext_sources_.size());
   const int bonds = sl2_link_dial_count(const_cast<sl2_link_t *>(&link_));
-  if (idx < 0 || idx >= bonds + 2) return false;
+  if (idx < 0 || idx >= 1 + ext + bonds) return false;
   std::memset(e, 0, sizeof *e);
   e->flags = SL2_ROOM_SOURCE_F_SELECTABLE;
   if (idx == 0) {
     e->id = SL2_ROOM_SOURCE_INTERNAL_ID;
     e->kind = SL2_ROOM_KIND_INTERNAL;
-    std::snprintf(e->name, SL2_ROOM_SOURCE_NAME_LEN, "Internal");
+    std::snprintf(e->name, SL2_ROOM_SOURCE_NAME_LEN, "Heat pump");
     return true;
   }
-  if (idx == 1) {
-    e->id = SL2_ROOM_SOURCE_LINK_AUTO_ID;
-    e->kind = SL2_ROOM_KIND_AUTO;
-    std::snprintf(e->name, SL2_ROOM_SOURCE_NAME_LEN, "Auto (last reporting)");
+  if (idx <= ext) {
+    const ext_source_t &x = ext_sources_[idx - 1];
+    e->id = x.id;
+    e->kind = SL2_ROOM_KIND_SENSOR;
+    std::snprintf(e->name, SL2_ROOM_SOURCE_NAME_LEN, "%s", x.name.c_str());
     return true;
   }
-  const int slot = idx - 2;
+  const int slot = idx - 1 - ext;
   uint8_t mac[6];
   if (!sl2_link_dial_mac(const_cast<sl2_link_t *>(&link_), slot, mac)) return false;
   e->id = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac);
@@ -1190,7 +1230,12 @@ bool SerinLinkComponent::room_source_get(uint32_t *revision, uint64_t *id,
  * ONLY thing persisted: selected_src_ and primary_dial_ are projections of it
  * (see room_source_project_), so they cannot drift out of step with it or
  * survive a reboot disagreeing with it. */
-void SerinLinkComponent::room_source_apply_(uint64_t id) {
+void SerinLinkComponent::room_source_apply_(uint64_t id, bool fire) {
+  const bool changed = id != selected_source_id_;
+  /* Let the ignored-dial log speak again for the new pin: the dedup below is
+   * keyed by MAC only, so without this a MAC logged under a stale pin would
+   * stay silently suppressed forever under the new one. */
+  if (changed) n_ignored_logged_ = 0;
   selected_source_id_ = id;
   room_source_project_();
   room_source_id_pref_.save(&selected_source_id_);
@@ -1198,65 +1243,111 @@ void SerinLinkComponent::room_source_apply_(uint64_t id) {
    * an explicit selection clears a stuck BLE value. */
   room_src_pref_.save(&selected_src_);
   refresh_room_source_select_();
+  if (changed && started_ && fire) room_source_changed_();
 }
 
-/* Recompute the v3-shaped view (selected_src_ + the pinned MAC) from the
- * canonical id. Called after every write and once at boot. */
+/* Recompute the v3-shaped view (selected_src_, selected_ext_ and the pinned
+ * MAC) from the canonical id. Called after every write and once at boot. */
 void SerinLinkComponent::room_source_project_() {
-  selected_src_ = selected_source_id_ == SL2_ROOM_SOURCE_INTERNAL_ID
-                      ? SL2_ROOMSRC_INTERNAL
-                      : SL2_ROOMSRC_LINK;
+  selected_ext_ = ext_index_(selected_source_id_);
   has_primary_dial_ = sl2_room_source_id_mac(selected_source_id_,
                                              SL2_ROOM_SOURCE_NS_LINK,
                                              primary_dial_);
   if (!has_primary_dial_) std::memset(primary_dial_, 0, sizeof primary_dial_);
+  /* v3 coarse view for pre-catalog dials: an external source has no v3 word,
+   * so it reads as Internal there. */
+  selected_src_ = has_primary_dial_ ? SL2_ROOMSRC_LINK : SL2_ROOMSRC_INTERNAL;
+}
+
+/* Runs once at boot, right after sl2_link_start() has loaded the bond table
+ * (sl2_link_init alone only zeroes the link struct — n_dials/dial[] are
+ * populated inside start, so this must run after it or "sole bonded Link"
+ * below always sees zero bonds). Two stores need resolving:
+ *  - the retired automatic id (written by pre-2026-09 builds, or by the
+ *    first-boot fold above when a v3 Link choice carried no pin): becomes the
+ *    sole bonded Link when exactly one is bonded, else Heat pump;
+ *  - any id the current catalog does not list (external source removed or
+ *    renamed in YAML, Link forgotten while powered off): Heat pump.
+ * Passes fire=false so a resolved change does not fire on_room_temperature
+ * at boot. */
+void SerinLinkComponent::room_source_reconcile_() {
+  uint64_t id = selected_source_id_;
+  if (id == SL2_ROOM_SOURCE_LINK_AUTO_ID) {
+    uint8_t mac[6];
+    if (sl2_link_dial_count(&link_) == 1 && sl2_link_dial_mac(&link_, 0, mac)) {
+      id = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac);
+      ESP_LOGI(TAG, "room source: automatic is retired — pinned to the only bonded Serin Link");
+    } else {
+      id = SL2_ROOM_SOURCE_INTERNAL_ID;
+      ESP_LOGI(TAG, "room source: automatic is retired — reverting to Heat pump");
+    }
+  } else if (id != SL2_ROOM_SOURCE_INTERNAL_ID && ext_index_(id) < 0 &&
+             !room_source_slot_(id, nullptr)) {
+    ESP_LOGW(TAG, "room source: stored selection is not in the catalog — reverting to Heat pump");
+    id = SL2_ROOM_SOURCE_INTERNAL_ID;
+  }
+  if (id != selected_source_id_) {
+    room_source_apply_(id, false);
+  } else {
+    /* selected_ext_ was unknown before sources were registered. BLE is the
+     * one coarse value with no catalog id (see setup()'s v4-store fold) —
+     * projecting from selected_source_id_ alone would reset selected_src_
+     * to Internal and erase that restored coarse choice, so save and
+     * restore it around the projection. */
+    const uint8_t coarse = selected_src_;
+    room_source_project_();
+    if (coarse == SL2_ROOMSRC_BLE) selected_src_ = SL2_ROOMSRC_BLE;
+  }
 }
 
 uint8_t SerinLinkComponent::room_source_set(uint32_t revision, uint64_t id) {
   if (revision != room_catalog_revision_()) return SL2_ROOM_SET_STALE_CATALOG;
-  if (id != SL2_ROOM_SOURCE_INTERNAL_ID && id != SL2_ROOM_SOURCE_LINK_AUTO_ID &&
+  /* Only ids the catalog currently lists. The retired automatic id falls
+   * through to BAD_SOURCE like any other unknown id. */
+  if (id != SL2_ROOM_SOURCE_INTERNAL_ID && ext_index_(id) < 0 &&
       !room_source_slot_(id, nullptr))
     return SL2_ROOM_SET_BAD_SOURCE;
   room_source_apply_(id);
+  char s[18];
+  sl2_fmt_mac(primary_dial_, s);
+  ESP_LOGI(TAG, "room source -> %s (set from Serin Link)",
+           selected_ext_ >= 0 ? ext_sources_[selected_ext_].name.c_str()
+                              : has_primary_dial_ ? s : "Heat pump");
   return SL2_ROOM_SET_OK;
 }
 
 void SerinLinkComponent::room_source_select_control(size_t index) {
+  const size_t ext = ext_sources_.size();
   uint64_t id = SL2_ROOM_SOURCE_INTERNAL_ID;
-  if (index == 1) {
-    id = SL2_ROOM_SOURCE_LINK_AUTO_ID;
-  } else if (index >= 2) {
+  if (index >= 1 && index <= ext) {
+    id = ext_sources_[index - 1].id;
+  } else if (index > ext) {
     uint8_t mac[6];
-    /* The option list is sized at build time, so a slot can be offered before
-     * anything is bonded to it. Re-publish what is actually in force rather
-     * than leaving Home Assistant showing a selection never taken. */
-    if (!sl2_link_dial_mac(&link_, static_cast<int>(index) - 2, mac)) {
-      ESP_LOGW(TAG, "room source: Serin Link slot %u is empty — selection ignored",
-               static_cast<unsigned>(index) - 1);
+    const int slot = static_cast<int>(index - ext) - 1;
+    if (!sl2_link_dial_mac(&link_, slot, mac)) {
+      ESP_LOGW(TAG, "room source: Serin Link slot %d is empty — selection ignored", slot + 1);
       refresh_room_source_select_();
       return;
     }
     id = sl2_room_source_mac_id(SL2_ROOM_SOURCE_NS_LINK, mac);
   }
-  /* Local edit: the revision is current by construction, so this cannot be
-   * stale — the check exists for the wire path. */
   room_source_apply_(id);
 }
 
 void SerinLinkComponent::refresh_room_source_select_() {
   if (room_source_select_ == nullptr) return;
   int idx = 0, slot = -1;
-  if (selected_source_id_ == SL2_ROOM_SOURCE_LINK_AUTO_ID) {
-    idx = 1;
+  if (selected_ext_ >= 0) {
+    idx = 1 + selected_ext_;
   } else if (room_source_slot_(selected_source_id_, &slot)) {
-    idx = slot + 2;
+    idx = 1 + static_cast<int>(ext_sources_.size()) + slot;
   } else if (selected_source_id_ != SL2_ROOM_SOURCE_INTERNAL_ID) {
     /* Pinned Serin Link is gone from the bond table (forgotten, not merely
      * offline): fall back rather than strand the room source at unavailable
      * with no way back except a reflash. */
     char s[18];
     sl2_fmt_mac(primary_dial_, s);
-    ESP_LOGW(TAG, "room source %s is no longer bonded — reverting to Internal", s);
+    ESP_LOGW(TAG, "room source %s is no longer bonded — reverting to Heat pump", s);
     room_source_apply_(SL2_ROOM_SOURCE_INTERNAL_ID);
     return;                                /* apply_ re-enters and publishes */
   }
@@ -1265,83 +1356,6 @@ void SerinLinkComponent::refresh_room_source_select_() {
     pub_room_source_idx_ = idx;
     room_source_select_->publish_state(static_cast<size_t>(idx));
   }
-}
-
-/* Which bond slot currently holds the pinned MAC. False when nothing is
- * pinned, or when the pinned Serin Link is no longer in the bond table. */
-bool SerinLinkComponent::primary_slot_(int *out_idx) const {
-  if (!has_primary_dial_) return false;
-  int n = sl2_link_dial_count(const_cast<sl2_link_t *>(&link_));
-  for (int i = 0; i < n; i++) {
-    uint8_t mac[6];
-    if (!sl2_link_dial_mac(const_cast<sl2_link_t *>(&link_), i, mac)) continue;
-    if (std::memcmp(mac, primary_dial_, 6) == 0) {
-      if (out_idx != nullptr) *out_idx = i;
-      return true;
-    }
-  }
-  return false;
-}
-
-void SerinLinkComponent::primary_select_control(size_t index) {
-  if (index == 0) {                       /* Auto — clear the pin */
-    has_primary_dial_ = false;
-    std::memset(primary_dial_, 0, sizeof primary_dial_);
-    n_ignored_logged_ = 0;                /* let the log speak again if re-pinned */
-    uint8_t blob[7] = {0};
-    primary_pref_.save(&blob);
-    ESP_LOGI(TAG, "primary Serin Link: auto (last reporting wins)");
-    publish_primary_(0);
-    return;
-  }
-
-  const int slot = static_cast<int>(index) - 1;
-  uint8_t mac[6];
-  if (!sl2_link_dial_mac(&link_, slot, mac)) {
-    /* An empty slot cannot be satisfied. Re-publish what is actually in force
-     * rather than leaving HA showing a selection the controller never took. */
-    ESP_LOGW(TAG, "primary Serin Link: slot %d is empty — selection ignored", slot + 1);
-    refresh_primary_select_();
-    return;
-  }
-  std::memcpy(primary_dial_, mac, 6);
-  has_primary_dial_ = true;
-  n_ignored_logged_ = 0;
-  /* Persist the MAC, never the slot: forgetting a Serin Link COMPACTS the bond
-   * table, so a stored slot would quietly re-point the pin at a different
-   * room. */
-  uint8_t blob[7];
-  blob[0] = 1;
-  std::memcpy(blob + 1, mac, 6);
-  primary_pref_.save(&blob);
-  char s[18];
-  sl2_fmt_mac(mac, s);
-  ESP_LOGI(TAG, "primary Serin Link: %s (slot %d)", s, slot + 1);
-  refresh_primary_select_();
-}
-
-void SerinLinkComponent::refresh_primary_select_() {
-  if (primary_select_ == nullptr) return;
-  int slot = 0;
-  if (!has_primary_dial_) {
-    publish_primary_(0);
-    return;
-  }
-  if (primary_slot_(&slot)) {
-    publish_primary_(static_cast<size_t>(slot + 1));
-    return;
-  }
-  /* Pinned Serin Link is gone from the bond table (forgotten, not merely
-   * offline): drop the pin rather than strand the room source at unavailable
-   * with no way back except a reflash. */
-  char s[18];
-  sl2_fmt_mac(primary_dial_, s);
-  ESP_LOGW(TAG, "primary Serin Link %s is no longer bonded — reverting to auto", s);
-  has_primary_dial_ = false;
-  std::memset(primary_dial_, 0, sizeof primary_dial_);
-  uint8_t blob[7] = {0};
-  primary_pref_.save(&blob);
-  publish_primary_(0);
 }
 
 std::string SerinLinkComponent::dial_mac_str(int idx) {
@@ -1372,9 +1386,9 @@ void SerinLinkComponent::setup() {
   use_f_pref_ = global_preferences->make_preference<bool>(0x53324C55 /* 'S2LU' */);
   use_f_pref_.load(&use_f_);
 
-  /* Stored primary pin: [0]=set flag, [1..6]=MAC. Only consulted when a
-   * primary_select: entity exists — with the static primary_link: key the YAML
-   * is the single source of truth and the two are mutually exclusive anyway. */
+  /* Stored v3 primary pin: [0]=set flag, [1..6]=MAC. Read-only since
+   * primary_select: was retired; consulted only by the first-boot-on-v4 fold
+   * below. */
   primary_pref_ = global_preferences->make_preference<uint8_t[7]>(0x5332504C /* 'S2PL' */);
   /* Loaded unconditionally, not only when primary_select: exists: the v3->v4
    * migration below reads it, and that migration runs for exactly the users
@@ -1395,15 +1409,16 @@ void SerinLinkComponent::setup() {
     /* v4 store wins, and the v3-shaped fields are rebuilt from it — otherwise
      * a pinned Link would come back with has_primary_dial_ false and the
      * measurement filter would silently behave as Auto. */
-    if (room_source_select_ != nullptr) {
-      const uint8_t stored = selected_src_;
-      room_source_project_();
-      /* BLE is the one coarse value with no catalog id; it lives in the v3
-       * blob alone, so the projection must not erase it. */
-      if (stored == SL2_ROOMSRC_BLE) selected_src_ = SL2_ROOMSRC_BLE;
-    }
+    const uint8_t stored = selected_src_;
+    room_source_project_();
+    /* BLE is the one coarse value with no catalog id; it lives in the v3
+     * blob alone, so the projection must not erase it. */
+    if (stored == SL2_ROOMSRC_BLE) selected_src_ = SL2_ROOMSRC_BLE;
   } else {
-    /* First boot on v4: fold the two v3 blobs into the canonical id. */
+    /* First boot on v4: fold the two v3 blobs into the canonical id. An
+     * unpinned Link choice cannot be resolved until the bond table is loaded
+     * (sl2_link_init below) — leave the retired automatic id as a marker
+     * that room_source_reconcile_() (Task 6) resolves right after. */
     if (selected_src_ != SL2_ROOMSRC_LINK)
       selected_source_id_ = SL2_ROOM_SOURCE_INTERNAL_ID;
     else if (has_primary_dial_)
@@ -1479,6 +1494,7 @@ void SerinLinkComponent::setup() {
     this->mark_failed();
     return;
   }
+  room_source_reconcile_();
 
   if (climate_ != nullptr) rebuild_fan_detents_();
 
@@ -1546,16 +1562,12 @@ void SerinLinkComponent::loop() {
     last_diag_ms_ = now;
     publish_diagnostics_(now);
   }
-  /* Keep the dropdown honest against the live bond table: a forget compacts
-   * the table, so the pinned Serin Link can change SLOT without changing
-   * identity (the label follows it), and a pin whose Link was forgotten
-   * reverts to auto. Quiet because publish_primary_() gates on change —
-   * select::publish_state itself does NOT dedup. */
-  if ((primary_select_ != nullptr || room_source_select_ != nullptr) &&
-      now - last_primary_ms_ >= 1000) {
+  /* 1 Hz: republish the room-source dropdown from the CURRENT bond table and
+   * drop a pin whose Serin Link has been forgotten. Quiet because
+   * refresh_room_source_select_() gates on change. */
+  if (room_source_select_ != nullptr && now - last_primary_ms_ >= 1000) {
     last_primary_ms_ = now;
-    if (primary_select_ != nullptr) refresh_primary_select_();
-    if (room_source_select_ != nullptr) refresh_room_source_select_();
+    refresh_room_source_select_();
   }
   sl2_rxq_frame_t f;
   while (sl2_rxq_pop(&rxq_, &f)) {
@@ -1696,9 +1708,13 @@ void SerinLinkComponent::dump_config() {
     if (has_primary_dial_) {
       char mac[18];
       sl2_fmt_mac(primary_dial_, mac);
-      ESP_LOGCONFIG(TAG, "    primary Serin Link: %s (others ignored for measurement)", mac);
-    } else {
-      ESP_LOGCONFIG(TAG, "    primary Serin Link: unset (last reporting Link wins)");
+      ESP_LOGCONFIG(TAG, "    room source: Serin Link %s", mac);
+    } else if (selected_ext_ >= 0) {
+      ESP_LOGCONFIG(TAG, "    room source: %s (external)", ext_sources_[selected_ext_].name.c_str());
+    } else if (selected_src_ == SL2_ROOMSRC_BLE) {
+      ESP_LOGCONFIG(TAG, "    room source: Sensor (BLE, not served by this controller)");
+    } else if (selected_source_id_ == SL2_ROOM_SOURCE_INTERNAL_ID) {
+      ESP_LOGCONFIG(TAG, "    room source: Heat pump");
     }
     int n_rows = 0;
     for (int i = 0; i < SL2_MAX_DIALS; i++)
@@ -1706,6 +1722,8 @@ void SerinLinkComponent::dump_config() {
     if (n_rows > 0)
       ESP_LOGCONFIG(TAG, "    per-slot sensor rows: %d (every Link's reading, "
                     "arbitration feeds only the pair above)", n_rows);
+    for (const auto &e : ext_sources_)
+      ESP_LOGCONFIG(TAG, "    external room source: %s", e.name.c_str());
   }
   int n_dials = sl2_link_dial_count(&link_);
   ESP_LOGCONFIG(TAG, "  bonded Serin Links: %d", n_dials);

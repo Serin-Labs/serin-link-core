@@ -47,11 +47,8 @@ serin_link:
       name: "Spike Serin Link Temperature"
     humidity:
       name: "Spike Serin Link Humidity"
-    # With two Serin Links bonded, whichever reported last owns the entities
-    # above. Pin one to stop the value alternating between rooms.
-    primary_select:
-      name: "Primary Serin Link"
-    # Per-slot rows: the entities above show ONE reading (the primary's);
+    # Per-slot rows: the entities above show ONE reading (whichever the
+    # controller's room_temperature_source: dropdown has selected);
     # these show every bonded Link's, non-primary included — two Links in two
     # rooms means two temperatures in HA. Hand-written here for custom names;
     # with max_links:/link_devices: a bare `links:` generates them instead.

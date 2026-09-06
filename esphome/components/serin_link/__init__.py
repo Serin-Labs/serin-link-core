@@ -55,9 +55,6 @@ AUTO_LOAD = ["binary_sensor", "button", "climate", "select", "sensor", "switch",
 serin_link_ns = cg.esphome_ns.namespace("serin_link")
 SerinLinkComponent = serin_link_ns.class_("SerinLinkComponent", cg.Component)
 
-PrimaryLinkSelect = serin_link_ns.class_(
-    "PrimaryLinkSelect", select.Select, cg.Parented.template(SerinLinkComponent)
-)
 RoomSourceSelect = serin_link_ns.class_(
     "RoomSourceSelect", select.Select, cg.Parented.template(SerinLinkComponent)
 )
@@ -102,7 +99,14 @@ CONF_STALE_AFTER = "stale_after"
 CONF_PRIMARY_LINK = "primary_link"
 CONF_PRIMARY_SELECT = "primary_select"
 CONF_ROOM_TEMPERATURE_SOURCE = "room_temperature_source"
-CONF_SLOTS = "slots"
+CONF_SOURCES = "sources"
+CONF_SENSOR = "sensor"
+
+# Dial-side SL2_ROOM_CATALOG_MAX is 12: minus Heat pump, minus SL2_MAX_DIALS.
+MAX_ROOM_SOURCES = 7
+HEAT_PUMP_LABEL = "Heat pump"
+# Must match SL2_ROOM_SOURCE_NAME_LEN - 1 in sl2_proto.h.
+ROOM_SOURCE_NAME_MAX = 23
 
 
 CONF_DIAGNOSTICS = "diagnostics"
@@ -124,18 +128,6 @@ CONF_LINK_OTA_CREDENTIALS = "link_ota_credentials"
 # has to be raised here.
 SL2_MAX_DIALS = 4
 
-# The dropdown's options. Index 0 is "no pin"; index N is bond slot N-1. The
-# C++ keys off the INDEX (PrimaryLinkSelect::control(size_t)), so these labels
-# can be reworded freely — but their ORDER is the contract.
-#
-# The LENGTH is per-config: ESPHome fixes a select's options when the entity is
-# built and Home Assistant caches them from the initial entity listing, so the
-# list cannot grow or shrink as Serin Links come and go. Offering all four slots
-# to an install that will only ever bond two means offering two choices that get
-# refused — so the count comes from `slots:`, defaulting to however many
-# `links:` rows the diagnostics block declares.
-PRIMARY_AUTO_LABEL = "Auto (last reporting)"
-
 
 def _removed(message):
     """Tombstone for a key that shipped and was then removed.
@@ -149,21 +141,6 @@ def _removed(message):
         raise cv.Invalid(message)
 
     return validator
-
-
-_PRIMARY_SELECT_SCHEMA = select.select_schema(
-    PrimaryLinkSelect,
-    entity_category=ENTITY_CATEGORY_CONFIG,
-).extend(
-    {
-        cv.Optional(CONF_SLOTS): _removed(
-            "`slots:` was removed in v0.1.3-beta.11 — the dropdown always "
-            "sizes itself from `max_links:` (or the declared rows). A "
-            "dropdown longer than the install only offered selections that "
-            "had to be refused. Just delete the key."
-        ),
-    }
-)
 
 
 def link_slot_labels(slots):
@@ -184,12 +161,75 @@ def slot_count(config):
     return len(rows) or len(sensor_rows) or config.get(CONF_MAX_LINKS) or SL2_MAX_DIALS
 
 
-def primary_select_options(slots):
-    return [PRIMARY_AUTO_LABEL] + link_slot_labels(slots)
+def room_source_labels(rts_conf):
+    """Labels for `sources:` in YAML order — resolved once here so the HA
+    option list, the collision check and the C++ registration all see the
+    same strings."""
+    return [_room_source_label(s) for s in (rts_conf or {}).get(CONF_SOURCES) or []]
 
+
+def room_source_options(config):
+    """Dropdown order is the contract with RoomSourceSelect::control(size_t):
+    0 = Heat pump, then each external source, then one row per bond slot."""
+    return (
+        [HEAT_PUMP_LABEL]
+        + room_source_labels(config.get(CONF_ROOM_TEMPERATURE_SOURCE))
+        + link_slot_labels(slot_count(config))
+    )
+
+
+def _room_source_label(src):
+    """A source's catalog label: `name:` if given, else the bound sensor's own
+    name, found in the top-level `sensor:` list. Sensors declared elsewhere
+    (inside another component) need an explicit `name:`.
+
+    Runs from FINAL_VALIDATE_SCHEMA, where fv.full_config.get() is the
+    established way (see _ota_creds_need_a_psk) to see sibling top-level keys
+    such as `sensor:` — CORE.config is not reliably populated yet here.
+    """
+    if CONF_NAME in src:
+        return src[CONF_NAME]
+    wanted = src[CONF_SENSOR].id
+    for ent in fv.full_config.get().get(CONF_SENSOR) or []:
+        if CONF_ID in ent and ent[CONF_ID].id == wanted and CONF_NAME in ent:
+            return str(ent[CONF_NAME])
+    raise cv.Invalid(
+        f"room source `{wanted}` has no resolvable name — add `name:` to the "
+        f"`sources:` entry"
+    )
+
+
+def _fnv1a56(label):
+    """Mirror of sl2_room_source_name_id() — same bytes, same result."""
+    h = 0xCBF29CE484222325
+    for b in label.encode("utf-8"):
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h & ((1 << 56) - 1)
+
+
+ROOM_SOURCE_ENTRY_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_SENSOR): cv.use_id(sensor.Sensor),
+        cv.Optional(CONF_NAME): cv.All(
+            cv.string_strict, cv.Length(min=1, max=ROOM_SOURCE_NAME_MAX)
+        ),
+    }
+)
 
 ROOM_SOURCE_SELECT_SCHEMA = select.select_schema(
     RoomSourceSelect, entity_category=ENTITY_CATEGORY_CONFIG
+).extend(
+    {
+        # sources: — external readings offered alongside the Serin Links. Each
+        # is any ESPHome sensor (typically `platform: homeassistant`); the
+        # component subscribes to it, lists it on the dial and in this
+        # dropdown, reports it stale after 90 s of silence, and feeds it to
+        # on_room_temperature: while it is the selection. No YAML guards.
+        cv.Optional(CONF_SOURCES): cv.All(
+            cv.ensure_list(ROOM_SOURCE_ENTRY_SCHEMA),
+            cv.Length(max=MAX_ROOM_SOURCES),
+        ),
+    }
 )
 
 
@@ -198,9 +238,6 @@ def _room_source_schema(value):
         value = {CONF_NAME: "Room Temperature Source", **(value or {})}
     return ROOM_SOURCE_SELECT_SCHEMA(value)
 
-
-def room_source_options(slots):
-    return ["Internal", PRIMARY_AUTO_LABEL] + link_slot_labels(slots)
 
 # link_sensor: links: — per-slot temperature/humidity, one row per bond slot.
 # The arbitrated pair below shows ONE reading (the primary Link's); these rows
@@ -267,27 +304,16 @@ LINK_SENSOR_SCHEMA = cv.Schema(
             device_class=DEVICE_CLASS_HUMIDITY,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
-        # Which Serin Link is currently feeding. Diagnostic: it only matters
-        # when two Links bonded to one controller both offer a sensor, where
-        # the value alternates between them (last reporting Link wins).
+        # Which Serin Link is currently feeding — the pinned one; diagnostic,
+        # useful when several Links are bonded.
         cv.Optional(CONF_LINK_MAC): text_sensor.text_sensor_schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
-        # primary_select: — which bonded Serin Link feeds the entities above,
-        # as a Home Assistant dropdown. Unset, whichever Link reported last
-        # owns them, which with two Links in two rooms makes the entity — and
-        # any heat pump fed from it — alternate between rooms. Set, only the
-        # pinned Link's readings are used; other Links' room-source EDITS are
-        # still honored (a Link re-sends an unacknowledged edit at ~3 Hz
-        # forever, wire spec §10d) — arbitration decides whose reading is
-        # used, never whether an edit is accepted. The choice is persisted by
-        # MAC, so it survives a reboot and follows its Link across the slot
-        # shuffle a forget causes. Bare `primary_select:` gets a default
-        # name, like pair_button:.
-        cv.Optional(CONF_PRIMARY_SELECT): lambda value: _PRIMARY_SELECT_SCHEMA(
-            {CONF_NAME: "Primary Serin Link", **(value or {})}
-            if value is None or isinstance(value, dict)
-            else value
+        cv.Optional(CONF_PRIMARY_SELECT): _removed(
+            "`primary_select:` was removed in v0.1.5 along with the automatic "
+            "\"last reporting\" room source: every Serin Link selection now pins "
+            "one Link. Use `room_temperature_source:` (add `room_temperature_source: "
+            "sources:` for an external reading such as a Home Assistant sensor)."
         ),
         # links: — per-slot rows (see LINK_SENSOR_ROW_SCHEMA above). Presence
         # of the key is the opt-in, so existing configs grow no entities.
@@ -300,9 +326,9 @@ LINK_SENSOR_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_PRIMARY_LINK): _removed(
             "`primary_link:` was removed in v0.1.3-beta.11 — use "
-            "`primary_select:`, which does the same job at runtime, persists "
-            "the choice by MAC across reboots and slot shuffles, and reverts "
-            "safely when the pinned Serin Link is forgotten. Add "
+            "`room_temperature_source:`, which does the same job at runtime, "
+            "persists the choice by MAC across reboots and slot shuffles, and "
+            "reverts safely when the pinned Serin Link is forgotten. Add "
             "`internal: true` to it if you wanted a pin without an HA entity."
         ),
         cv.Optional(CONF_DIAL_MAC): _removed(
@@ -651,11 +677,6 @@ def _expand_max_links(config):
                 "`room_temperature_source:` requires `link_sensor:` so at least "
                 "one remote room-temperature source exists"
             )
-        if CONF_PRIMARY_SELECT in config[CONF_LINK_SENSOR]:
-            raise cv.Invalid(
-                "`room_temperature_source:` replaces `link_sensor: primary_select:`; "
-                "declare only the unified room-temperature source"
-            )
     if CONF_SCREEN not in config:
         # Checked HERE (not in LINK_ROW_SCHEMA, which cannot see its siblings)
         # and BEFORE the max_links early-return, so a bare hand-written links:
@@ -766,9 +787,48 @@ def _ota_creds_need_a_psk(config):
     return config
 
 
+def _room_sources_labels_unique(config):
+    """Resolve every `sources:` entry's label and check it against the length
+    limit, the built-in names, and every other resolved label — once here, in
+    FINAL_VALIDATE_SCHEMA, where `sensor:` names are resolvable (see
+    _room_source_label). A resolved label with no explicit `name:` is written
+    back onto the entry so later phases (to_code, which runs outside
+    FINAL_VALIDATE_SCHEMA and has no fv.full_config to resolve it from) reuse
+    this same string via the CONF_NAME fast path in _room_source_label,
+    instead of re-resolving and crashing."""
+    rts = config.get(CONF_ROOM_TEMPERATURE_SOURCE)
+    if not rts or not rts.get(CONF_SOURCES):
+        return config
+    sources = rts.get(CONF_SOURCES)
+    labels = room_source_labels(rts)
+    for src, label in zip(sources, labels):
+        if CONF_NAME not in src:
+            src[CONF_NAME] = label
+    seen = {}
+    for label in labels:
+        if len(label) > ROOM_SOURCE_NAME_MAX:
+            raise cv.Invalid(
+                f"room source label `{label}` is longer than "
+                f"{ROOM_SOURCE_NAME_MAX} characters — set a shorter `name:`"
+            )
+        if label == HEAT_PUMP_LABEL or label.startswith("Serin Link"):
+            raise cv.Invalid(
+                f"room source label `{label}` collides with a built-in entry"
+            )
+        key = _fnv1a56(label)
+        if key in seen:
+            raise cv.Invalid(
+                f"room sources `{seen[key]}` and `{label}` resolve to the "
+                f"same label/id — give one a distinct `name:`"
+            )
+        seen[key] = label
+    return config
+
+
 def _final_validate(config):
     _no_builtin_espnow(config)
     _ota_creds_need_a_psk(config)
+    _room_sources_labels_unique(config)
     return config
 
 
@@ -931,13 +991,6 @@ async def to_code(config):
     if CONF_LINK_SENSOR in config:
         ls = config[CONF_LINK_SENSOR]
         cg.add(var.set_link_sensor_enabled())
-        if CONF_PRIMARY_SELECT in ls:
-            ps = ls[CONF_PRIMARY_SELECT]
-            sel = await select.new_select(
-                ps, options=primary_select_options(slot_count(config))
-            )
-            await cg.register_parented(sel, var)
-            cg.add(var.set_primary_select(sel))
         if CONF_TEMPERATURE in ls:
             cg.add(var.set_dial_temp_sensor(await sensor.new_sensor(ls[CONF_TEMPERATURE])))
         if CONF_HUMIDITY in ls:
@@ -965,12 +1018,13 @@ async def to_code(config):
             cg.add(var.add_room_temp_trigger(trig))
             await automation.build_automation(trig, [(cg.float_, "x")], conf)
     if CONF_ROOM_TEMPERATURE_SOURCE in config:
-        sel = await select.new_select(
-            config[CONF_ROOM_TEMPERATURE_SOURCE],
-            options=room_source_options(slot_count(config)),
-        )
+        rts = config[CONF_ROOM_TEMPERATURE_SOURCE]
+        sel = await select.new_select(rts, options=room_source_options(config))
         await cg.register_parented(sel, var)
         cg.add(var.set_room_source_select(sel))
+        for src, label in zip(rts.get(CONF_SOURCES) or [], room_source_labels(rts)):
+            sens = await cg.get_variable(src[CONF_SENSOR])
+            cg.add(var.add_room_source(label, sens))
     if CONF_DIAGNOSTICS in config:
         diag = config[CONF_DIAGNOSTICS]
         if CONF_CONNECTED in diag:
