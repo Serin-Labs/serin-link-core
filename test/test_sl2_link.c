@@ -184,7 +184,20 @@ static bool h_creds(void *c, char ssid[33], char psk[65]) {
     return true;
 }
 static int n_wifi_setups;
-static bool h_wifi_setup(void *c) { (void)c; n_wifi_setups++; return true; }
+static bool h_wifi_setup(void *c) {
+    (void)c;
+    n_wifi_setups++;
+    H.setup_ap = true;
+    return true;
+}
+static int n_wifi_cancels;
+static uint8_t cancel_result;
+static uint8_t h_wifi_cancel(void *c) {
+    (void)c;
+    n_wifi_cancels++;
+    if (cancel_result == SL2_WIFI_CANCEL_CLOSED) H.setup_ap = false;
+    return cancel_result;
+}
 static uint32_t h_room_revision = 0x10203040u;
 static uint64_t h_room_source = SL2_ROOM_SOURCE_INTERNAL_ID;
 static uint8_t h_room_status;
@@ -241,7 +254,7 @@ static uint8_t h_room_set(void *c, uint32_t revision, uint64_t source_id) {
 static const sl2_hvac_iface_t FHVAC = {
     .ctx = NULL, .get_state = h_get_state, .apply = h_apply,
     .get_caps = h_get_caps, .fill_info_tlvs = h_tlvs, .wifi_creds = h_creds,
-    .wifi_setup = h_wifi_setup,
+    .wifi_setup = h_wifi_setup, .wifi_cancel = h_wifi_cancel,
     .room_catalog_page = h_room_catalog, .room_source_get = h_room_get,
     .room_source_set = h_room_set,
 };
@@ -340,6 +353,8 @@ static void fresh(sl2_link_t *l) {
     H.set_low_dc = SL2_DC_NA; H.set_high_dc = SL2_DC_NA;
     H.room_hum_pct = 40; H.hum_set_pct = SL2_HUM_NA;
     n_applies = 0;
+    n_wifi_setups = n_wifi_cancels = 0;
+    cancel_result = SL2_WIFI_CANCEL_CLOSED;
     n_room_sets = 0;
     h_room_revision = 0x10203040u;
     h_room_source = SL2_ROOM_SOURCE_INTERNAL_ID;
@@ -920,6 +935,291 @@ static void test_wifi_setup(void) {
     printf("wifi setup ok\n");
 }
 
+/* Wire fixtures intentionally exercise real RX/loop dispatch. */
+static void wifi_wire(sl2_link_t *l, const fdial_t *d, uint8_t type,
+                      uint32_t session) {
+    uint8_t p[8] = { type, SL2_PROTO_VERSION, 0, 0, 0, 0, 0, 0 };
+    memcpy(p + 2, &l->epoch, 2);
+    memcpy(p + 4, &session, 4);
+    sl2_link_on_recv(l, d->mac, F.own, p, sizeof p);
+}
+
+static void wifi_ack(const fdial_t *d, uint32_t session, uint8_t status) {
+    int i = last_send_of(18);
+    assert(i >= 0);
+    assert(F.sent[i].len == 7);
+    assert(sl2_mac_eq(F.sent[i].mac, d->mac));
+    uint32_t echoed;
+    memcpy(&echoed, F.sent[i].data + 2, 4);
+    assert(echoed == session);
+    assert(F.sent[i].data[6] == status);
+}
+
+static void test_wifi_cancel_before_start(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xCD);
+    pair_dial(&l, &d);
+    n_wifi_setups = 0;
+    F.n_sent = 0;
+    wifi_wire(&l, &d, 10, 100);
+    wifi_wire(&l, &d, 17, 100);
+    sl2_link_loop(&l);
+    wifi_ack(&d, 100, 0);
+    assert(n_wifi_setups == 0);
+    wifi_wire(&l, &d, 10, 100); /* queued and delayed starts both suppressed */
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 0);
+    wifi_wire(&l, &d, 17, 200); /* cancel can arrive before ANY start */
+    sl2_link_loop(&l);
+    wifi_ack(&d, 200, SL2_WIFI_CANCEL_CLOSED);
+    wifi_wire(&l, &d, 10, 200);
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 0);
+    printf("wifi cancel before start ok\n");
+}
+
+static void test_wifi_cancel_poll_and_ownership(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t a, b;
+    dial_make(&a, 0xCD); dial_make(&b, 0xCE);
+    pair_dial(&l, &a); pair_dial(&l, &b);
+    wifi_wire(&l, &a, 10, 100);
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 1);
+    cancel_result = SL2_WIFI_CANCEL_WAITING;
+    wifi_wire(&l, &a, 17, 100);
+    sl2_link_loop(&l);
+    wifi_ack(&a, 100, SL2_WIFI_CANCEL_WAITING);
+    assert(n_wifi_cancels == 1);
+    wifi_wire(&l, &a, 10, 100);
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 1);
+    cancel_result = SL2_WIFI_CANCEL_CLOSED;
+    wifi_wire(&l, &a, 17, 100);
+    sl2_link_loop(&l);
+    wifi_ack(&a, 100, SL2_WIFI_CANCEL_CLOSED);
+    assert(n_wifi_cancels == 2);
+    wifi_wire(&l, &a, 17, 100);
+    sl2_link_loop(&l);
+    assert(n_wifi_cancels == 2); /* cached terminal result */
+    wifi_wire(&l, &a, 10, 101);
+    sl2_link_loop(&l);
+    wifi_wire(&l, &a, 17, 100);
+    sl2_link_loop(&l);
+    wifi_ack(&a, 100, SL2_WIFI_CANCEL_STALE);
+    assert(n_wifi_cancels == 2);
+    wifi_wire(&l, &b, 10, 200);
+    sl2_link_loop(&l);
+    wifi_wire(&l, &a, 17, 101);
+    sl2_link_loop(&l);
+    wifi_ack(&a, 101, SL2_WIFI_CANCEL_STALE);
+    assert(n_wifi_cancels == 2);
+    wifi_wire(&l, &a, 10, 101); /* displaced owner's retry cannot take over */
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 3);
+    wifi_wire(&l, &b, 17, 999); /* unseen cancel cannot close current window */
+    sl2_link_loop(&l);
+    wifi_ack(&b, 999, SL2_WIFI_CANCEL_STALE);
+    assert(n_wifi_cancels == 2);
+    wifi_wire(&l, &b, 17, 200);
+    sl2_link_loop(&l);
+    wifi_ack(&b, 200, SL2_WIFI_CANCEL_CLOSED);
+    assert(n_wifi_cancels == 3);
+    printf("wifi cancel polling and ownership ok\n");
+}
+
+static void test_wifi_cancel_legacy_and_recovery(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xCD); pair_dial(&l, &d);
+    H.setup_ap = true;
+    wifi_wire(&l, &d, 17, 50);
+    sl2_link_loop(&l);
+    wifi_ack(&d, 50, SL2_WIFI_CANCEL_RECOVERY);
+    assert(n_wifi_cancels == 0);
+    wifi_wire(&l, &d, 10, 100);
+    sl2_link_loop(&l);
+    struct sl2_wifi_setup_pkt legacy = {10, SL2_PROTO_VERSION, l.epoch};
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&legacy, sizeof legacy);
+    wifi_wire(&l, &d, 17, 100);
+    sl2_link_loop(&l);
+    wifi_ack(&d, 100, SL2_WIFI_CANCEL_STALE);
+    assert(n_wifi_cancels == 0);
+    assert(n_wifi_setups == 2);
+    wifi_wire(&l, &d, 10, 100);
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 2);
+    sl2_hvac_iface_t unsupported = FHVAC;
+    unsupported.wifi_cancel = NULL;
+    l.hvac = &unsupported;
+    wifi_wire(&l, &d, 17, 300);
+    sl2_link_loop(&l);
+    wifi_ack(&d, 300, SL2_WIFI_CANCEL_UNSUPPORTED);
+    assert(n_wifi_cancels == 0);
+    printf("wifi cancel legacy and recovery ok\n");
+}
+
+static void test_wifi_cancel_history_and_forget(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xCD); pair_dial(&l, &d);
+    wifi_wire(&l, &d, 10, 100);
+    sl2_link_loop(&l);
+    wifi_wire(&l, &d, 17, 100);
+    sl2_link_loop(&l);
+    /* Unknown cancels cannot evict protection for the current owner. */
+    for (uint32_t i = 200; i < 210; i++) wifi_wire(&l, &d, 17, i);
+    wifi_wire(&l, &d, 10, 100);
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 1);
+    wifi_wire(&l, &d, 17, 100);
+    wifi_ack(&d, 100, SL2_WIFI_CANCEL_CLOSED);
+    assert(n_wifi_cancels == 1);
+    /* A new bond must never inherit authority to cancel an old window. */
+    wifi_wire(&l, &d, 10, 300);
+    sl2_link_loop(&l);
+    H.setup_ap = true;
+    assert(sl2_link_forget_dial(&l, d.mac));
+    pair_dial(&l, &d);
+    wifi_wire(&l, &d, 17, 300);
+    wifi_ack(&d, 300, SL2_WIFI_CANCEL_RECOVERY);
+    assert(n_wifi_cancels == 1);
+    wifi_wire(&l, &d, 10, 400);
+    sl2_link_loop(&l);
+    sl2_link_forget_all(&l);
+    pair_dial(&l, &d);
+    wifi_wire(&l, &d, 17, 400);
+    wifi_ack(&d, 400, SL2_WIFI_CANCEL_RECOVERY);
+    assert(n_wifi_cancels == 1);
+    wifi_wire(&l, &d, 10, 500);
+    sl2_link_loop(&l);
+    pair_dial(&l, &d); /* replacing a bond also ends its session authority */
+    wifi_wire(&l, &d, 17, 500);
+    wifi_ack(&d, 500, SL2_WIFI_CANCEL_RECOVERY);
+    assert(n_wifi_cancels == 1);
+    printf("wifi cancel history and bond removal ok\n");
+}
+
+static void test_wifi_cancel_after_natural_closure(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xCD); pair_dial(&l, &d);
+    wifi_wire(&l, &d, 10, 100);
+    sl2_link_loop(&l);
+    H.setup_ap = false; /* successful setup or deadline closed AP */
+    wifi_wire(&l, &d, 17, 200); /* new wizard start was lost */
+    wifi_ack(&d, 200, SL2_WIFI_CANCEL_CLOSED);
+    assert(n_wifi_cancels == 0);
+    wifi_wire(&l, &d, 10, 100);
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 1); /* naturally completed token stays retired */
+
+    wifi_wire(&l, &d, 10, 300);
+    sl2_link_loop(&l);
+    H.setup_ap = false;
+    sl2_link_loop(&l); /* core observes normal completion */
+    H.setup_ap = true; /* unrelated recovery opens afterwards */
+    wifi_wire(&l, &d, 17, 300);
+    wifi_ack(&d, 300, SL2_WIFI_CANCEL_RECOVERY);
+    assert(H.setup_ap);
+    assert(n_wifi_cancels == 0);
+    printf("wifi cancellation after natural closure ok\n");
+}
+
+static void test_wifi_cancel_terminal_status_tracks_ap(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xCD); pair_dial(&l, &d);
+    wifi_wire(&l, &d, 10, 100);
+    sl2_link_loop(&l);
+    wifi_wire(&l, &d, 17, 100);
+    wifi_ack(&d, 100, SL2_WIFI_CANCEL_CLOSED);
+    H.setup_ap = true; /* recovery opens after CLOSED ACK was lost */
+    wifi_wire(&l, &d, 17, 100);
+    wifi_ack(&d, 100, SL2_WIFI_CANCEL_RECOVERY);
+    assert(n_wifi_cancels == 1);
+    assert(H.setup_ap);
+    H.setup_ap = false; /* reconnect closes recovery */
+    wifi_wire(&l, &d, 17, 100);
+    wifi_ack(&d, 100, SL2_WIFI_CANCEL_CLOSED);
+    assert(n_wifi_cancels == 1);
+
+    wifi_wire(&l, &d, 17, 200); /* never-started token stored only in history */
+    wifi_ack(&d, 200, SL2_WIFI_CANCEL_CLOSED);
+    H.setup_ap = true;
+    wifi_wire(&l, &d, 17, 200);
+    wifi_ack(&d, 200, SL2_WIFI_CANCEL_RECOVERY);
+    H.setup_ap = false;
+    wifi_wire(&l, &d, 17, 200);
+    wifi_ack(&d, 200, SL2_WIFI_CANCEL_CLOSED);
+    assert(n_wifi_cancels == 1);
+    printf("wifi cancellation terminal status tracks AP ok\n");
+}
+
+static void test_wifi_cancel_preserves_pending_and_waiting_owner(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xCD); pair_dial(&l, &d);
+    wifi_wire(&l, &d, 10, 100); /* queued start, AP still closed */
+    wifi_wire(&l, &d, 17, 200);
+    wifi_ack(&d, 200, SL2_WIFI_CANCEL_STALE);
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 1);
+    cancel_result = SL2_WIFI_CANCEL_WAITING;
+    wifi_wire(&l, &d, 17, 100);
+    wifi_ack(&d, 100, SL2_WIFI_CANCEL_WAITING);
+    H.setup_ap = false; /* trial verdict still needs polling */
+    sl2_link_loop(&l);
+    wifi_wire(&l, &d, 17, 300);
+    wifi_ack(&d, 300, SL2_WIFI_CANCEL_STALE);
+    cancel_result = SL2_WIFI_CANCEL_CLOSED;
+    wifi_wire(&l, &d, 17, 100);
+    wifi_ack(&d, 100, SL2_WIFI_CANCEL_CLOSED);
+    assert(n_wifi_cancels == 2);
+    printf("wifi cancellation preserves pending and waiting ownership ok\n");
+}
+
+static void test_wifi_cancel_guards(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d, outsider;
+    dial_make(&d, 0xCD); pair_dial(&l, &d);
+    dial_make(&outsider, 0xCF);
+    uint8_t p[8] = {17, SL2_PROTO_VERSION, 0, 0, 100, 0, 0, 0};
+    memcpy(p + 2, &l.epoch, 2);
+    F.n_sent = 0;
+    sl2_link_on_recv(&l, outsider.mac, F.own, p, 8);
+    sl2_link_on_recv(&l, d.mac, BCAST, p, 8);
+    for (int n = 2; n < 8; n++) sl2_link_on_recv(&l, d.mac, F.own, p, n);
+    p[2] ^= 1; /* wrong epoch rejected even BEFORE legacy epoch latch */
+    sl2_link_on_recv(&l, d.mac, F.own, p, 8);
+    p[2] ^= 1;
+    p[1] = 0;
+    sl2_link_on_recv(&l, d.mac, F.own, p, 8);
+    p[1] = SL2_PROTO_VERSION;
+    p[4] = 0; /* zero session invalid */
+    sl2_link_on_recv(&l, d.mac, F.own, p, 8);
+    sl2_link_loop(&l);
+    assert(last_send_of(18) < 0);
+    assert(n_wifi_cancels == 0);
+    /* Partial session extension must not become a legacy start. */
+    p[0] = 10; p[4] = 100;
+    for (int n = 5; n < 8; n++) sl2_link_on_recv(&l, d.mac, F.own, p, n);
+    p[2] ^= 1;
+    sl2_link_on_recv(&l, d.mac, F.own, p, 8);
+    sl2_link_loop(&l);
+    assert(n_wifi_setups == 0);
+    printf("wifi cancel authentication, epoch and lengths ok\n");
+}
+
 /* ── replay guard (epoch echo) ────────────────────────────────────────── */
 
 static uint16_t last_state_epoch(const uint8_t mac[6]) {
@@ -992,6 +1292,8 @@ static void test_epoch_latch_and_replay(void) {
 
     /* legacy dial (epoch 0) accepted while unlatched */
     n_applies = 0;
+    n_wifi_setups = n_wifi_cancels = 0;
+    cancel_result = SL2_WIFI_CANCEL_CLOSED;
     send_cmd_epoch(&l, &d, 0, 230);
     assert(n_applies == 1);
 
@@ -1027,6 +1329,8 @@ static void test_epoch_latch_and_replay(void) {
     sl2_link_init(&l2, &FPORT, &FCRYPTO, &FHVAC);
     assert(sl2_link_start(&l2));
     n_applies = 0;
+    n_wifi_setups = n_wifi_cancels = 0;
+    cancel_result = SL2_WIFI_CANCEL_CLOSED;
     sl2_link_on_recv(&l2, d.mac, F.own, (const uint8_t *)&captured,
                      (int)sizeof captured);
     assert(n_applies == 0);                /* replay rejected */
@@ -1094,6 +1398,8 @@ static void test_epoch_rand_fail_fails_open(void) {
     assert(last_state_epoch(d.mac) == 0);   /* honest: no epoch support */
 
     n_applies = 0;
+    n_wifi_setups = n_wifi_cancels = 0;
+    cancel_result = SL2_WIFI_CANCEL_CLOSED;
     send_cmd_epoch(&l2, &d, 0, 233); /* zero echo of a zero epoch */
     assert(n_applies == 1);          /* accepted... */
 
@@ -1465,6 +1771,8 @@ static void fresh_hvac(sl2_link_t *l, const sl2_hvac_iface_t *hv) {
     H.set_low_dc = SL2_DC_NA; H.set_high_dc = SL2_DC_NA;
     H.room_hum_pct = 40; H.hum_set_pct = SL2_HUM_NA;
     n_applies = 0;
+    n_wifi_setups = n_wifi_cancels = 0;
+    cancel_result = SL2_WIFI_CANCEL_CLOSED;
     F.now = 1000;
     sl2_link_init(l, &FPORT, &FCRYPTO, hv);
     assert(sl2_link_start(l));
@@ -1786,6 +2094,14 @@ int main(void) {
     test_info_tlvs();
     test_wifi_req();
     test_wifi_setup();
+    test_wifi_cancel_before_start();
+    test_wifi_cancel_poll_and_ownership();
+    test_wifi_cancel_legacy_and_recovery();
+    test_wifi_cancel_guards();
+    test_wifi_cancel_after_natural_closure();
+    test_wifi_cancel_terminal_status_tracks_ap();
+    test_wifi_cancel_preserves_pending_and_waiting_owner();
+    test_wifi_cancel_history_and_forget();
     test_epoch_in_state();
     test_epoch_latch_and_replay();
     test_epoch_wifi_setup();
