@@ -101,11 +101,12 @@ ignored, never errors.
 | 14 | `ROOM_CATALOG_RESP` | ctrl→dial | yes | Catalog revision and source entries |
 | 15 | `ROOM_SOURCE_SET` | dial→ctrl | yes | Select one catalog entry |
 | 16 | `ROOM_SOURCE_ACK` | ctrl→dial | yes | Confirm or reject a selection |
+| 17 | `WIFI_CANCEL` | dial→ctrl | yes | Cancel one Wi-Fi change session |
+| 18 | `WIFI_CANCEL_ACK` | ctrl→dial | yes | Session-correlated cancellation status |
 | 19 | `PAIR_CONFIRM` | dial→ctrl | yes | Prove the candidate LMK |
 | 20 | `PAIR_ACK` | ctrl→dial | yes | Confirm committed candidate LMK |
 
-Types 17–18 are assigned to Wi-Fi cancellation by the dial firmware. Types
-21–127 are reserved for core growth; 128–255 are reserved for experiments
+Types 21–127 are reserved for core growth; 128–255 are reserved for experiments
 (never shipped semantics).
 
 ## 3. Pairing: signed X25519 + TOFU pinning
@@ -187,8 +188,8 @@ Flow:
 
 Protocol v5 adds two 34-byte encrypted unicast packets: `PAIR_CONFIRM` (type
 19, dial to controller) and `PAIR_ACK` (type 20, controller to dial). Each is
-`u8 type; u8 version; u8 tag[32]`. Types 17 and 18 remain reserved for the
-shipped Wi-Fi cancellation exchange. The authentication transcript is exactly
+`u8 type; u8 version; u8 tag[32]`. Types 17 and 18 identify the
+Wi-Fi cancellation exchange. The authentication transcript is exactly
 28 bytes: the 14-byte string `"SLv5-pair-auth"` (without NUL), packet type, authentication
 version (5), dial STA MAC (6 bytes), controller STA MAC (6 bytes). `tag` is
 HMAC-SHA256 keyed by the candidate 16-byte LMK. LMK derivation already binds
@@ -583,7 +584,9 @@ enum {  /* features — telemetry the controller can emit (INFO TLVs / creds) */
     SL2_FEAT_LINK_SENSOR = 1u<<10, /* accepts DIAL_SENSOR as a room source */
     SL2_FEAT_SCREEN      = 1u<<11, /* runs a screen gate (SL2_SF2_SCREEN_*, §5)
                                     * and wants SL2_DSF_SCREEN_* status (§10d) */
-    /* bits 12-15 spare */
+    SL2_FEAT_ROOM_CATALOG = 1u<<12, /* named room sources (§10e) */
+    SL2_FEAT_WIFI_SETUP_CANCEL = 1u<<13, /* session cancellation (§10b) */
+    /* bits 14-15 spare */
 };
 ```
 
@@ -687,7 +690,7 @@ dial then hides/greys its update path).
 ## 10b. Dial-initiated Wi-Fi setup (change network)
 
 ```c
-struct sl2_wifi_setup_pkt { uint8_t type, version; uint8_t reserved[2]; };
+struct sl2_wifi_setup_pkt { uint8_t type, version; uint16_t epoch; };
 ```
 
 Encrypted unicast, dial→ctrl: "raise your recovery/setup hotspot NOW" — the
@@ -697,8 +700,9 @@ disconnect timeout). No response packet: the controller reports the hotspot
 via `SL2_SF_SETUP_AP` in STATE, and a flag flip re-sends STATE within the
 250 ms floor. The dial re-fires ~1 Hz until it sees the flag (ESP-NOW is
 lossy), so the request must be idempotent; the controller should also bound
-the window (e.g. 10 min auto-close if the STA never drops — an abandoned
-change attempt can't leave the AP up forever). Gated on `SL2_FEAT_WIFI_SETUP`
+the window (e.g. 10 minutes from its start, even if STA is disconnected).
+At expiry, end abandoned change state; close the AP when home Wi-Fi is
+connected, and otherwise preserve recovery access until reconnection. Gated on `SL2_FEAT_WIFI_SETUP`
 in CAPS: the dial hides the change-network affordance entirely when the bit
 is absent. Handshake:
 
@@ -710,6 +714,65 @@ ctrl closes the AP after reconnect ──► STATE: !SF_SETUP_AP
 dial: "Connected" finale
 ```
 
+### Session-scoped cancellation
+
+`SL2_FEAT_WIFI_SETUP_CANCEL` (CAPS bit 13) adds an optional eight-byte
+`WIFI_SETUP` form and two packets without changing protocol version 4 or
+legacy packet minimum lengths. Send the extension only to capable controllers:
+
+```c
+struct sl2_wifi_setup_session_pkt {
+    uint8_t type, version; uint16_t epoch; uint32_t session;
+}; // 8 bytes, type 10
+struct sl2_wifi_cancel_pkt {
+    uint8_t type, version; uint16_t epoch; uint32_t session;
+}; // 8 bytes, type 17
+struct sl2_wifi_cancel_ack_pkt {
+    uint8_t type, version; uint32_t session; uint8_t status;
+}; // 7 bytes, type 18
+```
+
+All structures are packed little-endian. Sessions are opaque, nonzero tokens,
+new for each wizard entry and unchanged across start/cancel retries. Both
+session requests require the exact current controller epoch, even before a
+dial's legacy epoch guard has latched. Partial extensions (5–7 bytes), zero
+sessions, invalid versions, wrong epochs and non-bonded/non-unicast packets
+are ignored. Four-byte starts retain the existing legacy epoch rules.
+
+Status values: `CLOSED=0` confirms cancellation with the setup AP closed;
+`WAITING=1` asks the dial to poll while a submitted credential trial finishes;
+`RECOVERY=2` ends cancellation while preserving the recovery AP;
+`STALE=3` indicates another/newer session owns setup; `UNSUPPORTED=4` means
+no cancellation hook is available. Credentials are never carried here.
+
+The latest accepted start owns the change window. Replacing an owner retires
+its session and clears its queued start; legacy starts also invalidate the
+previous token owner. A matching cancel removes a queued start before it can
+execute. If the start never executed, the core does not call the adapter: it
+reports `CLOSED` when no AP exists, otherwise `RECOVERY`. An unseen cancel
+also retires its token, without closing an unrelated session or recovery AP.
+If another owner still has an active or waiting session it reports `STALE`.
+
+An executed owner's cancel calls `uint8_t wifi_cancel(void *ctx)`. Duplicate
+cancels poll this hook only while it returns `WAITING`; terminal cancellation
+is remembered without repeating the hook. `CLOSED`/`RECOVERY` duplicate replies
+are refreshed from the current AP state, so a later recovery AP is preserved
+and truthfully reported. The adapter must preserve submitted/saved credentials and initial or
+recovery provisioning. The dial stops sending starts when Cancel is selected
+and accepts an ACK only from the selected controller for its current session.
+Cancellation confirmation uses this ACK, never a normal setup-success screen.
+A lost reply does not imply successful cancellation.
+
+The reference core retains the current owner's cancellation independently of
+an eight-token retired/cancelled history per bonded dial. Late starts matching
+that history cannot reopen or take over setup. This is a bounded RAM history,
+not an indefinite replay database: displaced tokens older than eight distinct
+retirements can be forgotten. Bond removal/replacement resets that dial's
+history and ownership; a controller reboot resets all history and changes its
+epoch. When the core observes the AP closed after an executed start, it retires
+that owner without calling the adapter. It does not retire a queued start or
+a `WAITING` cancellation on this observation. ESP-NOW authentication and packet-number replay protection still apply.
+
 Completion detection (dial-side): the `!SF_WIFI` edge is a single
 change-triggered STATE transmitted exactly while the controller's radio
 re-associates (and a channel move deafens the dial until it re-locks), so
@@ -718,7 +781,8 @@ returning to 0 while `SF_WIFI` is set — level-encoded in every subsequent
 STATE/heartbeat. The dial advances on either (outage observed via the flag or
 its own link-loss detection, OR hotspot-seen-up → now-closed while connected).
 
-**Normative for the completion signal:** because AP-closed-while-connected IS
+**Normative for the completion signal (outside explicit cancellation or window
+expiry):** because AP-closed-while-connected IS
 the dial's success tell, a controller MUST NOT close the setup AP while the
 STA is connected to anything other than the credentials applied *during this
 window*. Concretely: a reconnect to the old network during the window (portal
