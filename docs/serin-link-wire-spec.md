@@ -213,11 +213,12 @@ The guard:
 
 - The controller draws a random nonzero u16 **epoch** each boot and carries it
   in every STATE. `0` is reserved for "no epoch support" (also the honest
-  value if the RNG fails at boot — the guard turns off rather than locking
-  dials out).
+  value if the RNG fails at boot). The room-source packet family fails
+  closed when the controller epoch is zero.
 - The dial stores the latest epoch per zone and **echoes it in every CMD and
-  WIFI_SETUP**. A dial must not send either packet before it holds a fresh
-  STATE (the dial's sync window is already read-only, so this falls out).
+  WIFI_SETUP**, and v5 also echoes it in `ROOM_SOURCE_SET` and `DIAL_SENSOR`.
+  A dial must hold a current STATE before sending v5 room data. The epoch is
+  appended after each historical prefix; see §10d and §10e.
 - Enforcement **ratchets on per dial**: the first correct echo sets a
   persisted bond flag (`SL2_BOND_F_EPOCH`); from then on — across reboots —
   a zero or stale epoch from that dial is dropped. Until the ratchet is set,
@@ -227,6 +228,23 @@ The guard:
 - On an epoch-mismatch drop the controller marks STATE pending for that dial,
   so a live dial that missed the reboot resyncs within the 250 ms floor and
   retries with the fresh value. A dropped packet does NOT count as liveness.
+
+For the room-source family, v5 packets require the complete nonzero current
+boot epoch even before the bond ratchets. A protected bond rejects old-version,
+missing, zero, partial, and stale echoes. This includes legacy
+`DIAL_SENSOR.want_src` writes and reading-only reports: rejected frames do not
+refresh sensor values, screen status, or liveness. Unlatched v3/v4 bonds retain
+their historical behavior and its replay exposure. Thus a controller upgrade
+can stop room readings, screen reports, and source changes from an old dial
+whose bond was already epoch-latched by CMD or WIFI_SETUP. Upgrade that dial to
+v5; downgrading cannot remove the protection.
+
+A queued room-source choice keeps the epoch captured at the user's action.
+The dial drops it if STATE reports a different epoch before transmission; it
+must not relabel an old request with the new epoch. The UI uses confirmed
+selection and has no pending choice to retry, so the user can select again
+after resync. Live sensor reports take the epoch at transmission and reset
+their keepalive timer on an epoch change, promptly resuming fresh readings.
 
 Scope, stated honestly: the epoch defends **cross-boot** replay. Same-boot
 replay is left to the radio's PN window plus the commands' idempotent,
@@ -743,6 +761,7 @@ struct sl2_dial_sensor_pkt {
     uint16_t hum_cc;         /* centi-%, 0..10000; SL2_HUM_CC_NA = no reading */
     uint8_t  want_src;       /* enum sl2_room_src; NOEDIT = reading only */
     uint8_t  reserved[1];    /* senders zero-fill, receivers ignore */
+    uint16_t epoch;          /* v5 additive tail: current STATE.epoch */
 };
 #define SL2_DIAL_SENSOR_MIN_LEN 7   /* through hum_cc; want_src may be absent */
 #define SL2_DIAL_SENSOR_MIN_VER 3   /* first version with centi fields (below) */
@@ -770,9 +789,13 @@ enum sl2_room_status {
 };
 ```
 
-`want_src` doubles as the edit channel so streaming and editing share one
-message type: it is idempotent, and the dial re-sends until the controller's
-INFO reflects the change, exactly as it treats CMD.
+The v5 packet is 11 bytes, preserving all nine historical bytes. Its epoch
+is at offset 9. The minimum decode length remains 7, but v5 freshness requires
+both epoch bytes. On a protected bond, a reading-only packet must also carry
+a valid epoch; zero-filled short frames are rejected before any state update.
+
+`want_src` is the legacy edit channel. Its writes follow the same epoch rules
+as catalog selection, including rejection of old captures on protected bonds.
 
 **Units.** `temp_cc` / `hum_cc` are centi-C / centi-% (0.01 resolution;
 `hum_cc` ranges 0..10000) — *not* the deci-C / whole-percent used everywhere
@@ -785,7 +808,7 @@ own display, where 0.1 °C already exceeds what the face shows.
 `int16_t temp_dc` (deci-C) at the same offset `temp_cc` now occupies, and a
 narrower `uint8_t hum_pct` (whole-%) where `hum_cc` (centi-%, `uint16_t`) sits
 now — the wider `hum_cc` absorbed a `reserved` byte to keep the packet's
-total size at 9 B throughout, so `len >= SL2_DIAL_SENSOR_MIN_LEN` alone
+v2/v3 prefix size at 9 B, so `len >= SL2_DIAL_SENSOR_MIN_LEN` alone
 cannot tell old frames from new. A v2 sender's deci-C `247` (24.7 °C), decoded
 as v3 centi-C, reads as 2.47 °C; the reverse misread — a v3 centi-C value
 decoded as v2 deci-C — inflates a real reading 10x (24.7 °C reporting as
@@ -846,8 +869,14 @@ and replace their visible list only after the terminating page
 (`next_cursor == SL2_ROOM_CATALOG_DONE`, `0xFFFF`) arrives. A cursor past the
 end is answered with an empty terminating page, never dropped. A selection
 sends its request id, catalog revision, and source id in `ROOM_SOURCE_SET`.
-The controller always answers
-with `ROOM_SOURCE_ACK`, including the authoritative current selection and one
+Version 5 appends a `u16 epoch` at offset 16, making the packet 18 bytes while
+preserving the historical minimum length of 16. The catalog revision is stable
+across reboots and is not proof of freshness. Both epoch bytes must be present
+and echo the current nonzero STATE epoch. Rejected freshness checks produce
+no source ACK or mutation; they schedule STATE to help the dial resync.
+
+For an accepted freshness check, the controller answers with `ROOM_SOURCE_ACK`,
+including the authoritative current selection and one
 of `OK`, `BAD_SOURCE`, `STALE_CATALOG`, or `UNSUPPORTED`. A stale-catalog result
 causes the dial to refetch before retrying.
 

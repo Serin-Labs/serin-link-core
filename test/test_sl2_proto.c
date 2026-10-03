@@ -72,7 +72,7 @@ static void test_layout(void) {
     assert(offsetof(struct sl2_caps_pkt, name) == 22);
     assert(offsetof(struct sl2_pair_req_pkt, eph_pub) == 8);
     assert(offsetof(struct sl2_pair_req_pkt, sig) == 72);
-    assert(SL2_PROTO_VERSION == 4);
+    assert(SL2_PROTO_VERSION == 5);
     assert(offsetof(struct sl2_dial_info_pkt, caps_seq) == 2);
     assert(offsetof(struct sl2_dial_info_pkt, model) == 3);
     assert(offsetof(struct sl2_dial_info_pkt, fw) == 27);
@@ -221,7 +221,7 @@ static void test_bonds(void) {
 static void test_dial_sensor_sizeof(void) {
     /* The sizeof guard in the header is compile-time; this pins the field
      * offsets a hand-written encoder on another platform must match. */
-    assert(sizeof(struct sl2_dial_sensor_pkt) == 9);
+    assert(sizeof(struct sl2_dial_sensor_pkt) == 11);
     struct sl2_dial_sensor_pkt p;
     assert((char *)&p.type     - (char *)&p == 0);
     assert((char *)&p.version  - (char *)&p == 1);
@@ -263,10 +263,9 @@ static void test_dial_sensor_na_sentinels(void) {
     assert(p.hum_cc == SL2_HUM_CC_NA);
 }
 
-static void test_dial_sensor_is_still_nine_bytes(void) {
-    /* Humidity grows 1->2, reserved shrinks 2->1. The packet must not grow:
-     * ESP-NOW framing and the static assert both depend on 9. */
-    assert(sizeof(struct sl2_dial_sensor_pkt) == 9);
+static void test_dial_sensor_preserves_prefix(void) {
+    /* v5 adds an epoch after all nine historical bytes. */
+    assert(sizeof(struct sl2_dial_sensor_pkt) == 11);
 }
 
 static void test_dial_sensor_min_len_covers_hum_cc(void) {
@@ -281,6 +280,7 @@ static void test_want_src_moved_to_offset_seven(void) {
      * tolerant decode zero-fills, and ROOMSRC_INTERNAL is 0, so an off-by-one
      * turns a reading-only frame into a silent source switch. */
     assert(offsetof(struct sl2_dial_sensor_pkt, want_src) == 7);
+    assert(offsetof(struct sl2_dial_sensor_pkt, epoch) == 9);
 }
 
 static void test_centi_sentinels_are_out_of_range(void) {
@@ -306,6 +306,8 @@ static void test_room_catalog_layout(void) {
            SL2_ROOM_CATALOG_RESP_HDR_LEN);
     assert(offsetof(struct sl2_room_source_set_pkt, revision) == 4);
     assert(offsetof(struct sl2_room_source_set_pkt, source_id) == 8);
+    assert(offsetof(struct sl2_room_source_set_pkt, epoch) == 16);
+    assert(SL2_ROOM_SOURCE_SET_MIN_LEN == 16);
     assert(offsetof(struct sl2_room_source_ack_pkt, revision) == 4);
     assert(offsetof(struct sl2_room_source_ack_pkt, source_id) == 8);
     assert(offsetof(struct sl2_room_source_ack_pkt, status) == 16);
@@ -459,7 +461,7 @@ int main(void) {
     test_dial_sensor_sizeof();
     test_dial_sensor_short_frame_is_reading_only();
     test_dial_sensor_na_sentinels();
-    test_dial_sensor_is_still_nine_bytes();
+    test_dial_sensor_preserves_prefix();
     test_dial_sensor_min_len_covers_hum_cc();
     test_want_src_moved_to_offset_seven();
     test_centi_sentinels_are_out_of_range();

@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define SL2_PROTO_VERSION    4
+#define SL2_PROTO_VERSION    5
 #define SL2_PROTO_MIN_COMPAT 1
 
 /* esp_now_set_pmk() input: a documented PUBLIC constant (16 bytes). It only
@@ -504,7 +504,10 @@ struct __attribute__((packed)) sl2_room_source_set_pkt {
     uint8_t type, version, request_id, reserved;
     uint32_t revision;
     uint64_t source_id;
+    uint16_t epoch;          /* v5: latest STATE.epoch */
 };
+#define SL2_ROOM_SOURCE_SET_MIN_LEN 16
+#define SL2_ROOM_EPOCH_MIN_VER 5
 enum sl2_room_source_result {
     SL2_ROOM_SET_OK = 0, SL2_ROOM_SET_BAD_SOURCE = 1,
     SL2_ROOM_SET_STALE_CATALOG = 2, SL2_ROOM_SET_UNSUPPORTED = 3,
@@ -623,6 +626,7 @@ struct __attribute__((packed)) sl2_dial_sensor_pkt {
     uint16_t hum_cc;         /* centi-%, 0..10000; SL2_HUM_CC_NA = no reading */
     uint8_t  want_src;       /* enum sl2_room_src; NOEDIT = reading only */
     uint8_t  reserved[1];    /* senders zero-fill, receivers ignore */
+    uint16_t epoch;          /* v5: latest STATE.epoch */
 };
 #define SL2_DIAL_SENSOR_MIN_LEN 7   /* through hum_cc; want_src may be absent */
 /* The first version whose DIAL_SENSOR temp/hum fields are centi (v2 and
@@ -654,11 +658,13 @@ SL2_STATIC_ASSERT(sizeof(struct sl2_wifi_req_pkt)  == 4,   wifi_req_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_wifi_resp_pkt) == 103, wifi_resp_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_wifi_setup_pkt) == 4,  wifi_setup_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_dial_info_pkt) == 43,  dial_info_size);
-SL2_STATIC_ASSERT(sizeof(struct sl2_dial_sensor_pkt) == 9, dial_sensor_size);
+SL2_STATIC_ASSERT(sizeof(struct sl2_dial_sensor_pkt) == 11, dial_sensor_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_room_source_entry) == 34, room_source_entry_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_room_catalog_req_pkt) == 8, room_catalog_req_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_room_catalog_resp_pkt) == 250, room_catalog_resp_size);
-SL2_STATIC_ASSERT(sizeof(struct sl2_room_source_set_pkt) == 16, room_source_set_size);
+SL2_STATIC_ASSERT(sizeof(struct sl2_room_source_set_pkt) == 18, room_source_set_size);
+SL2_STATIC_ASSERT(SL2_ROOM_SOURCE_SET_MIN_LEN <= (int)sizeof(struct sl2_room_source_set_pkt),
+                  room_source_set_minlen);
 SL2_STATIC_ASSERT(sizeof(struct sl2_room_source_ack_pkt) == 20, room_source_ack_size);
 SL2_STATIC_ASSERT(sizeof(struct sl2_room_source_v2) == 13, room_source_v2_size);
 SL2_STATIC_ASSERT(SL2_DIAL_INFO_MIN_LEN <= (int)sizeof(struct sl2_dial_info_pkt), dial_info_minlen);

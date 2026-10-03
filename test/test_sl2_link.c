@@ -422,7 +422,7 @@ static void test_room_source_catalog_and_set(void) {
     assert(F.sent[si].len == SL2_ROOM_CATALOG_RESP_HDR_LEN);
 
     struct sl2_room_source_set_pkt set = {
-        .type = SL2_PKT_ROOM_SOURCE_SET, .version = SL2_PROTO_VERSION,
+        .type = SL2_PKT_ROOM_SOURCE_SET, .version = SL2_PROTO_VERSION, .epoch = l.epoch,
         .request_id = 7, .revision = h_room_revision,
         .source_id = H_ROOM_HA_ID,
     };
@@ -1490,9 +1490,11 @@ static void test_dial_sensor_reading_only_is_not_an_edit(void) {
     fdial_t d;
     dial_make(&d, 0xE1);
     pair_dial(&l, &d);
+    /* Model a loaded pre-v5 bond; new v5 pairings start protected. */
+    l.dial[0].bond.flags = 0;
 
     uint8_t wire[SL2_DIAL_SENSOR_MIN_LEN] = {
-        SL2_PKT_DIAL_SENSOR, SL2_PROTO_VERSION, SL2_DSF_HAS_SENSOR,
+        SL2_PKT_DIAL_SENSOR, 3, SL2_DSF_HAS_SENSOR,
         0xD4, 0x08,   /* temp_cc = 2260 centi-C = 22.60 C, little-endian */
         0x94, 0x11,   /* hum_cc = 4500 centi-% = 45.00 %, little-endian */
     };
@@ -1517,7 +1519,7 @@ static void test_dial_sensor_noedit_sentinel_is_not_an_edit(void) {
     pair_dial(&l, &d);
 
     struct sl2_dial_sensor_pkt p = {
-        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION, .epoch = l.epoch,
         .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
         .want_src = SL2_ROOMSRC_NOEDIT,
     };
@@ -1539,7 +1541,7 @@ static void test_dial_sensor_edit_is_flagged(void) {
     pair_dial(&l, &d);
 
     struct sl2_dial_sensor_pkt p = {
-        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION, .epoch = l.epoch,
         .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
         .want_src = SL2_ROOMSRC_LINK,
     };
@@ -1563,7 +1565,7 @@ static void test_dial_sensor_from_unbonded_mac_is_dropped(void) {
 
     const uint8_t stranger[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
     struct sl2_dial_sensor_pkt p = {
-        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION, .epoch = l.epoch,
         .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
         .want_src = SL2_ROOMSRC_LINK,
     };
@@ -1606,6 +1608,8 @@ static void test_dial_sensor_v3_frame_is_accepted(void) {
     fdial_t d;
     dial_make(&d, 0xE7);
     pair_dial(&l, &d);
+    /* Model a loaded pre-v5 bond; new v5 pairings start protected. */
+    l.dial[0].bond.flags = 0;
 
     uint8_t frame[9] = {0};
     frame[0] = SL2_PKT_DIAL_SENSOR;
@@ -1630,7 +1634,7 @@ static void test_dial_sensor_null_hook_is_safe(void) {
     pair_dial(&l, &d);
 
     struct sl2_dial_sensor_pkt p = {
-        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION, .epoch = l.epoch,
         .flags = SL2_DSF_HAS_SENSOR, .temp_cc = 2150, .hum_cc = 4000,
         .want_src = SL2_ROOMSRC_NOEDIT,
     };
@@ -1756,7 +1760,7 @@ static void test_dial_screen_status_view(void) {
     assert(!v.screen_valid);                  /* nothing reported yet */
 
     struct sl2_dial_sensor_pkt p = {
-        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION,
+        .type = SL2_PKT_DIAL_SENSOR, .version = SL2_PROTO_VERSION, .epoch = l.epoch,
         .flags = SL2_DSF_SCREEN_VALID | SL2_DSF_SCREEN_ON,
         .temp_cc = SL2_CC_NA, .hum_cc = SL2_HUM_CC_NA,
         .want_src = SL2_ROOMSRC_NOEDIT,
@@ -1947,6 +1951,132 @@ static void test_epoch_storage_failure(void) {
     printf("epoch storage failure retry ok\n");
 }
 
+static void test_room_packets_legacy_upgrade(void) {
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    memset(&s_rs, 0, sizeof s_rs);
+    fdial_t d;
+    dial_make(&d, 0xEC);
+    pair_dial(&l, &d);
+    /* Model a loaded pre-v5 bond; new v5 pairings start protected. */
+    l.dial[0].bond.flags = 0;
+    struct sl2_room_source_set_pkt set = {
+        .type = SL2_PKT_ROOM_SOURCE_SET, .version = 4,
+        .revision = h_room_revision, .source_id = SL2_ROOM_SOURCE_INTERNAL_ID,
+    };
+    struct sl2_dial_sensor_pkt sensor = {
+        .type = SL2_PKT_DIAL_SENSOR, .version = 3,
+        .want_src = SL2_ROOMSRC_LINK,
+    };
+    /* Unprotected legacy firmware keeps both historical write paths. */
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, 16);
+    assert(l.dial[0].room_source_req);
+    l.dial[0].room_source_req = false;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&sensor, 9);
+    assert(s_rs.calls == 1 && s_rs.last_is_edit);
+    /* Claiming v5 never enters that legacy grace window. */
+    set.version = sensor.version = 5;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, sizeof set);
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&sensor, sizeof sensor);
+    assert(!l.dial[0].room_source_req && s_rs.calls == 1);
+    set.epoch = sensor.epoch = l.epoch;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, 17);
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&sensor, 10);
+    assert(!l.dial[0].room_source_req && s_rs.calls == 1);
+    /* A reading-only v5 report ratchets the bond without a CMD first. */
+    sensor.want_src = SL2_ROOMSRC_NOEDIT;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&sensor, sizeof sensor);
+    assert(s_rs.calls == 2 && !s_rs.last_is_edit);
+    assert(l.dial[0].bond.flags & SL2_BOND_F_EPOCH);
+    set.version = 4; sensor.version = 3;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, 16);
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&sensor, 9);
+    assert(!l.dial[0].room_source_req && s_rs.calls == 2);
+    /* RNG failure cannot reopen either room-data mutation path. */
+    l.epoch = 0;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&set, 16);
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&sensor, 9);
+    assert(!l.dial[0].room_source_req && s_rs.calls == 2);
+    printf("room packets legacy upgrade ok\n");
+}
+
+/* Raw v5 tails also exercise prefix compatibility against pre-v5 builds. */
+static void test_room_packets_replay_freshness(void) {
+    sl2_hvac_iface_t hv = FHVAC;
+    hv.room_sensor = h_room_sensor;
+    sl2_link_t l;
+    fresh_hvac(&l, &hv);
+    n_room_sets = 0;
+    memset(&s_rs, 0, sizeof s_rs);
+    fdial_t d;
+    dial_make(&d, 0xEB);
+    pair_dial(&l, &d);
+    send_cmd_epoch(&l, &d, l.epoch, 230); /* existing protected bond */
+    uint8_t set[18] = {SL2_PKT_ROOM_SOURCE_SET, 5, 42, 0};
+    memcpy(set + 4, &h_room_revision, 4);
+    uint64_t id = SL2_ROOM_SOURCE_INTERNAL_ID;
+    memcpy(set + 8, &id, 8);
+    uint8_t sensor[11] = {SL2_PKT_DIAL_SENSOR, 5,
+        SL2_DSF_HAS_SENSOR | SL2_DSF_SCREEN_VALID | SL2_DSF_SCREEN_ON,
+        0x66, 0x08, 0xA0, 0x0F, SL2_ROOMSRC_LINK, 0};
+    /* Missing, zero, stale, and partial epochs cannot mutate protected state.
+     * Low-byte-only truncation must fail even when zero-fill matches epoch. */
+    l.epoch = 0x34;
+    const uint16_t epochs[] = {0, 0x99, 0x34, 0x34};
+    const int set_lens[] = {18, 18, 16, 17};
+    const int sensor_lens[] = {11, 11, 9, 10};
+    for (size_t i = 0; i < sizeof epochs / sizeof epochs[0]; i++) {
+        memcpy(set + 16, &epochs[i], 2);
+        memcpy(sensor + 9, &epochs[i], 2);
+        l.dial[0].last_probe_ms = 123;
+        sl2_link_on_recv(&l, d.mac, F.own, set, set_lens[i]);
+        sl2_link_on_recv(&l, d.mac, F.own, sensor, sensor_lens[i]);
+        assert(!l.dial[0].room_source_req);
+        assert(s_rs.calls == 0);
+        assert(!l.dial[0].screen_valid);
+        assert(l.dial[0].last_probe_ms == 123);
+        assert(l.dial[0].pend_state);
+    }
+    memcpy(set + 16, &l.epoch, 2);
+    memcpy(sensor + 9, &l.epoch, 2);
+    sl2_link_on_recv(&l, d.mac, F.own, set, sizeof set);
+    sl2_link_loop(&l);
+    assert(n_room_sets == 1);
+    sl2_link_on_recv(&l, d.mac, F.own, sensor, sizeof sensor);
+    assert(s_rs.calls == 1 && s_rs.last_is_edit);
+    /* Downgrade cannot bypass the latch. Neither legacy edits nor legacy
+     * reading-only frames may refresh the last accepted measurement. */
+    set[1] = 4; sensor[1] = 3;
+    /* A tail on an old version cannot masquerade as v5 support either. */
+    sl2_link_on_recv(&l, d.mac, F.own, set, sizeof set);
+    sl2_link_on_recv(&l, d.mac, F.own, sensor, sizeof sensor);
+    assert(!l.dial[0].room_source_req && s_rs.calls == 1);
+    sl2_link_on_recv(&l, d.mac, F.own, set, 16);
+    sl2_link_on_recv(&l, d.mac, F.own, sensor, 9);
+    sensor[7] = SL2_ROOMSRC_NOEDIT;
+    sl2_link_on_recv(&l, d.mac, F.own, sensor, 7);
+    assert(!l.dial[0].room_source_req && s_rs.calls == 1);
+    /* Reboot preserves protection despite a stable catalog revision. */
+    sl2_link_t reboot;
+    sl2_link_init(&reboot, &FPORT, &FCRYPTO, &hv);
+    assert(sl2_link_start(&reboot));
+    assert(reboot.epoch != l.epoch);
+    set[1] = sensor[1] = 5;
+    sl2_link_on_recv(&reboot, d.mac, F.own, set, sizeof set);
+    sl2_link_on_recv(&reboot, d.mac, F.own, sensor, sizeof sensor);
+    assert(!reboot.dial[0].room_source_req && s_rs.calls == 1);
+    memcpy(set + 16, &reboot.epoch, 2);
+    memcpy(sensor + 9, &reboot.epoch, 2);
+    sl2_link_on_recv(&reboot, d.mac, F.own, set, sizeof set);
+    sl2_link_loop(&reboot);
+    assert(n_room_sets == 2);
+    sl2_link_on_recv(&reboot, d.mac, F.own, sensor, sizeof sensor);
+    assert(s_rs.calls == 2 && !s_rs.last_is_edit);
+    printf("room packets replay freshness ok\n");
+}
+
 int main(int argc, char **argv) {
     if (argc == 2) {
         if (strcmp(argv[1], "pair-storage") == 0) test_pair_storage_failure();
@@ -1964,6 +2094,8 @@ int main(int argc, char **argv) {
     test_epoch_storage_failure();
     sl2_link_t probe_size_check;
     (void)probe_size_check;
+    test_room_packets_legacy_upgrade();
+    test_room_packets_replay_freshness();
     test_hvac_link_infer();
     test_identity_persists();
     test_pair_and_reboot();

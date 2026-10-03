@@ -85,6 +85,20 @@ static bool epoch_ok(sl2_link_t *l, sl2_dial_rt_t *d, uint16_t e) {
     return false;
 }
 
+/* v5 room packets require a whole epoch, including on a legacy bond that
+ * has not latched yet. Never accept a partially decoded little-endian echo.
+ * Legacy frames remain usable only while the existing epoch guard permits
+ * them; a downgrade cannot restore source writes or stale sensor readings. */
+static bool room_epoch_ok(sl2_link_t *l, sl2_dial_rt_t *d, uint8_t version,
+                          bool complete, uint16_t epoch) {
+    if (!l->epoch || (version >= SL2_ROOM_EPOCH_MIN_VER &&
+        (!complete || !epoch || epoch != l->epoch))) {
+        d->pend_state = true;
+        return false;
+    }
+    return epoch_ok(l, d, version >= SL2_ROOM_EPOCH_MIN_VER && complete ? epoch : 0);
+}
+
 /* ── STATE build + send ───────────────────────────────────────────────── */
 
 static void build_state(sl2_link_t *l, struct sl2_state_pkt *p) {
@@ -400,6 +414,9 @@ void sl2_link_on_recv(sl2_link_t *l, const uint8_t src[6], const uint8_t dst[6],
         if (len >= SL2_DIAL_SENSOR_MIN_LEN && ver >= SL2_DIAL_SENSOR_MIN_VER) {
             struct sl2_dial_sensor_pkt p;
             sl2_decode_pkt(&p, sizeof p, data, len);
+            if (!room_epoch_ok(l, d, ver,
+                    len >= (int)(offsetof(struct sl2_dial_sensor_pkt, epoch) + sizeof p.epoch),
+                    p.epoch)) break;
             /* Screen status is core state, not adapter policy: stash it in
              * the runtime slot (surfaced via dial_view) whether or not a
              * room_sensor hook is wired. Tracks the LAST frame verbatim, so
@@ -415,8 +432,8 @@ void sl2_link_on_recv(sl2_link_t *l, const uint8_t src[6], const uint8_t dst[6],
                 const bool is_edit = has_want && p.want_src != SL2_ROOMSRC_NOEDIT;
                 l->hvac->room_sensor(l->hvac->ctx, src, &p, is_edit);
             }
+            d->last_probe_ms = now;   /* an accepted report proves liveness */
         }
-        d->last_probe_ms = now;   /* a sensor report proves liveness */
         break;
     case SL2_PKT_WIFI_REQ:
         if (len >= SL2_WIFI_REQ_MIN_LEN) {
@@ -469,10 +486,13 @@ void sl2_link_on_recv(sl2_link_t *l, const uint8_t src[6], const uint8_t dst[6],
         }
         break;
     case SL2_PKT_ROOM_SOURCE_SET:
-        if (len >= (int)sizeof(struct sl2_room_source_set_pkt) &&
+        if (len >= SL2_ROOM_SOURCE_SET_MIN_LEN &&
             ver >= SL2_ROOM_CATALOG_MIN_VER) {
             struct sl2_room_source_set_pkt q;
             sl2_decode_pkt(&q, sizeof q, data, len);
+            if (!room_epoch_ok(l, d, ver,
+                    len >= (int)(offsetof(struct sl2_room_source_set_pkt, epoch) + sizeof q.epoch),
+                    q.epoch)) break;
             d->room_source_request_id = q.request_id;
             d->room_source_revision   = q.revision;
             d->room_source_id         = q.source_id;
