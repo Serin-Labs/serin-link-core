@@ -251,6 +251,26 @@ The dial side is unchanged — a dial still bonds up to 7 zones (controllers), a
 a controller with several dials just sees several independent bonds. No wire
 change; this is controller storage + fan-out policy.
 
+Controller bond mutations must save the complete proposed bond table before
+reporting success. A failed save leaves the previous RAM table intact. Failed
+first pairing removes the candidate radio peer; failed re-pairing restores the
+previous peer/key, reports `storage-error`, and sends no success confirmation.
+If the radio also refuses the restoration, the old bond remains in RAM/storage
+and the separate radio-restore error is logged; radio access awaits recovery.
+Single-dial and forget-all operations return failure without removing peers or
+compacting the table. Successful forgetting still compacts the table, including
+runtime diagnostics, only after the durable write succeeds.
+
+For a legacy bond's first correct epoch echo, enforcement starts immediately in
+RAM, but the triggering mutation is dropped if the latch cannot be saved. The
+next correct echo retries that save; the controller logs durable protection only
+after success. A reboot before a successful retry reloads the original unlatched
+legacy bond, so the legacy replay grace window remains. These rollback guarantees
+require failed storage writes to preserve the previous value. Physical flash
+failures can make the durable outcome uncertain; an NVS write/cleanup failure
+must be surfaced as an error rather than silently treated as a successful pair
+or forget operation.
+
 Dial bond record (NVS, `fmt=3`):
 
 ```c

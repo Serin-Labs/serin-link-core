@@ -22,6 +22,9 @@ static struct {
     fpeer_t peers[8];
     fkv_t kv[8];
     uint8_t own[6];
+    bool fail_bond_writes;
+    int bond_write_attempts;
+    int storage_errors;
 } F;
 
 static void f_reset(void) { memset(&F, 0, sizeof F); memset(F.own, 0xC0, 6); }
@@ -75,6 +78,10 @@ static bool f_kv_get(void *c, const char *k, void *buf, size_t *len) {
 }
 static bool f_kv_set(void *c, const char *k, const void *buf, size_t len) {
     (void)c;
+    if (strcmp(k, SL2_KV_BONDS) == 0) {
+        F.bond_write_attempts++;
+        if (F.fail_bond_writes) return false;
+    }
     if (len > 256) return false;
     fkv_t *slot = NULL;
     for (int i = 0; i < 8; i++)
@@ -87,10 +94,14 @@ static bool f_kv_set(void *c, const char *k, const void *buf, size_t len) {
     slot->len = len;
     return true;
 }
+static void f_log(void *c, int level, const char *msg) {
+    (void)c;
+    if (level == 0 && strstr(msg, "save failed")) F.storage_errors++;
+}
 static const sl2_port_t FPORT = {
     .ctx = NULL, .send = f_send, .peer_add = f_peer_add, .peer_del = f_peer_del,
     .own_mac = f_own_mac, .get_channel = f_channel, .now_ms = f_now, .kv_get = f_kv_get, .kv_set = f_kv_set,
-    .log = NULL,
+    .log = f_log,
 };
 
 /* ── toy crypto (deterministic, invertible — FSM tests only) ──────────── */
@@ -1767,7 +1778,190 @@ static void test_dial_screen_status_view(void) {
     printf("dial screen status view ok\n");
 }
 
-int main(void) {
+
+/* Storage failures must preserve the table in RAM, on the radio and at reboot. */
+static void storage_reboot(sl2_link_t *l) {
+    memset(F.peers, 0, sizeof F.peers);
+    F.n_sent = 0;
+    sl2_link_init(l, &FPORT, &FCRYPTO, &FHVAC);
+    assert(sl2_link_start(l));
+}
+
+static void storage_begin_pair(sl2_link_t *l, fdial_t *d) {
+    sl2_link_pair_start(l, 60000);
+    struct sl2_pair_req_pkt req;
+    dial_req(d, &req);
+    sl2_link_on_recv(l, d->mac, BCAST, (const uint8_t *)&req, sizeof req);
+    assert(l->pair == SL2_PAIR_CONFIRM);
+}
+
+static void test_pair_storage_failure(void) {
+    /* Cover an empty table and an addition beside an unrelated bond. */
+    for (int keep_existing = 0; keep_existing < 2; keep_existing++) {
+        sl2_link_t l;
+        fresh(&l);
+        fdial_t keep, candidate;
+        dial_make(&keep, 0xD1);
+        if (keep_existing) pair_dial(&l, &keep);
+        sl2_dial_rt_t original = l.dial[0];
+        dial_make(&candidate, 0xD2);
+        storage_begin_pair(&l, &candidate);
+        F.fail_bond_writes = true;
+        F.now += 100;
+        dial_probe(&l, &candidate, 0);
+        assert(strcmp(sl2_link_pair_result(&l), "storage-error") == 0);
+        assert(!sl2_link_pairing(&l));
+        assert(F.storage_errors == 1);
+        assert(l.n_dials == keep_existing);
+        assert(memcmp(&l.dial[0], &original, sizeof original) == 0);
+        assert(!f_find_peer(candidate.mac));
+        assert((f_find_peer(keep.mac) != NULL) == (keep_existing != 0));
+        assert(!f_find_peer(BCAST));
+        uint8_t zeros[32] = {0};
+        assert(memcmp(l.cand_lmk, zeros, sizeof l.cand_lmk) == 0);
+        assert(memcmp(l.eph_priv, zeros, sizeof l.eph_priv) == 0);
+        sl2_link_t rebooted;
+        storage_reboot(&rebooted);
+        assert(rebooted.n_dials == keep_existing);
+        assert(!f_find_peer(candidate.mac));
+        assert(memcmp(&rebooted.dial[0].bond, &original.bond, sizeof original.bond) == 0);
+    }
+    printf("pair storage failure ok\n");
+}
+
+static void test_repair_storage_failure(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d, keep;
+    dial_make(&d, 0xD1);
+    pair_dial(&l, &d);
+    dial_make(&keep, 0xD2);
+    pair_dial(&l, &keep);
+    send_cmd_epoch(&l, &d, l.epoch, 230);
+    assert(l.dial[0].bond.flags & SL2_BOND_F_EPOCH);
+    sl2_dial_rt_t original[2];
+    memcpy(original, l.dial, sizeof original);
+    t_xkp(NULL, d.eph_priv, d.eph_pub);
+    storage_begin_pair(&l, &d);
+    assert(memcmp(f_find_peer(d.mac)->lmk, original[0].bond.lmk, 16) != 0);
+    F.fail_bond_writes = true;
+    F.now += 100;
+    dial_probe(&l, &d, 0);
+    assert(strcmp(sl2_link_pair_result(&l), "storage-error") == 0);
+    assert(l.n_dials == 2);
+    assert(memcmp(l.dial, original, sizeof original) == 0);
+    assert(memcmp(f_find_peer(d.mac)->lmk, original[0].bond.lmk, 16) == 0);
+    sl2_link_t rebooted;
+    storage_reboot(&rebooted);
+    for (int i = 0; i < 2; i++)
+        assert(memcmp(&rebooted.dial[i].bond, &original[i].bond, sizeof original[i].bond) == 0);
+    printf("re-pair storage failure ok\n");
+}
+
+static void test_forget_storage_failure(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d[3];
+    for (int i = 0; i < 3; i++) {
+        dial_make(&d[i], (uint8_t)(0xD1 + i));
+        pair_dial(&l, &d[i]);
+    }
+    sl2_dial_rt_t original[3];
+    memcpy(original, l.dial, sizeof original);
+    F.fail_bond_writes = true;
+    assert(!sl2_link_forget_dial(&l, d[1].mac));
+    assert(F.storage_errors == 1);
+    assert(l.n_dials == 3);
+    assert(memcmp(l.dial, original, sizeof original) == 0);
+    for (int i = 0; i < 3; i++) assert(f_find_peer(d[i].mac));
+    sl2_link_t rebooted;
+    storage_reboot(&rebooted);
+    assert(rebooted.n_dials == 3);
+    F.fail_bond_writes = false;
+    assert(sl2_link_forget_dial(&l, d[1].mac));
+    assert(l.n_dials == 2 && !f_find_peer(d[1].mac));
+    assert(memcmp(&l.dial[1], &original[2], sizeof original[2]) == 0);
+    storage_reboot(&rebooted);
+    assert(rebooted.n_dials == 2);
+    assert(memcmp(rebooted.dial[1].bond.mac, d[2].mac, 6) == 0);
+    printf("forget storage failure ok\n");
+}
+
+static void test_forget_all_storage_failure(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xD1);
+    pair_dial(&l, &d);
+    sl2_dial_rt_t original = l.dial[0];
+    F.fail_bond_writes = true;
+    assert(!sl2_link_forget_all(&l));
+    assert(F.storage_errors == 1);
+    assert(l.n_dials == 1);
+    assert(memcmp(&l.dial[0], &original, sizeof original) == 0);
+    assert(f_find_peer(d.mac));
+    sl2_link_t rebooted;
+    storage_reboot(&rebooted);
+    assert(rebooted.n_dials == 1);
+    F.fail_bond_writes = false;
+    assert(sl2_link_forget_all(&l));
+    assert(l.n_dials == 0 && !f_find_peer(d.mac));
+    storage_reboot(&rebooted);
+    assert(rebooted.n_dials == 0);
+    printf("forget all storage failure ok\n");
+}
+
+static void test_epoch_storage_failure(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xD1);
+    pair_dial(&l, &d);
+    l.dial[0].bond.flags &= (uint8_t)~SL2_BOND_F_EPOCH;
+    uint8_t blob[SL2_BONDS_BLOB_MAX];
+    size_t len = sl2_bonds_encode(&l.dial[0].bond, 1, blob, sizeof blob);
+    assert(f_kv_set(NULL, SL2_KV_BONDS, blob, len));
+    storage_reboot(&l);
+    F.fail_bond_writes = true;
+    int attempts = F.bond_write_attempts;
+    send_cmd_epoch(&l, &d, l.epoch, 230);
+    assert(n_applies == 0);
+    assert(!(l.dial[0].bond.flags & SL2_BOND_F_EPOCH));
+    send_cmd_epoch(&l, &d, 0, 240);
+    assert(n_applies == 0); /* observed echo still protects this boot */
+    send_cmd_epoch(&l, &d, l.epoch, 250);
+    assert(n_applies == 0 && F.bond_write_attempts == attempts + 2);
+    assert(F.storage_errors == 2);
+    sl2_link_t rebooted;
+    storage_reboot(&rebooted);
+    assert(!(rebooted.dial[0].bond.flags & SL2_BOND_F_EPOCH));
+    send_cmd_epoch(&rebooted, &d, 0, 255);
+    assert(n_applies == 1); /* legacy grace really remains across reboot */
+    F.fail_bond_writes = false;
+    send_cmd_epoch(&rebooted, &d, rebooted.epoch, 260);
+    assert(n_applies == 2 && (rebooted.dial[0].bond.flags & SL2_BOND_F_EPOCH));
+    storage_reboot(&rebooted);
+    assert(rebooted.dial[0].bond.flags & SL2_BOND_F_EPOCH);
+    send_cmd_epoch(&rebooted, &d, 0, 270);
+    assert(n_applies == 2);
+    printf("epoch storage failure retry ok\n");
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2) {
+        if (strcmp(argv[1], "pair-storage") == 0) test_pair_storage_failure();
+        else if (strcmp(argv[1], "repair-storage") == 0) test_repair_storage_failure();
+        else if (strcmp(argv[1], "forget-storage") == 0) test_forget_storage_failure();
+        else if (strcmp(argv[1], "forget-all-storage") == 0) test_forget_all_storage_failure();
+        else if (strcmp(argv[1], "epoch-storage") == 0) test_epoch_storage_failure();
+        else return 2;
+        return 0;
+    }
+    test_pair_storage_failure();
+    test_repair_storage_failure();
+    test_forget_storage_failure();
+    test_forget_all_storage_failure();
+    test_epoch_storage_failure();
     sl2_link_t probe_size_check;
     (void)probe_size_check;
     test_hvac_link_infer();

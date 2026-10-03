@@ -126,7 +126,7 @@ class SerinLinkComponent : public Component {
   const char *pair_result() const { return sl2_link_pair_result(&link_); }
   int dial_count() const { return sl2_link_dial_count(&link_); }
   bool any_dial_live() { return sl2_link_any_live(&link_); }
-  void forget_all_dials() { sl2_link_forget_all(&link_); }
+  bool forget_all_dials() { return sl2_link_forget_all(&link_); }
 
   /* Per-dial management. The core's bond table is COMPACTED on forget
    * (sl2_link_forget_dial), so an index identifies a bond SLOT, not a dial:
@@ -457,7 +457,7 @@ class ForgetDialAction : public Action<Ts...>, public Parented<SerinLinkComponen
   void play(Ts... x) override {
     const bool ok = has_mac_ ? this->parent_->forget_dial_mac(mac_.data())
                              : this->parent_->forget_dial_slot(this->slot_.value(x...));
-    if (!ok) ESP_LOGW("serin_link", "forget_link: no such Serin Link");
+    if (!ok) ESP_LOGW("serin_link", "forget_link failed: link missing or bond storage unavailable");
   }
 
  protected:
@@ -468,7 +468,10 @@ class ForgetDialAction : public Action<Ts...>, public Parented<SerinLinkComponen
 template<typename... Ts>
 class ForgetAllDialsAction : public Action<Ts...>, public Parented<SerinLinkComponent> {
  public:
-  void play(Ts...) override { this->parent_->forget_all_dials(); }
+  void play(Ts...) override {
+    if (!this->parent_->forget_all_dials())
+      ESP_LOGW("serin_link", "forget_all_links failed: bond storage unavailable");
+  }
 };
 
 }  // namespace serin_link

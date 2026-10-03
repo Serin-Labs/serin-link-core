@@ -146,6 +146,8 @@ typedef struct {
                                        * (diagnostics); meaningful iff
                                        * cert_state != SL2_CERT_NONE */
     uint8_t  cert_state;      /* sl2_cert_state_t */
+    bool     epoch_seen;      /* correct echo observed this boot; save retries
+                               * until bond.flags records the durable latch */
     bool     screen_valid;    /* dial's last DIAL_SENSOR carried screen status */
     bool     screen_on;       /* ...and the panel was lit (dim/glance count) */
 } sl2_dial_rt_t;
@@ -223,13 +225,14 @@ void sl2_link_pair_start(sl2_link_t *l, uint32_t window_ms);
 void sl2_link_pair_cancel(sl2_link_t *l);
 bool sl2_link_pairing(const sl2_link_t *l);
 int  sl2_link_pair_seconds_left(sl2_link_t *l);
-const char *sl2_link_pair_result(const sl2_link_t *l);   /* "idle"/"listening"/"confirming"/"paired"/"timeout"/"full"/"pin-mismatch" */
+const char *sl2_link_pair_result(const sl2_link_t *l);   /* "idle"/"listening"/"confirming"/"paired"/"timeout"/"full"/"pin-mismatch"/"storage-error" */
 
-/* Bond management. */
+/* Bond management. Mutations take effect only after durable save succeeds.
+ * Forget returns false for a missing dial or storage failure (logged). */
 int  sl2_link_dial_count(const sl2_link_t *l);
 bool sl2_link_dial_mac(const sl2_link_t *l, int idx, uint8_t out[6]);
 bool sl2_link_forget_dial(sl2_link_t *l, const uint8_t mac[6]);
-void sl2_link_forget_all(sl2_link_t *l);
+bool sl2_link_forget_all(sl2_link_t *l);
 
 /* Liveness. */
 bool sl2_link_dial_live(sl2_link_t *l, int idx);

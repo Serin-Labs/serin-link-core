@@ -22,11 +22,10 @@ static bool dial_live_at(const sl2_dial_rt_t *d, uint32_t now) {
            (uint32_t)(now - d->last_probe_ms) < SL2_DIAL_LIVE_MS;
 }
 
-static bool persist_bonds(sl2_link_t *l) {
-    sl2_dial_bond_t recs[SL2_MAX_DIALS];
-    for (int i = 0; i < l->n_dials; i++) recs[i] = l->dial[i].bond;
+/* Save a proposed table before publishing its mutation in RAM or on radio. */
+static bool persist_bonds(sl2_link_t *l, const sl2_dial_bond_t *recs, int n) {
     uint8_t blob[SL2_BONDS_BLOB_MAX];
-    size_t len = sl2_bonds_encode(recs, l->n_dials, blob, sizeof blob);
+    size_t len = sl2_bonds_encode(recs, n, blob, sizeof blob);
     if (!len) return false;
     return l->port->kv_set(l->port->ctx, SL2_KV_BONDS, blob, len);
 }
@@ -58,13 +57,26 @@ static bool epoch_ok(sl2_link_t *l, sl2_dial_rt_t *d, uint16_t e) {
     if (l->epoch == 0) return true;        /* rand failed at boot: guard off */
     if (e == l->epoch) {
         if (!(d->bond.flags & SL2_BOND_F_EPOCH)) {
+            /* Enforce immediately in this boot, but do not claim durable
+             * protection or accept the mutation until the latch is saved.
+             * Leaving bond.flags unchanged makes the next echo retry. */
+            d->epoch_seen = true;
+            sl2_dial_bond_t recs[SL2_MAX_DIALS];
+            for (int i = 0; i < l->n_dials; i++) {
+                recs[i] = l->dial[i].bond;
+                if (&l->dial[i] == d) recs[i].flags |= SL2_BOND_F_EPOCH;
+            }
+            if (!persist_bonds(l, recs, l->n_dials)) {
+                d->pend_state = true;
+                lg(l, 0, "sl2: replay guard save failed; packet dropped, next echo retries");
+                return false;
+            }
             d->bond.flags |= SL2_BOND_F_EPOCH;
-            persist_bonds(l);
-            lg(l, 2, "sl2: dial echoes epochs — replay guard latched");
+            lg(l, 2, "sl2: dial echoes epochs — replay guard durably latched");
         }
         return true;
     }
-    if (!(d->bond.flags & SL2_BOND_F_EPOCH)) return true;   /* legacy dial */
+    if (!(d->bond.flags & SL2_BOND_F_EPOCH) && !d->epoch_seen) return true;   /* legacy dial */
     /* Stale echo from a latched dial: replay, or the dial missed the STATE
      * after our reboot. Drop it, but resync the dial promptly so a live one
      * learns the fresh epoch instead of wedging. */
@@ -142,8 +154,9 @@ static void echo_state_all(sl2_link_t *l) {
 static void pair_cleanup_candidate(sl2_link_t *l) {
     sl2_dial_rt_t *bonded = dial_by_mac(l, l->cand_mac);
     l->port->peer_del(l->port->ctx, l->cand_mac);
-    if (bonded)   /* re-pair attempt clobbered the radio peer: restore it */
-        l->port->peer_add(l->port->ctx, bonded->bond.mac, bonded->bond.lmk, true);
+    if (bonded && /* re-pair attempt clobbered the radio peer: restore it */
+        !l->port->peer_add(l->port->ctx, bonded->bond.mac, bonded->bond.lmk, true))
+        lg(l, 0, "sl2: original bonded peer restore FAILED");
     memset(l->cand_mac, 0, 6);
     memset(l->cand_lmk, 0, sizeof l->cand_lmk);
     memset(l->cand_id_pub, 0, sizeof l->cand_id_pub);
@@ -279,16 +292,29 @@ static void on_pair_req(sl2_link_t *l, const uint8_t *data, int len) {
  * same LMK (the radio drops mismatched CCMP frames). Commit the bond. */
 static void pair_commit(sl2_link_t *l) {
     sl2_dial_rt_t *d = dial_by_mac(l, l->cand_mac);
+    sl2_dial_bond_t candidate = {0};
+    memcpy(candidate.mac, l->cand_mac, 6);
+    memcpy(candidate.lmk, l->cand_lmk, 16);
+    memcpy(candidate.id_pub, l->cand_id_pub, 32);
+    sl2_dial_bond_t recs[SL2_MAX_DIALS];
+    for (int i = 0; i < l->n_dials; i++) {
+        recs[i] = l->dial[i].bond;
+        if (&l->dial[i] == d) recs[i] = candidate;
+    }
+    if (!d) recs[l->n_dials] = candidate;
+    if (!persist_bonds(l, recs, l->n_dials + (d ? 0 : 1))) {
+        pair_cleanup_candidate(l);
+        pair_end(l, "storage-error");
+        lg(l, 0, "sl2: bond save failed; pairing not committed");
+        return;
+    }
     if (!d) {
         d = &l->dial[l->n_dials++];
         memset(d, 0, sizeof *d);
     }
-    memset(&d->bond, 0, sizeof d->bond);
-    memcpy(d->bond.mac, l->cand_mac, 6);
-    memcpy(d->bond.lmk, l->cand_lmk, 16);
-    memcpy(d->bond.id_pub, l->cand_id_pub, 32);
+    d->bond = candidate;
+    d->epoch_seen = false;
     d->pend_state = true;
-    persist_bonds(l);
     memset(l->cand_lmk, 0, sizeof l->cand_lmk);
     memset(l->eph_priv, 0, sizeof l->eph_priv);
     pair_end(l, "paired");
@@ -330,8 +356,12 @@ void sl2_link_on_recv(sl2_link_t *l, const uint8_t src[6], const uint8_t dst[6],
     if (!sl2_mac_eq(dst, l->own_mac)) return;
 
     /* Pairing confirmation: any unicast that decrypted from the candidate. */
-    if (l->pair == SL2_PAIR_CONFIRM && sl2_mac_eq(src, l->cand_mac))
+    if (l->pair == SL2_PAIR_CONFIRM && sl2_mac_eq(src, l->cand_mac)) {
         pair_commit(l);
+        /* A failed re-pair restored the old key; do not interpret the
+         * candidate's confirming payload as traffic from that old bond. */
+        if (strcmp(l->pair_result, "paired") != 0) return;
+    }
 
     sl2_dial_rt_t *d = dial_by_mac(l, src);
     if (!d) return;
@@ -686,22 +716,33 @@ bool sl2_link_dial_mac(const sl2_link_t *l, int idx, uint8_t out[6]) {
 bool sl2_link_forget_dial(sl2_link_t *l, const uint8_t mac[6]) {
     for (int i = 0; i < l->n_dials; i++) {
         if (!sl2_mac_eq(l->dial[i].bond.mac, mac)) continue;
+        sl2_dial_bond_t recs[SL2_MAX_DIALS];
+        int n = 0;
+        for (int j = 0; j < l->n_dials; j++)
+            if (j != i) recs[n++] = l->dial[j].bond;
+        if (!persist_bonds(l, recs, n)) {
+            lg(l, 0, "sl2: bond save failed; dial was not forgotten");
+            return false;
+        }
         l->port->peer_del(l->port->ctx, mac);
         for (int j = i; j < l->n_dials - 1; j++) l->dial[j] = l->dial[j + 1];
         l->n_dials--;
         memset(&l->dial[l->n_dials], 0, sizeof l->dial[l->n_dials]);
-        persist_bonds(l);
         return true;
     }
     return false;
 }
 
-void sl2_link_forget_all(sl2_link_t *l) {
+bool sl2_link_forget_all(sl2_link_t *l) {
+    if (!persist_bonds(l, NULL, 0)) {
+        lg(l, 0, "sl2: bond save failed; dials were not forgotten");
+        return false;
+    }
     for (int i = 0; i < l->n_dials; i++)
         l->port->peer_del(l->port->ctx, l->dial[i].bond.mac);
     memset(l->dial, 0, sizeof l->dial);
     l->n_dials = 0;
-    persist_bonds(l);
+    return true;
 }
 
 bool sl2_link_dial_live(sl2_link_t *l, int idx) {
