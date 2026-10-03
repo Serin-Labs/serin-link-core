@@ -19,7 +19,9 @@ The repo ships two things:
 
 The wire protocol is specified in
 [`docs/serin-link-wire-spec.md`](docs/serin-link-wire-spec.md) (current wire
-version: 3, `SL2_PROTO_VERSION`) and hardware-verified against ESPHome (CN105
+version: 5, `SL2_PROTO_VERSION`). New pairing requires v5 on both peers; see
+[the upgrade guide](docs/protocol-v5-upgrade.md) before updating an existing
+installation. Earlier releases were hardware-verified against ESPHome (CN105
 and generic climate platforms) and
 [mitsubishi-cn105-homekit](https://github.com/akifbayram/mitsubishi-cn105-homekit),
 an independent open-source CN105/HomeKit firmware.
@@ -131,11 +133,10 @@ Connected / Last Seen / Firmware) for each slot and sizes the room-temperature
 source dropdown below — no other part of the config repeats it. Everything that
 follows describes what the multi-Link machinery does underneath.
 
-All bonded Links get the STATE stream, and a
-command from any of them is accepted — but the `link_sensor:` entities above
-are a *single* set, and by default whichever one reported last owns them. Two
-Links in two rooms therefore make that temperature — and any heat pump fed
-from it — alternate between rooms. Configure one controller-owned dropdown:
+All bonded Links get the STATE stream, and a command from any of them is
+accepted. A Link selected as the room-temperature source is pinned to that
+specific device. Choose it from the Link's Room Sensor picker, or add a
+controller-owned Home Assistant dropdown:
 
 ```yaml
   room_temperature_source:
@@ -147,6 +148,12 @@ Serin Link. Options are `Heat pump` (the unit's own sensor), any external
 sources you declare, and one `Serin Link N` entry per `max_links:` slot. A
 Serin Link entry always means that specific Link; there is no automatic
 "last reporting" mode. The selection is stored on the controller.
+
+Changing the selected Link clears the previous Link's cached health and
+readings. The arbitrated Home Assistant temperature and humidity become
+unknown until the newly selected Link supplies a fresh reading, including
+when you switch back to a previously selected Link. Per-Link rows keep their
+own readings.
 
 To offer a reading that lives outside the controller — a Home Assistant
 temperature, for example — bind the sensor as a source. The component
@@ -188,10 +195,10 @@ consequences you can watch for:
 
 - Forget an *earlier* Link and the pinned one shifts down a slot. The pin holds
   — the dropdown just relabels itself from "Serin Link 2" to "Serin Link 1".
-- Forget the *pinned* Link and the source reverts to `Internal`, with a warning in the
-  log. Leaving it would strand the room source at unavailable with no way back
-  short of a reflash. Note this is about **forgetting**, not going offline: an
-  offline pinned Link keeps its pin, which is the entire feature.
+- Successfully forget the *pinned* Link and the source reverts to `Heat pump`,
+  emitting `0` through `on_room_temperature:` immediately. This also works
+  without a Home Assistant dropdown. A failed forget keeps the bond and source
+  selection and logs an error. An offline pinned Link keeps its pin.
 
 Selecting an empty slot is ignored, logged, and the dropdown snaps back to
 what is actually in force.
@@ -258,7 +265,7 @@ where you'd hand-write `links:` rows if the generated names don't suit:
                      # binary_sensor a dashboard card wants
     bonded_count:    { name: "Bonded Serin Links" }
     pairing_status:  { name: "Pairing" }       # idle/listening/confirming/paired/
-                                               # timeout/cancelled/full/pin-mismatch
+                                               # timeout/cancelled/full/pin-mismatch/storage-error
     # links: [...]   # custom-named per-slot rows; the row count must then
                      # agree with max_links (it IS the same statement twice)
 ```
