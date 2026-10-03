@@ -1283,7 +1283,7 @@ void SerinLinkComponent::room_source_project_() {
   selected_src_ = has_primary_dial_ ? SL2_ROOMSRC_LINK : SL2_ROOMSRC_INTERNAL;
 }
 
-/* Runs once at boot, right after sl2_link_start() has loaded the bond table
+/* Runs at boot, right after sl2_link_start() has loaded the bond table
  * (sl2_link_init alone only zeroes the link struct — n_dials/dial[] are
  * populated inside start, so this must run after it or "sole bonded Link"
  * below always sees zero bonds). Two stores need resolving:
@@ -1292,9 +1292,10 @@ void SerinLinkComponent::room_source_project_() {
  *    sole bonded Link when exactly one is bonded, else Heat pump;
  *  - any id the current catalog does not list (external source removed or
  *    renamed in YAML, Link forgotten while powered off): Heat pump.
- * Passes fire=false so a resolved change does not fire on_room_temperature
- * at boot. */
-void SerinLinkComponent::room_source_reconcile_() {
+ * Also reconciles live bond removals independently of the optional select.
+ * Boot passes fire=false so a resolved change does not fire
+ * on_room_temperature there. */
+void SerinLinkComponent::room_source_reconcile_(bool fire) {
   uint64_t id = selected_source_id_;
   if (id == SL2_ROOM_SOURCE_LINK_AUTO_ID) {
     uint8_t mac[6];
@@ -1311,7 +1312,7 @@ void SerinLinkComponent::room_source_reconcile_() {
     id = SL2_ROOM_SOURCE_INTERNAL_ID;
   }
   if (id != selected_source_id_) {
-    room_source_apply_(id, false);
+    room_source_apply_(id, fire);
   } else {
     /* selected_ext_ was unknown before sources were registered. BLE is the
      * one coarse value with no catalog id (see setup()'s v4-store fold) —
@@ -1365,15 +1366,6 @@ void SerinLinkComponent::refresh_room_source_select_() {
     idx = 1 + selected_ext_;
   } else if (room_source_slot_(selected_source_id_, &slot)) {
     idx = 1 + static_cast<int>(ext_sources_.size()) + slot;
-  } else if (selected_source_id_ != SL2_ROOM_SOURCE_INTERNAL_ID) {
-    /* Pinned Serin Link is gone from the bond table (forgotten, not merely
-     * offline): fall back rather than strand the room source at unavailable
-     * with no way back except a reflash. */
-    char s[18];
-    sl2_fmt_mac(primary_dial_, s);
-    ESP_LOGW(TAG, "room source %s is no longer bonded — reverting to Heat pump", s);
-    room_source_apply_(SL2_ROOM_SOURCE_INTERNAL_ID);
-    return;                                /* apply_ re-enters and publishes */
   }
   /* select::publish_state does NOT dedup and this runs at 1 Hz — gate it. */
   if (pub_room_source_idx_ != idx) {
@@ -1518,7 +1510,7 @@ void SerinLinkComponent::setup() {
     this->mark_failed();
     return;
   }
-  room_source_reconcile_();
+  room_source_reconcile_(false);
 
   if (climate_ != nullptr) rebuild_fan_detents_();
 
@@ -1586,11 +1578,12 @@ void SerinLinkComponent::loop() {
     last_diag_ms_ = now;
     publish_diagnostics_(now);
   }
-  /* 1 Hz: republish the room-source dropdown from the CURRENT bond table and
-   * drop a pin whose Serin Link has been forgotten. Quiet because
-   * refresh_room_source_select_() gates on change. */
-  if (room_source_select_ != nullptr && now - last_primary_ms_ >= 1000) {
+  /* 1 Hz: reconcile sources against the current bond table, including core
+   * removals that bypass the adapter's public forget methods. The optional
+   * dropdown only publishes changes after the model is valid. */
+  if (now - last_primary_ms_ >= 1000) {
     last_primary_ms_ = now;
+    room_source_reconcile_();
     refresh_room_source_select_();
   }
   sl2_rxq_frame_t f;

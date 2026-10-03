@@ -31,8 +31,19 @@ inline void inject_storage_failure(bool fail) { fail_storage = fail; }
 
 // Uses the public adapter lifecycle and APIs. Platform entities record
 // published values; all source arbitration, cache and core logic is real.
+struct AdapterProbe : SerinLinkComponent {
+  sl2_link_t *core() { return &link_; }
+  bool has_primary() const { return has_primary_dial_; }
+  bool primary_is(uint8_t dial) const {
+    return std::memcmp(primary_dial_, dial_mac(dial).data(), 6) == 0;
+  }
+  bool primary_cleared() const {
+    const uint8_t empty[6]{};
+    return std::memcmp(primary_dial_, empty, 6) == 0;
+  }
+};
 struct Fixture {
-  SerinLinkComponent component;
+  AdapterProbe component;
   esphome::sensor::Sensor temperature, humidity;
   esphome::text_sensor::TextSensor mac;
   esphome::Trigger<float> room_temperature;
@@ -40,10 +51,13 @@ struct Fixture {
 
   explicit Fixture(bool with_select = false,
                    std::initializer_list<uint8_t> dials = {1, 2},
-                   uint64_t initial_source = SL2_ROOM_SOURCE_INTERNAL_ID) {
+                   std::optional<uint64_t> initial_source = SL2_ROOM_SOURCE_INTERNAL_ID,
+                   uint8_t legacy_source = SL2_ROOMSRC_INTERNAL) {
     reset();
     initialize_bonds(dials);
-    initialize_source_preference(initial_source);
+    if (initial_source) initialize_source_preference(*initial_source);
+    auto legacy = esphome::global_preferences->make_preference<uint8_t>(0x53325253);
+    require(legacy.save(&legacy_source), "fixture coarse source preference");
     component.set_link_sensor_enabled();
     component.set_dial_temp_sensor(&temperature);
     component.set_dial_hum_sensor(&humidity);
@@ -91,6 +105,6 @@ struct Fixture {
     component.loop();
   }
   bool forget(uint8_t dial) { return component.forget_dial_mac(dial_mac(dial).data()); }
-  void forget_all() { component.forget_all_dials(); }
+  bool forget_all() { return component.forget_all_dials(); }
 };
 }

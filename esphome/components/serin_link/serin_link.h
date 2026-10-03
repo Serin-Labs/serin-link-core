@@ -126,7 +126,12 @@ class SerinLinkComponent : public Component {
   const char *pair_result() const { return sl2_link_pair_result(&link_); }
   int dial_count() const { return sl2_link_dial_count(&link_); }
   bool any_dial_live() { return sl2_link_any_live(&link_); }
-  bool forget_all_dials() { return sl2_link_forget_all(&link_); }
+  bool forget_all_dials() {
+    if (!sl2_link_forget_all(&link_)) return false;
+    room_source_reconcile_();
+    refresh_room_source_select_();
+    return true;
+  }
 
   /* Per-dial management. The core's bond table is COMPACTED on forget
    * (sl2_link_forget_dial), so an index identifies a bond SLOT, not a dial:
@@ -135,10 +140,13 @@ class SerinLinkComponent : public Component {
   bool forget_dial_slot(int idx) {
     uint8_t mac[6];
     if (!sl2_link_dial_mac(&link_, idx, mac)) return false;
-    return sl2_link_forget_dial(&link_, mac);
+    return forget_dial_mac(mac);
   }
   bool forget_dial_mac(const uint8_t mac[6]) {
-    return sl2_link_forget_dial(&link_, mac);
+    if (!sl2_link_forget_dial(&link_, mac)) return false;
+    room_source_reconcile_();
+    refresh_room_source_select_();
+    return true;
   }
   int pair_seconds_left() { return sl2_link_pair_seconds_left(&link_); }
   /* Raw per-dial snapshot, so a YAML lambda can reach the fields the
@@ -298,7 +306,7 @@ class SerinLinkComponent : public Component {
   bool room_catalog_entry_(int idx, struct sl2_room_source_entry *e) const;
   void room_source_apply_(uint64_t id, bool fire = true);
   void room_source_project_();
-  void room_source_reconcile_();
+  void room_source_reconcile_(bool fire = true);
   void refresh_room_source_select_();
   /* Read once at boot for the v3->v4 migration; never written any more. */
   ESPPreferenceObject primary_pref_;
