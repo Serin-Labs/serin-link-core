@@ -19,9 +19,8 @@ The repo ships two things:
 
 The wire protocol is specified in
 [`docs/serin-link-wire-spec.md`](docs/serin-link-wire-spec.md) (current wire
-version: 5, `SL2_PROTO_VERSION`). New pairing requires v5 on both peers; see
-[the upgrade guide](docs/protocol-v5-upgrade.md) before updating an existing
-installation. Earlier releases were hardware-verified against ESPHome (CN105
+version: 5, `SL2_PROTO_VERSION`). Pairing requires v5 on both peers. Earlier
+releases were hardware-verified against ESPHome (CN105
 and generic climate platforms) and
 [mitsubishi-cn105-homekit](https://github.com/akifbayram/mitsubishi-cn105-homekit),
 an independent open-source CN105/HomeKit firmware.

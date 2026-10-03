@@ -24,8 +24,7 @@ floor is already the constant that gate keys off.
 Version 5 requires key-specific pairing confirmation (§3) and adds boot-epoch
 tails to room-source selections and sensor reports (§3b, §10d–e). New pairing
 requires both peers to support v5. Existing bonds remain usable for ordinary
-controls; protected room traffic requires the updated Link firmware. See
-[the upgrade guide](protocol-v5-upgrade.md) for update order and compatibility.
+controls; protected room traffic requires v5 Link firmware.
 
 Design goals, in priority order:
 
