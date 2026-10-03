@@ -248,6 +248,9 @@ class SerinLinkComponent : public Component {
    * as unknown rather than a frozen number) and latches until a fresh
    * reading arrives. */
   void publish_dial_(bool stale);
+  /* A source/MAC change ends the cached reading's ownership, including its
+   * publication history. Per-slot rows have independent caches. */
+  void reset_dial_reading_();
   bool link_sensor_cfg_{false};
   bool link_ota_credentials_{false};
   sensor::Sensor *dial_temp_sensor_{nullptr};
@@ -287,8 +290,8 @@ class SerinLinkComponent : public Component {
   void ext_state_(int idx, float v);
   /* on_room_temperature: fan-out. Every feed path goes through here. */
   void fire_room_temperature_(float t);
-  /* After a selection change: push the new source's last known value (or 0
-   * for Heat pump) so the heat pump does not wait for the next sample. */
+  /* After a selection change: push the external source's last known value,
+   * or 0 for Heat pump. A Link waits for its first fresh frame after reset. */
   void room_source_changed_();
   uint32_t room_catalog_revision_() const;
   bool room_source_slot_(uint64_t id, int *slot) const;

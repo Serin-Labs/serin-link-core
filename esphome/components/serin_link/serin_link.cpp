@@ -830,7 +830,7 @@ void SerinLinkComponent::room_source_changed_() {
     const ext_source_t &e = ext_sources_[selected_ext_];
     if (e.last_ms != 0) fire_room_temperature_(e.last);
   } else if (has_primary_dial_) {
-    if (dial_temp_ms_ != 0 && std::memcmp(dial_mac_, primary_dial_, 6) == 0)
+    if (room_src_status_() == SL2_ROOMST_OK)
       fire_room_temperature_(dial_temp_cc_ / 100.0f);
   } else {
     /* Heat pump: 0 is cn105's own "drop the remote temperature" value, and
@@ -851,7 +851,8 @@ uint8_t SerinLinkComponent::room_src_status_() const {
        * it immediately rather than making the user wait out stale_after for
        * an answer that can never change. This is what SL2_DSF_HAS_SENSOR is
        * for, and the same use the reference controller puts it to. */
-      if (!dial_has_sensor_ || dial_temp_ms_ == 0) return SL2_ROOMST_UNAVAILABLE;
+      if (!has_primary_dial_ || std::memcmp(dial_mac_, primary_dial_, 6) != 0 ||
+          !dial_has_sensor_ || dial_temp_ms_ == 0) return SL2_ROOMST_UNAVAILABLE;
       return (millis() - dial_temp_ms_ >= dial_stale_ms_) ? SL2_ROOMST_STALE
                                                           : SL2_ROOMST_OK;
     case SL2_ROOMSRC_BLE:
@@ -895,6 +896,7 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
        * store LINK instead, leave the guard permanently true, and repeat this
        * branch at ~3 Hz forever. room_src_status_() then reports UNAVAILABLE,
        * which is the truth and ends the dial's retry. */
+      reset_dial_reading_();
       selected_src_ = SL2_ROOMSRC_BLE;
       selected_source_id_ = SL2_ROOM_SOURCE_INTERNAL_ID;
       has_primary_dial_ = false;
@@ -963,10 +965,11 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
    * source. Humidity additionally needs a same-source check of its own:
    * temp_cc and hum_cc have independent NA sentinels, so one dial's
    * frame may carry a value the other's doesn't — if the reporting dial
-   * just changed, drop the outgoing dial's humidity before this frame's
-   * fields apply, so it can never be republished under the new dial's MAC. */
+   * just changed, retract the outgoing reading and reset its publish gate
+   * before this frame's fields apply. The new dial's first sample must
+   * publish even when its temperature equals the outgoing dial's. */
   if (src_mac != nullptr && memcmp(dial_mac_, src_mac, 6) != 0) {
-    dial_hum_cc_ = SL2_HUM_CC_NA;
+    reset_dial_reading_();
     memcpy(dial_mac_, src_mac, 6);
   }
   dial_has_sensor_ = (p->flags & SL2_DSF_HAS_SENSOR) != 0;
@@ -988,6 +991,22 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
   const bool changed = dial_temp_cc_ != dial_pub_cc_;
   const bool due = dial_pub_ms_ == 0 || millis() - dial_pub_ms_ >= 30000;
   if (changed || due || dial_stale_) publish_dial_(false);
+}
+
+void SerinLinkComponent::reset_dial_reading_() {
+  /* Retract the outgoing reading immediately; a selected Link with no
+   * sample must not leave another Link's values visible in HA. */
+  if (dial_temp_ms_ != 0 && !dial_stale_) publish_dial_(true);
+  dial_temp_cc_ = SL2_CC_NA;
+  dial_hum_cc_ = SL2_HUM_CC_NA;
+  dial_temp_ms_ = 0;
+  dial_has_sensor_ = false;
+  std::memset(dial_mac_, 0, sizeof dial_mac_);
+  dial_pub_cc_ = SL2_CC_NA;
+  dial_pub_ms_ = 0;
+  dial_stale_ = false;
+  if (dial_mac_sensor_ != nullptr && !dial_mac_sensor_->state.empty())
+    dial_mac_sensor_->publish_state("");
 }
 
 void SerinLinkComponent::publish_dial_(bool stale) {
@@ -1231,11 +1250,16 @@ bool SerinLinkComponent::room_source_get(uint32_t *revision, uint64_t *id,
  * (see room_source_project_), so they cannot drift out of step with it or
  * survive a reboot disagreeing with it. */
 void SerinLinkComponent::room_source_apply_(uint64_t id, bool fire) {
-  const bool changed = id != selected_source_id_;
+  /* Legacy BLE has no catalog id; an explicit catalog choice still ends
+   * that selection even when it shares BLE's internal placeholder id. */
+  const bool changed = id != selected_source_id_ || selected_src_ == SL2_ROOMSRC_BLE;
   /* Let the ignored-dial log speak again for the new pin: the dedup below is
    * keyed by MAC only, so without this a MAC logged under a stale pin would
    * stay silently suppressed forever under the new one. */
-  if (changed) n_ignored_logged_ = 0;
+  if (changed) {
+    n_ignored_logged_ = 0;
+    reset_dial_reading_();
+  }
   selected_source_id_ = id;
   room_source_project_();
   room_source_id_pref_.save(&selected_source_id_);
