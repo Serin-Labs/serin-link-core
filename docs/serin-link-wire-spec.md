@@ -1,6 +1,6 @@
 # Serin Link — wire specification
 
-**Status:** normative for `SL2_PROTO_VERSION 4`; matches
+**Status:** normative for `SL2_PROTO_VERSION 5`; matches
 `include/serin_link/sl2_proto.h` (the header is the byte-level ground truth —
 every packed struct there carries a `sizeof` static assert). Wire version 1
 was a pre-release draft that never shipped; version 2 was the first released
@@ -21,6 +21,12 @@ floor (`SL2_ROOM_CATALOG_MIN_VER`, 4) on the same principle — nothing below v4
 can legitimately send them, and if a v4 field is ever rescaled in place the
 floor is already the constant that gate keys off.
 
+Version 5 requires key-specific pairing confirmation (§3) and adds boot-epoch
+tails to room-source selections and sensor reports (§3b, §10d–e). New pairing
+requires both peers to support v5. Existing bonds remain usable for ordinary
+controls; protected room traffic requires the updated Link firmware. See
+[the upgrade guide](protocol-v5-upgrade.md) for update order and compatibility.
+
 Design goals, in priority order:
 
 1. **Firmware-agnostic and heat-pump-agnostic.** No vendor bytes on the wire;
@@ -40,7 +46,8 @@ Design goals, in priority order:
 ## 1. Transport
 
 ESP-NOW on `WIFI_IF_STA`, ≤250 B payloads, little-endian packed structs (encode ==
-memcpy). Pairing packets are broadcast plaintext; all bonded traffic is unicast
+memcpy). `PAIR_REQ`/`PAIR_RESP` are broadcast plaintext; key confirmations
+and all bonded traffic are unicast
 with `esp_now_peer_info_t.encrypt = true` and the per-bond LMK. `esp_now_set_pmk()`
 is called with a **documented public constant** `"serin-link-open"` padded to 16 B
 — it only wraps LMKs locally (per Espressif docs it never goes on air and does not
@@ -62,7 +69,7 @@ uint8_t version;   /* SL2_PROTO_VERSION */
 ```
 
 ```c
-#define SL2_PROTO_VERSION    4
+#define SL2_PROTO_VERSION    5
 #define SL2_PROTO_MIN_COMPAT 1
 ```
 
@@ -95,8 +102,11 @@ ignored, never errors.
 | 14 | `ROOM_CATALOG_RESP` | ctrl→dial | yes | Catalog revision and source entries |
 | 15 | `ROOM_SOURCE_SET` | dial→ctrl | yes | Select one catalog entry |
 | 16 | `ROOM_SOURCE_ACK` | ctrl→dial | yes | Confirm or reject a selection |
+| 19 | `PAIR_CONFIRM` | dial→ctrl | yes | Prove the candidate LMK |
+| 20 | `PAIR_ACK` | ctrl→dial | yes | Confirm committed candidate LMK |
 
-Types 17–127 are reserved for core growth; 128–255 are reserved for experiments
+Types 17–18 are assigned to Wi-Fi cancellation by the dial firmware. Types
+21–127 are reserved for core growth; 128–255 are reserved for experiments
 (never shipped semantics).
 
 ## 3. Pairing: signed X25519 + TOFU pinning
@@ -162,21 +172,46 @@ Flow:
 2. Controller (pairing window open, button-gated 60 s): verify `sig` against the
    packet's own `id_pub` (proof of possession). **Pinning check:** if a bond for
    this dial MAC exists with a different pinned `id_pub`, refuse and log. Fresh
-   ephemeral, derive LMK, broadcast `PAIR_RESP`. Reply to every REQ heard.
+   ephemeral, derive LMK, broadcast `PAIR_RESP`. During confirmation, repeat
+   only the same candidate's request (same MAC, identity and ephemeral key);
+   re-send the response without extending the confirmation deadline.
 3. Dial: verify `sig` (proof of possession) and the `dial_eph_pub` binding.
    **Pinning check:** same rule against its bond table. First valid RESP wins.
 4. Dial derives LMK, installs the encrypted peer, retunes to the RESP's signed
-   `channel` (falling back to a MAC-ACK channel hunt if probes go unACKed),
-   sends PROBEs until the first STATE confirms the encrypted path, then
-   persists the bond and reboots into the bonded link.
+   `channel` (falling back to a MAC-ACK channel hunt), and sends `PAIR_CONFIRM`.
+5. Controller verifies the candidate-key proof, persists the bond, and sends
+   `PAIR_ACK`. A storage failure MUST NOT send an ACK. Repeated confirmations
+   with the committed key receive the same ACK, so ACK loss is recoverable.
+6. Dial verifies `PAIR_ACK` against its candidate key before persisting its bond
+   and rebooting into the bonded link. Cancellation or confirmation timeout
+   restores the previous local peer/bond if present.
+
+Protocol v5 adds two 34-byte encrypted unicast packets: `PAIR_CONFIRM` (type
+19, dial to controller) and `PAIR_ACK` (type 20, controller to dial). Each is
+`u8 type; u8 version; u8 tag[32]`. Types 17 and 18 remain reserved for the
+shipped Wi-Fi cancellation exchange. The authentication transcript is exactly
+28 bytes: the 14-byte string `"SLv5-pair-auth"` (without NUL), packet type, authentication
+version (5), dial STA MAC (6 bytes), controller STA MAC (6 bytes). `tag` is
+HMAC-SHA256 keyed by the candidate 16-byte LMK. LMK derivation already binds
+both ephemeral keys; direction and ordered MACs prevent reflected proofs.
+Proofs require the complete 34-byte prefix and authentication version 5.
+Trailing bytes are ignored and have no authenticated semantics.
+
+New pairing and re-pairing require request/response version at least 5 on both
+peers. There is no legacy PROBE/STATE confirmation fallback: update both peers
+before pairing. Existing bonds still carry normal traffic across versions.
+Neither an ordinary unicast nor a STATE proves a candidate key: it may have
+been decrypted under the previous key before the software processes a queued
+pairing request. A valid explicit proof is required on both sides.
 
 Threat model, stated honestly: first contact during the open pairing window is
 TOFU — an attacker present in radio range at that moment can be pinned instead of
 the real device (Zigbee permit-join posture; window is button-gated and short).
 After first bond, pinning means re-pairs/replacements with a different key are
 refused until the user explicitly forgets the zone. Replayed `PAIR_REQ`s are
-harmless: the replayer lacks the ephemeral private key and can never derive the
-LMK. Replay of *data-plane* ciphertexts (CMD/WIFI_SETUP captured and re-sent
+unable to replace a persisted bond: the replayer lacks the ephemeral private
+key and cannot produce the candidate LMK proof. They may temporarily interrupt
+traffic during the bounded confirmation window; timeout restores the old key. Replay of *data-plane* ciphertexts (CMD/WIFI_SETUP captured and re-sent
 after a controller reboot) is a real gap in the raw transport — closed by the
 epoch echo, section 3b.
 
@@ -224,7 +259,10 @@ The guard:
   a zero or stale epoch from that dial is dropped. Until the ratchet is set,
   zero epochs are accepted so pre-epoch dial firmware keeps working (and the
   replay window honestly remains until the dial upgrades and sends its first
-  echoed packet). Re-pairing resets the bond including the flag.
+  echoed packet). New v5 pairing and re-pairing save the flag immediately: no
+  initial legacy grace is granted. If saving a legacy bond's first correct
+  echo fails, the packet is rejected and the next correct echo retries the save.
+  The observed echo still prevents a downgrade during that boot.
 - On an epoch-mismatch drop the controller marks STATE pending for that dial,
   so a live dial that missed the reboot resyncs within the 250 ms floor and
   retries with the fresh value. A dropped packet does NOT count as liveness.

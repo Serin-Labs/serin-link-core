@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-trap 'rm -f /tmp/test_sl2_proto /tmp/test_sl2_info /tmp/test_sl2_link \
+pair_test_dir=$(mktemp -d /tmp/serin-core-pair-auth.XXXXXX)
+trap 'rm -rf "$pair_test_dir"; rm -f /tmp/test_sl2_proto /tmp/test_sl2_info /tmp/test_sl2_link \
             /tmp/test_crypto_vectors /tmp/monocypher.o /tmp/monocypher-ed25519.o' EXIT
 cd "$(dirname "$0")"
 CFLAGS="-std=c11 -Wall -Wextra -Werror -I../include"
 gcc $CFLAGS test_sl2_proto.c -o /tmp/test_sl2_proto -lm
 /tmp/test_sl2_proto
+gcc $CFLAGS test_sl2_pair_auth.c -o "$pair_test_dir/test_sl2_pair_auth" -lm
+"$pair_test_dir/test_sl2_pair_auth"
 gcc $CFLAGS test_sl2_info.c -o /tmp/test_sl2_info -lm
 /tmp/test_sl2_info
 gcc $CFLAGS test_sl2_link.c ../src/sl2_link.c -o /tmp/test_sl2_link -lm

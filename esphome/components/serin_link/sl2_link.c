@@ -3,6 +3,7 @@
  * sl2_port.h / sl2_crypto.h / sl2_link.h for the contracts.
  */
 #include "sl2_link.h"
+#include "sl2_pair_auth.h"
 #include <stddef.h>   /* offsetof */
 
 /* ── small helpers ────────────────────────────────────────────────────── */
@@ -174,6 +175,7 @@ static void pair_cleanup_candidate(sl2_link_t *l) {
     memset(l->cand_mac, 0, 6);
     memset(l->cand_lmk, 0, sizeof l->cand_lmk);
     memset(l->cand_id_pub, 0, sizeof l->cand_id_pub);
+    memset(l->cand_eph_pub, 0, sizeof l->cand_eph_pub);
     memset(l->eph_priv, 0, sizeof l->eph_priv);
 }
 
@@ -232,7 +234,7 @@ static void on_pair_req(sl2_link_t *l, const uint8_t *data, int len) {
     if (len < SL2_PAIR_MIN_LEN) return;
     struct sl2_pair_req_pkt req;
     sl2_decode_pkt(&req, sizeof req, data, len);
-    if (req.type != SL2_PKT_PAIR_REQ) return;
+    if (req.type != SL2_PKT_PAIR_REQ || req.version < SL2_PAIR_AUTH_MIN_VER) return;
 
     /* During CONFIRM only re-answer the same candidate (it may have missed
      * our RESP); a different dial waits for the next window. */
@@ -259,6 +261,10 @@ static void on_pair_req(sl2_link_t *l, const uint8_t *data, int len) {
         return;
     }
 
+    const bool repeating = l->pair == SL2_PAIR_CONFIRM;
+    if (repeating && (memcmp(req.eph_pub, l->cand_eph_pub, 32) != 0 ||
+                      memcmp(req.id_pub, l->cand_id_pub, 32) != 0)) return;
+
     uint8_t lmk[16];
     if (sl2_derive_lmk(l->crypto, l->eph_priv, req.eph_pub,
                        req.eph_pub /* dial */, l->eph_pub /* ctrl */, lmk)) {
@@ -282,11 +288,18 @@ static void on_pair_req(sl2_link_t *l, const uint8_t *data, int len) {
         return;
     }
 
+    if (repeating) {
+        /* Re-answer loss without replacing the key or extending the deadline. */
+        l->port->send(l->port->ctx, SL2_BCAST_MAC, &resp, sizeof resp);
+        memset(lmk, 0, sizeof lmk);
+        return;
+    }
+    memcpy(l->cand_eph_pub, req.eph_pub, 32);
     memcpy(l->cand_mac, req.src_mac, 6);
     memcpy(l->cand_lmk, lmk, 16);
     memcpy(l->cand_id_pub, req.id_pub, 32);
     /* Install (or re-key) the candidate as an encrypted peer so its
-     * confirming encrypted PROBE can reach us at all. A failed install is
+     * authenticated PAIR_CONFIRM can reach us at all. A failed install is
      * fatal to the handshake and must be LOUD — the dial would otherwise
      * probe into a silent decrypt-drop for 6 s and report a bare timeout. */
     l->port->peer_del(l->port->ctx, l->cand_mac);
@@ -302,11 +315,12 @@ static void on_pair_req(sl2_link_t *l, const uint8_t *data, int len) {
     memset(lmk, 0, sizeof lmk);
 }
 
-/* First encrypted unicast from the candidate proves both ends derived the
- * same LMK (the radio drops mismatched CCMP frames). Commit the bond. */
+/* Called only after an explicit proof of the candidate LMK. */
 static void pair_commit(sl2_link_t *l) {
     sl2_dial_rt_t *d = dial_by_mac(l, l->cand_mac);
     sl2_dial_bond_t candidate = {0};
+    /* Every accepted handshake is v5: no legacy replay grace for a new bond. */
+    candidate.flags = SL2_BOND_F_EPOCH;
     memcpy(candidate.mac, l->cand_mac, 6);
     memcpy(candidate.lmk, l->cand_lmk, 16);
     memcpy(candidate.id_pub, l->cand_id_pub, 32);
@@ -369,13 +383,28 @@ void sl2_link_on_recv(sl2_link_t *l, const uint8_t src[6], const uint8_t dst[6],
     /* Everything else: bonded unicast only. */
     if (!sl2_mac_eq(dst, l->own_mac)) return;
 
-    /* Pairing confirmation: any unicast that decrypted from the candidate. */
-    if (l->pair == SL2_PAIR_CONFIRM && sl2_mac_eq(src, l->cand_mac)) {
-        pair_commit(l);
-        /* A failed re-pair restored the old key; do not interpret the
-         * candidate's confirming payload as traffic from that old bond. */
-        if (strcmp(l->pair_result, "paired") != 0) return;
+    /* A frame may have decrypted under the old key before this queue drain.
+     * Only an explicit candidate-key proof can cross the rekey boundary. */
+    if (type == SL2_PKT_PAIR_CONFIRM) {
+        sl2_dial_rt_t *bonded = dial_by_mac(l, src);
+        bool candidate = l->pair == SL2_PAIR_CONFIRM && sl2_mac_eq(src, l->cand_mac);
+        if (!candidate && !bonded) return;
+        const uint8_t *key = candidate ? l->cand_lmk : bonded->bond.lmk;
+        struct sl2_pair_auth_pkt proof, ack;
+        sl2_pair_auth_make(&proof, SL2_PKT_PAIR_CONFIRM, key, src, l->own_mac);
+        if (!sl2_pair_auth_matches(data, len, &proof)) return;
+        sl2_pair_auth_make(&ack, SL2_PKT_PAIR_ACK, key, src, l->own_mac);
+        if (candidate) {
+            pair_commit(l);
+            if (strcmp(l->pair_result, "paired") != 0) return;
+            bonded = dial_by_mac(l, src);
+        }
+        /* A lost ACK can be recovered by a repeated proof after commit. */
+        bonded->last_probe_ms = l->port->now_ms(l->port->ctx);
+        l->port->send(l->port->ctx, src, &ack, sizeof ack);
+        return;
     }
+    if (l->pair == SL2_PAIR_CONFIRM && sl2_mac_eq(src, l->cand_mac)) return;
 
     sl2_dial_rt_t *d = dial_by_mac(l, src);
     if (!d) return;

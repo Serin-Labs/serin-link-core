@@ -14,9 +14,9 @@ set -euo pipefail
 DST="$(realpath "${1:?usage: tools/sync_vendor.sh <dst-dir>}")"
 [ -d "$DST" ] || { echo "ERROR: $DST is not a directory" >&2; exit 1; }
 cd "$(dirname "$0")/.."
-for h in sl2_proto.h sl2_crypto.h sl2_sha256.h sl2_port.h sl2_bond.h sl2_rxq.h sl2_link.h sl2_info.h; do
+for h in sl2_pair_auth.h sl2_proto.h sl2_crypto.h sl2_sha256.h sl2_port.h sl2_bond.h sl2_rxq.h sl2_link.h sl2_info.h; do
     cp "include/serin_link/$h" "$DST/"
 done
-sed 's|#include "serin_link/sl2_link.h"|#include "sl2_link.h"|' \
+sed 's|#include "serin_link/|#include "|' \
     src/sl2_link.c > "$DST/sl2_link.c"
 echo "synced sl2 core -> $DST"

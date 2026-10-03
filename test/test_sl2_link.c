@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "serin_link/sl2_link.h"
+#include "serin_link/sl2_pair_auth.h"
 
 /* ── fake port ────────────────────────────────────────────────────────── */
 
@@ -306,16 +307,13 @@ static void dial_probe(sl2_link_t *l, const fdial_t *d, uint8_t want) {
     sl2_link_on_recv(l, d->mac, F.own, (const uint8_t *)&p, (int)sizeof p);
 }
 
-/* run the full pairing handshake against the core; asserts success */
-static void pair_dial(sl2_link_t *l, fdial_t *d) {
-    int sends_before = F.n_sent;
-    sl2_link_pair_start(l, 60000);
-    assert(sl2_link_pairing(l));
+static void dial_confirm(sl2_link_t *l, const fdial_t *d) {
+    struct sl2_pair_auth_pkt p;
+    sl2_pair_auth_make(&p, SL2_PKT_PAIR_CONFIRM, d->lmk, d->mac, F.own);
+    sl2_link_on_recv(l, d->mac, F.own, (const uint8_t *)&p, sizeof p);
+}
 
-    struct sl2_pair_req_pkt req;
-    dial_req(d, &req);
-    sl2_link_on_recv(l, d->mac, BCAST, (const uint8_t *)&req, (int)sizeof req);
-
+static void dial_accept_pair_response(fdial_t *d, int sends_before) {
     int ri = last_send_of(SL2_PKT_PAIR_RESP);
     assert(ri >= sends_before);
     struct sl2_pair_resp_pkt resp;
@@ -333,10 +331,33 @@ static void pair_dial(sl2_link_t *l, fdial_t *d) {
     fpeer_t *p = f_find_peer(d->mac);
     assert(p && p->encrypt && memcmp(p->lmk, d->lmk, 16) == 0);
 
-    /* confirming encrypted probe commits the bond */
-    dial_probe(l, d, 0);
+}
+
+/* run the full pairing handshake against the core; asserts success */
+static void pair_dial(sl2_link_t *l, fdial_t *d) {
+    int sends_before = F.n_sent;
+    sl2_link_pair_start(l, 60000);
+    assert(sl2_link_pairing(l));
+
+    struct sl2_pair_req_pkt req;
+    dial_req(d, &req);
+    sl2_link_on_recv(l, d->mac, BCAST, (const uint8_t *)&req, (int)sizeof req);
+
+    dial_accept_pair_response(d, sends_before);
+
+    /* Only the candidate-key proof commits the bond. */
+    dial_confirm(l, d);
     assert(!sl2_link_pairing(l));
     assert(strcmp(sl2_link_pair_result(l), "paired") == 0);
+}
+
+/* Explicitly model a bond saved by old firmware, rather than weakening new pairing. */
+static void legacy_single_bond(sl2_link_t *l) {
+    assert(l->n_dials == 1);
+    l->dial[0].bond.flags = 0;
+    uint8_t blob[SL2_BONDS_BLOB_MAX];
+    size_t len = sl2_bonds_encode(&l->dial[0].bond, 1, blob, sizeof blob);
+    assert(f_kv_set(NULL, SL2_KV_BONDS, blob, len));
 }
 
 /* ── tests ────────────────────────────────────────────────────────────── */
@@ -358,6 +379,111 @@ static void fresh(sl2_link_t *l) {
     F.now = 1000;
     sl2_link_init(l, &FPORT, &FCRYPTO, &FHVAC);
     assert(sl2_link_start(l));
+}
+
+static void test_old_queued_probe_cannot_confirm(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xD8);
+    pair_dial(&l, &d);
+    uint8_t old_lmk[16];
+    memcpy(old_lmk, d.lmk, sizeof old_lmk);
+    /* Replay the signed request, followed by a PROBE decrypted with the old
+     * LMK before the request was processed by the controller's RX queue. */
+    struct sl2_pair_req_pkt req;
+    dial_req(&d, &req);
+    sl2_link_pair_start(&l, 60000);
+    sl2_link_on_recv(&l, d.mac, BCAST, (const uint8_t *)&req, sizeof req);
+    dial_probe(&l, &d, 0);
+    assert(l.pair == SL2_PAIR_CONFIRM);
+    assert(memcmp(l.dial[0].bond.lmk, old_lmk, sizeof old_lmk) == 0);
+    sl2_link_pair_cancel(&l);
+    assert(memcmp(f_find_peer(d.mac)->lmk, old_lmk, sizeof old_lmk) == 0);
+    printf("queued old-key probe cannot confirm ok\n");
+}
+
+static void test_pair_authentication_and_retries(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xD9);
+    sl2_link_pair_start(&l, 60000);
+    struct sl2_pair_req_pkt req;
+    dial_req(&d, &req);
+    sl2_link_on_recv(&l, d.mac, BCAST, (const uint8_t *)&req, sizeof req);
+    uint32_t deadline = l.confirm_deadline_ms;
+    F.now += 100;
+    sl2_link_on_recv(&l, d.mac, BCAST, (const uint8_t *)&req, sizeof req);
+    assert(l.confirm_deadline_ms == deadline);
+    assert(count_sends_of(SL2_PKT_PAIR_RESP, NULL) == 2);
+    struct sl2_pair_resp_pkt resp;
+    int ri = last_send_of(SL2_PKT_PAIR_RESP);
+    sl2_decode_pkt(&resp, sizeof resp, F.sent[ri].data, F.sent[ri].len);
+    assert(sl2_derive_lmk(&FCRYPTO, d.eph_priv, resp.eph_pub,
+                        d.eph_pub, resp.eph_pub, d.lmk) == 0);
+    /* Another valid request from this MAC must not replace the candidate. */
+    t_xkp(NULL, d.eph_priv, d.eph_pub);
+    dial_req(&d, &req);
+    sl2_link_on_recv(&l, d.mac, BCAST, (const uint8_t *)&req, sizeof req);
+    assert(count_sends_of(SL2_PKT_PAIR_RESP, NULL) == 2);
+    assert(memcmp(l.cand_lmk, d.lmk, 16) == 0);
+
+    struct sl2_pair_auth_pkt proof;
+    sl2_pair_auth_make(&proof, SL2_PKT_PAIR_CONFIRM, d.lmk, d.mac, F.own);
+    for (int len = 2; len < SL2_PAIR_AUTH_MIN_LEN; len++) {
+        sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&proof, len);
+        assert(l.pair == SL2_PAIR_CONFIRM && l.n_dials == 0);
+    }
+    proof.tag[0] ^= 1;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&proof, sizeof proof);
+    assert(l.pair == SL2_PAIR_CONFIRM && l.n_dials == 0);
+    proof.tag[0] ^= 1;
+    proof.version = 4;
+    sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&proof, sizeof proof);
+    assert(l.pair == SL2_PAIR_CONFIRM && l.n_dials == 0);
+    proof.version = SL2_PAIR_AUTH_MIN_VER;
+    sl2_link_on_recv(&l, d.mac, BCAST, (const uint8_t *)&proof, sizeof proof);
+    assert(l.pair == SL2_PAIR_CONFIRM && l.n_dials == 0);
+    dial_confirm(&l, &d);
+    assert(l.pair == SL2_PAIR_OFF && l.n_dials == 1);
+    struct sl2_pair_auth_pkt ack;
+    sl2_pair_auth_make(&ack, SL2_PKT_PAIR_ACK, d.lmk, d.mac, F.own);
+    int ai = last_send_of(SL2_PKT_PAIR_ACK);
+    assert(ai >= 0 && sl2_pair_auth_matches(F.sent[ai].data, F.sent[ai].len, &ack));
+    /* Lost ACK: repeated proof after commit gets the same authenticated ACK. */
+    dial_confirm(&l, &d);
+    assert(count_sends_of(SL2_PKT_PAIR_ACK, d.mac) == 2 && l.n_dials == 1);
+    /* Replay the old proof into the next window's different candidate key. */
+    sl2_link_pair_start(&l, 60000);
+    sl2_link_on_recv(&l, d.mac, BCAST, (const uint8_t *)&req, sizeof req);
+    dial_confirm(&l, &d);
+    assert(l.pair == SL2_PAIR_CONFIRM);
+    assert(count_sends_of(SL2_PKT_PAIR_ACK, d.mac) == 2);
+    F.now = l.confirm_deadline_ms + 1;
+    sl2_link_loop(&l);
+    assert(l.pair == SL2_PAIR_OFF);
+    assert(memcmp(f_find_peer(d.mac)->lmk, d.lmk, 16) == 0);
+    printf("pair proof validation, retries and replay ok\n");
+}
+
+static void test_legacy_pair_request_is_refused(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xDA);
+    sl2_link_pair_start(&l, 60000);
+    struct sl2_pair_req_pkt req;
+    dial_req(&d, &req);
+    req.version = 4;
+    uint8_t tr[SL2_REQ_TRANSCRIPT_LEN];
+    sl2_pair_req_transcript(&req, tr);
+    t_sign(NULL, d.id_priv, tr, sizeof tr, req.sig);
+    sl2_link_on_recv(&l, d.mac, BCAST, (const uint8_t *)&req, sizeof req);
+    assert(l.pair == SL2_PAIR_WINDOW && l.n_dials == 0);
+    assert(last_send_of(SL2_PKT_PAIR_RESP) < 0);
+    sl2_link_pair_cancel(&l);
+    printf("legacy new pairing refused ok\n");
 }
 
 static void test_room_source_catalog_and_set(void) {
@@ -491,6 +617,7 @@ static void test_pair_and_reboot(void) {
     dial_make(&d, 0xD1);
     pair_dial(&l, &d);
     assert(sl2_link_dial_count(&l) == 1);
+    assert(l.dial[0].bond.flags & SL2_BOND_F_EPOCH);
 
     /* reboot: bond reloads from kv, encrypted peer reinstalled */
     memset(F.peers, 0, sizeof F.peers);
@@ -498,6 +625,7 @@ static void test_pair_and_reboot(void) {
     sl2_link_init(&l2, &FPORT, &FCRYPTO, &FHVAC);
     assert(sl2_link_start(&l2));
     assert(sl2_link_dial_count(&l2) == 1);
+    assert(l2.dial[0].bond.flags & SL2_BOND_F_EPOCH);
     fpeer_t *p = f_find_peer(d.mac);
     assert(p && p->encrypt && memcmp(p->lmk, d.lmk, 16) == 0);
     printf("pair + reboot ok\n");
@@ -583,13 +711,13 @@ static void test_pair_start_mid_handshake_is_harmless(void) {
     assert(memcmp(l.eph_pub, eph_before, 32) == 0);   /* eph NOT regenerated */
     assert(strcmp(sl2_link_pair_result(&l), "confirming") == 0);
 
-    /* dial's confirming probe still commits */
+    /* dial's authenticated confirmation still commits */
     int ri = last_send_of(SL2_PKT_PAIR_RESP);
     struct sl2_pair_resp_pkt resp;
     sl2_decode_pkt(&resp, sizeof resp, F.sent[ri].data, (int)F.sent[ri].len);
     assert(sl2_derive_lmk(&FCRYPTO, d.eph_priv, resp.eph_pub,
                           d.eph_pub, resp.eph_pub, d.lmk) == 0);
-    dial_probe(&l, &d, 0);
+    dial_confirm(&l, &d);
     assert(strcmp(sl2_link_pair_result(&l), "paired") == 0);
     assert(sl2_link_dial_count(&l) == 1);
     printf("pair_start mid-handshake ok\n");
@@ -784,6 +912,7 @@ static void test_cmd_apply_and_echo_all(void) {
     c.mask = SL2_CM_TEMP | SL2_CM_MODE;
     c.mode = SL2_MODE_COOL;
     c.set_dc = 245;
+    c.epoch = l.epoch;
     sl2_link_on_recv(&l, d1.mac, F.own, (const uint8_t *)&c, (int)sizeof c);
 
     assert(n_applies == 1);
@@ -895,7 +1024,7 @@ static void test_wifi_setup(void) {
     pair_dial(&l, &d);
     dial_probe(&l, &d, 0);
     n_wifi_setups = 0;
-    struct sl2_wifi_setup_pkt r = { SL2_PKT_WIFI_SETUP, SL2_PROTO_VERSION, 0 };
+    struct sl2_wifi_setup_pkt r = { SL2_PKT_WIFI_SETUP, SL2_PROTO_VERSION, l.epoch };
     sl2_link_on_recv(&l, d.mac, F.own, (const uint8_t *)&r, (int)sizeof r);
     sl2_link_loop(&l);
     assert(n_wifi_setups == 1);              /* hook fired */
@@ -926,6 +1055,7 @@ static void test_wifi_setup(void) {
     dial_make(&d2, 0xDD);
     pair_dial(&l2, &d2);
     dial_probe(&l2, &d2, 0);
+    r.epoch = l2.epoch;
     sl2_link_on_recv(&l2, d2.mac, F.own, (const uint8_t *)&r, (int)sizeof r);
     sl2_link_loop(&l2);
     printf("wifi setup ok\n");
@@ -996,6 +1126,7 @@ static void test_epoch_latch_and_replay(void) {
     fdial_t d;
     dial_make(&d, 0xE1);
     pair_dial(&l, &d);
+    legacy_single_bond(&l);
     F.n_sent = 0;
     dial_probe(&l, &d, 0);
     sl2_link_loop(&l);
@@ -1058,6 +1189,7 @@ static void test_epoch_wifi_setup(void) {
     fdial_t d;
     dial_make(&d, 0xE2);
     pair_dial(&l, &d);
+    legacy_single_bond(&l);
     F.n_sent = 0;
     dial_probe(&l, &d, 0);
     sl2_link_loop(&l);
@@ -1093,6 +1225,7 @@ static void test_epoch_rand_fail_fails_open(void) {
     fdial_t d;
     dial_make(&d, 0xE4);
     pair_dial(&l, &d);
+    legacy_single_bond(&l);
 
     sl2_crypto_t bad = FCRYPTO;
     bad.rand_bytes = t_rand_fail;
@@ -1792,11 +1925,13 @@ static void storage_reboot(sl2_link_t *l) {
 }
 
 static void storage_begin_pair(sl2_link_t *l, fdial_t *d) {
+    int sends_before = F.n_sent;
     sl2_link_pair_start(l, 60000);
     struct sl2_pair_req_pkt req;
     dial_req(d, &req);
     sl2_link_on_recv(l, d->mac, BCAST, (const uint8_t *)&req, sizeof req);
     assert(l->pair == SL2_PAIR_CONFIRM);
+    dial_accept_pair_response(d, sends_before);
 }
 
 static void test_pair_storage_failure(void) {
@@ -1810,10 +1945,12 @@ static void test_pair_storage_failure(void) {
         sl2_dial_rt_t original = l.dial[0];
         dial_make(&candidate, 0xD2);
         storage_begin_pair(&l, &candidate);
+        int ack_before = count_sends_of(SL2_PKT_PAIR_ACK, NULL);
         F.fail_bond_writes = true;
         F.now += 100;
-        dial_probe(&l, &candidate, 0);
+        dial_confirm(&l, &candidate);
         assert(strcmp(sl2_link_pair_result(&l), "storage-error") == 0);
+        assert(count_sends_of(SL2_PKT_PAIR_ACK, NULL) == ack_before);
         assert(!sl2_link_pairing(&l));
         assert(F.storage_errors == 1);
         assert(l.n_dials == keep_existing);
@@ -1848,10 +1985,12 @@ static void test_repair_storage_failure(void) {
     t_xkp(NULL, d.eph_priv, d.eph_pub);
     storage_begin_pair(&l, &d);
     assert(memcmp(f_find_peer(d.mac)->lmk, original[0].bond.lmk, 16) != 0);
+    int ack_before = count_sends_of(SL2_PKT_PAIR_ACK, NULL);
     F.fail_bond_writes = true;
     F.now += 100;
-    dial_probe(&l, &d, 0);
+    dial_confirm(&l, &d);
     assert(strcmp(sl2_link_pair_result(&l), "storage-error") == 0);
+    assert(count_sends_of(SL2_PKT_PAIR_ACK, NULL) == ack_before);
     assert(l.n_dials == 2);
     assert(memcmp(l.dial, original, sizeof original) == 0);
     assert(memcmp(f_find_peer(d.mac)->lmk, original[0].bond.lmk, 16) == 0);
@@ -2096,6 +2235,9 @@ int main(int argc, char **argv) {
     (void)probe_size_check;
     test_room_packets_legacy_upgrade();
     test_room_packets_replay_freshness();
+    test_pair_authentication_and_retries();
+    test_legacy_pair_request_is_refused();
+    test_old_queued_probe_cannot_confirm();
     test_hvac_link_infer();
     test_identity_persists();
     test_pair_and_reboot();

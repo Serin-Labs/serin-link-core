@@ -178,6 +178,7 @@ typedef struct sl2_link {
     uint8_t  cand_mac[6];
     uint8_t  cand_lmk[16];
     uint8_t  cand_id_pub[32];
+    uint8_t  cand_eph_pub[32]; /* pin repeat requests to the active handshake */
     const char *pair_result;
     uint8_t  caps_seq;
     uint16_t epoch;           /* random nonzero per boot; 0 = rand failed

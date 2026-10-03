@@ -46,7 +46,10 @@ enum sl2_pkt_type {
     SL2_PKT_ROOM_CATALOG_RESP = 14,
     SL2_PKT_ROOM_SOURCE_SET = 15,
     SL2_PKT_ROOM_SOURCE_ACK = 16,
-    /* 17..127 reserved for core growth; 128..255 experiments, never shipped */
+    /* 17/18 are WIFI_CANCEL/WIFI_CANCEL_ACK (already shipped by the dial). */
+    SL2_PKT_PAIR_CONFIRM = 19, /* dial -> ctrl, encrypted, LMK proof */
+    SL2_PKT_PAIR_ACK = 20,     /* ctrl -> dial, encrypted, LMK proof */
+    /* 21..127 reserved for core growth; 128..255 experiments, never shipped */
 };
 
 /* ── semantic HVAC model ──────────────────────────────────────────────── */
@@ -245,6 +248,16 @@ struct __attribute__((packed)) sl2_pair_resp_pkt {
                              * a doctored channel fails verification. */
 };
 #define SL2_PAIR_MIN_LEN 136   /* through sig[]; channel may be absent */
+
+/* New/re-pairing requires v5 on both peers; old bonds still carry traffic.
+ * Ordinary decrypted frames cannot confirm: they may predate a queued rekey. */
+#define SL2_PAIR_AUTH_MIN_VER 5
+struct __attribute__((packed)) sl2_pair_auth_pkt {
+    uint8_t type;           /* SL2_PKT_PAIR_CONFIRM or SL2_PKT_PAIR_ACK */
+    uint8_t version;
+    uint8_t tag[32];        /* HMAC-SHA256(candidate LMK, domain + roles/MACs) */
+};
+#define SL2_PAIR_AUTH_MIN_LEN 34
 
 /* Signed transcripts, domain-separated. Layouts are wire-frozen. */
 #define SL2_REQ_TRANSCRIPT_LEN  (8 + 2 + 6 + 32 + 32)            /* 80 */
@@ -673,6 +686,7 @@ SL2_STATIC_ASSERT(SL2_STATE_MIN_LEN <= (int)sizeof(struct sl2_state_pkt), state_
 SL2_STATIC_ASSERT(SL2_CMD_MIN_LEN   <= (int)sizeof(struct sl2_cmd_pkt),   cmd_minlen);
 SL2_STATIC_ASSERT(SL2_PROBE_MIN_LEN <= (int)sizeof(struct sl2_probe_pkt), probe_minlen);
 SL2_STATIC_ASSERT(SL2_CAPS_MIN_LEN  <= (int)sizeof(struct sl2_caps_pkt),  caps_minlen);
+SL2_STATIC_ASSERT(sizeof(struct sl2_pair_auth_pkt) == 34, pair_auth_size);
 SL2_STATIC_ASSERT(SL2_PAIR_MIN_LEN  <= (int)sizeof(struct sl2_pair_req_pkt), pair_minlen);
 SL2_STATIC_ASSERT(sizeof(struct sl2_dial_info_pkt) + 2 + 112 <= 250,
                   dial_info_cert_fits);   /* ESP-NOW payload ceiling */
