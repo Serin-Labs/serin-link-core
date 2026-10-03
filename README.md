@@ -203,14 +203,11 @@ consequences you can watch for:
 Selecting an empty slot is ignored, logged, and the dropdown snaps back to
 what is actually in force.
 
-Two consequences worth knowing before you pin:
-
-- **A pinned Serin Link that goes offline takes the room source down with it** —
-  the source reports stale, then unavailable. That is deliberate: silently
-  substituting a different room's temperature is the bug being fixed. If you
-  want failover instead of correctness here, don't pin.
-- **The MAC follows the physical unit**, so re-pairing the same Serin Link keeps
-  the key working; swapping in a different one means editing it.
+A selected Link that stops reporting becomes stale after 90 s and remains
+selected until you choose another source or forget it. The component does not
+substitute a different room's reading. Re-pairing the same physical Link
+preserves its source identity; replacing it with another Link requires a new
+source selection.
 
 ### One temperature per Serin Link
 
