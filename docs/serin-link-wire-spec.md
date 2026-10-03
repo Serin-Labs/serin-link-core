@@ -1,6 +1,6 @@
 # Serin Link — wire specification
 
-**Status:** normative for `SL2_PROTO_VERSION 4`; matches
+**Status:** normative for `SL2_PROTO_VERSION 5`; matches
 `include/serin_link/sl2_proto.h` (the header is the byte-level ground truth —
 every packed struct there carries a `sizeof` static assert). Wire version 1
 was a pre-release draft that never shipped; version 2 was the first released
@@ -21,6 +21,11 @@ floor (`SL2_ROOM_CATALOG_MIN_VER`, 4) on the same principle — nothing below v4
 can legitimately send them, and if a v4 field is ever rescaled in place the
 floor is already the constant that gate keys off.
 
+Version 5 requires key-specific pairing confirmation (§3) and adds boot-epoch
+tails to room-source selections and sensor reports (§3b, §10d–e). New pairing
+requires both peers to support v5. Existing bonds remain usable for ordinary
+controls; protected room traffic requires v5 Link firmware.
+
 Design goals, in priority order:
 
 1. **Firmware-agnostic and heat-pump-agnostic.** No vendor bytes on the wire;
@@ -40,7 +45,8 @@ Design goals, in priority order:
 ## 1. Transport
 
 ESP-NOW on `WIFI_IF_STA`, ≤250 B payloads, little-endian packed structs (encode ==
-memcpy). Pairing packets are broadcast plaintext; all bonded traffic is unicast
+memcpy). `PAIR_REQ`/`PAIR_RESP` are broadcast plaintext; key confirmations
+and all bonded traffic are unicast
 with `esp_now_peer_info_t.encrypt = true` and the per-bond LMK. `esp_now_set_pmk()`
 is called with a **documented public constant** `"serin-link-open"` padded to 16 B
 — it only wraps LMKs locally (per Espressif docs it never goes on air and does not
@@ -62,7 +68,7 @@ uint8_t version;   /* SL2_PROTO_VERSION */
 ```
 
 ```c
-#define SL2_PROTO_VERSION    4
+#define SL2_PROTO_VERSION    5
 #define SL2_PROTO_MIN_COMPAT 1
 ```
 
@@ -97,8 +103,10 @@ ignored, never errors.
 | 16 | `ROOM_SOURCE_ACK` | ctrl→dial | yes | Confirm or reject a selection |
 | 17 | `WIFI_CANCEL` | dial→ctrl | yes | Cancel one Wi-Fi change session |
 | 18 | `WIFI_CANCEL_ACK` | ctrl→dial | yes | Session-correlated cancellation status |
+| 19 | `PAIR_CONFIRM` | dial→ctrl | yes | Prove the candidate LMK |
+| 20 | `PAIR_ACK` | ctrl→dial | yes | Confirm committed candidate LMK |
 
-Types 19–127 are reserved for core growth; 128–255 are reserved for experiments
+Types 21–127 are reserved for core growth; 128–255 are reserved for experiments
 (never shipped semantics).
 
 ## 3. Pairing: signed X25519 + TOFU pinning
@@ -164,21 +172,46 @@ Flow:
 2. Controller (pairing window open, button-gated 60 s): verify `sig` against the
    packet's own `id_pub` (proof of possession). **Pinning check:** if a bond for
    this dial MAC exists with a different pinned `id_pub`, refuse and log. Fresh
-   ephemeral, derive LMK, broadcast `PAIR_RESP`. Reply to every REQ heard.
+   ephemeral, derive LMK, broadcast `PAIR_RESP`. During confirmation, repeat
+   only the same candidate's request (same MAC, identity and ephemeral key);
+   re-send the response without extending the confirmation deadline.
 3. Dial: verify `sig` (proof of possession) and the `dial_eph_pub` binding.
    **Pinning check:** same rule against its bond table. First valid RESP wins.
 4. Dial derives LMK, installs the encrypted peer, retunes to the RESP's signed
-   `channel` (falling back to a MAC-ACK channel hunt if probes go unACKed),
-   sends PROBEs until the first STATE confirms the encrypted path, then
-   persists the bond and reboots into the bonded link.
+   `channel` (falling back to a MAC-ACK channel hunt), and sends `PAIR_CONFIRM`.
+5. Controller verifies the candidate-key proof, persists the bond, and sends
+   `PAIR_ACK`. A storage failure MUST NOT send an ACK. Repeated confirmations
+   with the committed key receive the same ACK, so ACK loss is recoverable.
+6. Dial verifies `PAIR_ACK` against its candidate key before persisting its bond
+   and rebooting into the bonded link. Cancellation or confirmation timeout
+   restores the previous local peer/bond if present.
+
+Protocol v5 adds two 34-byte encrypted unicast packets: `PAIR_CONFIRM` (type
+19, dial to controller) and `PAIR_ACK` (type 20, controller to dial). Each is
+`u8 type; u8 version; u8 tag[32]`. Types 17 and 18 identify the
+Wi-Fi cancellation exchange. The authentication transcript is exactly
+28 bytes: the 14-byte string `"SLv5-pair-auth"` (without NUL), packet type, authentication
+version (5), dial STA MAC (6 bytes), controller STA MAC (6 bytes). `tag` is
+HMAC-SHA256 keyed by the candidate 16-byte LMK. LMK derivation already binds
+both ephemeral keys; direction and ordered MACs prevent reflected proofs.
+Proofs require the complete 34-byte prefix and authentication version 5.
+Trailing bytes are ignored and have no authenticated semantics.
+
+New pairing and re-pairing require request/response version at least 5 on both
+peers. There is no legacy PROBE/STATE confirmation fallback: update both peers
+before pairing. Existing bonds still carry normal traffic across versions.
+Neither an ordinary unicast nor a STATE proves a candidate key: it may have
+been decrypted under the previous key before the software processes a queued
+pairing request. A valid explicit proof is required on both sides.
 
 Threat model, stated honestly: first contact during the open pairing window is
 TOFU — an attacker present in radio range at that moment can be pinned instead of
 the real device (Zigbee permit-join posture; window is button-gated and short).
 After first bond, pinning means re-pairs/replacements with a different key are
 refused until the user explicitly forgets the zone. Replayed `PAIR_REQ`s are
-harmless: the replayer lacks the ephemeral private key and can never derive the
-LMK. Replay of *data-plane* ciphertexts (CMD/WIFI_SETUP captured and re-sent
+unable to replace a persisted bond: the replayer lacks the ephemeral private
+key and cannot produce the candidate LMK proof. They may temporarily interrupt
+traffic during the bounded confirmation window; timeout restores the old key. Replay of *data-plane* ciphertexts (CMD/WIFI_SETUP captured and re-sent
 after a controller reboot) is a real gap in the raw transport — closed by the
 epoch echo, section 3b.
 
@@ -215,20 +248,41 @@ The guard:
 
 - The controller draws a random nonzero u16 **epoch** each boot and carries it
   in every STATE. `0` is reserved for "no epoch support" (also the honest
-  value if the RNG fails at boot — the guard turns off rather than locking
-  dials out).
+  value if the RNG fails at boot). The room-source packet family fails
+  closed when the controller epoch is zero.
 - The dial stores the latest epoch per zone and **echoes it in every CMD and
-  WIFI_SETUP**. A dial must not send either packet before it holds a fresh
-  STATE (the dial's sync window is already read-only, so this falls out).
+  WIFI_SETUP**, and v5 also echoes it in `ROOM_SOURCE_SET` and `DIAL_SENSOR`.
+  A dial must hold a current STATE before sending v5 room data. The epoch is
+  appended after each historical prefix; see §10d and §10e.
 - Enforcement **ratchets on per dial**: the first correct echo sets a
   persisted bond flag (`SL2_BOND_F_EPOCH`); from then on — across reboots —
   a zero or stale epoch from that dial is dropped. Until the ratchet is set,
   zero epochs are accepted so pre-epoch dial firmware keeps working (and the
   replay window honestly remains until the dial upgrades and sends its first
-  echoed packet). Re-pairing resets the bond including the flag.
+  echoed packet). New v5 pairing and re-pairing save the flag immediately: no
+  initial legacy grace is granted. If saving a legacy bond's first correct
+  echo fails, the packet is rejected and the next correct echo retries the save.
+  The observed echo still prevents a downgrade during that boot.
 - On an epoch-mismatch drop the controller marks STATE pending for that dial,
   so a live dial that missed the reboot resyncs within the 250 ms floor and
   retries with the fresh value. A dropped packet does NOT count as liveness.
+
+For the room-source family, v5 packets require the complete nonzero current
+boot epoch even before the bond ratchets. A protected bond rejects old-version,
+missing, zero, partial, and stale echoes. This includes legacy
+`DIAL_SENSOR.want_src` writes and reading-only reports: rejected frames do not
+refresh sensor values, screen status, or liveness. Unlatched v3/v4 bonds retain
+their historical behavior and its replay exposure. Thus a controller upgrade
+can stop room readings, screen reports, and source changes from an old dial
+whose bond was already epoch-latched by CMD or WIFI_SETUP. Upgrade that dial to
+v5; downgrading cannot remove the protection.
+
+A queued room-source choice keeps the epoch captured at the user's action.
+The dial drops it if STATE reports a different epoch before transmission; it
+must not relabel an old request with the new epoch. The UI uses confirmed
+selection and has no pending choice to retry, so the user can select again
+after resync. Live sensor reports take the epoch at transmission and reset
+their keepalive timer on an epoch change, promptly resuming fresh readings.
 
 Scope, stated honestly: the epoch defends **cross-boot** replay. Same-boot
 replay is left to the radio's PN window plus the commands' idempotent,
@@ -252,6 +306,26 @@ dials + the controller's other peers; 4 leaves headroom.
 The dial side is unchanged — a dial still bonds up to 7 zones (controllers), and
 a controller with several dials just sees several independent bonds. No wire
 change; this is controller storage + fan-out policy.
+
+Controller bond mutations must save the complete proposed bond table before
+reporting success. A failed save leaves the previous RAM table intact. Failed
+first pairing removes the candidate radio peer; failed re-pairing restores the
+previous peer/key, reports `storage-error`, and sends no success confirmation.
+If the radio also refuses the restoration, the old bond remains in RAM/storage
+and the separate radio-restore error is logged; radio access awaits recovery.
+Single-dial and forget-all operations return failure without removing peers or
+compacting the table. Successful forgetting still compacts the table, including
+runtime diagnostics, only after the durable write succeeds.
+
+For a legacy bond's first correct epoch echo, enforcement starts immediately in
+RAM, but the triggering mutation is dropped if the latch cannot be saved. The
+next correct echo retries that save; the controller logs durable protection only
+after success. A reboot before a successful retry reloads the original unlatched
+legacy bond, so the legacy replay grace window remains. These rollback guarantees
+require failed storage writes to preserve the previous value. Physical flash
+failures can make the durable outcome uncertain; an NVS write/cleanup failure
+must be surfaced as an error rather than silently treated as a successful pair
+or forget operation.
 
 Dial bond record (NVS, `fmt=3`):
 
@@ -788,6 +862,7 @@ struct sl2_dial_sensor_pkt {
     uint16_t hum_cc;         /* centi-%, 0..10000; SL2_HUM_CC_NA = no reading */
     uint8_t  want_src;       /* enum sl2_room_src; NOEDIT = reading only */
     uint8_t  reserved[1];    /* senders zero-fill, receivers ignore */
+    uint16_t epoch;          /* v5 additive tail: current STATE.epoch */
 };
 #define SL2_DIAL_SENSOR_MIN_LEN 7   /* through hum_cc; want_src may be absent */
 #define SL2_DIAL_SENSOR_MIN_VER 3   /* first version with centi fields (below) */
@@ -815,9 +890,13 @@ enum sl2_room_status {
 };
 ```
 
-`want_src` doubles as the edit channel so streaming and editing share one
-message type: it is idempotent, and the dial re-sends until the controller's
-INFO reflects the change, exactly as it treats CMD.
+The v5 packet is 11 bytes, preserving all nine historical bytes. Its epoch
+is at offset 9. The minimum decode length remains 7, but v5 freshness requires
+both epoch bytes. On a protected bond, a reading-only packet must also carry
+a valid epoch; zero-filled short frames are rejected before any state update.
+
+`want_src` is the legacy edit channel. Its writes follow the same epoch rules
+as catalog selection, including rejection of old captures on protected bonds.
 
 **Units.** `temp_cc` / `hum_cc` are centi-C / centi-% (0.01 resolution;
 `hum_cc` ranges 0..10000) — *not* the deci-C / whole-percent used everywhere
@@ -830,7 +909,7 @@ own display, where 0.1 °C already exceeds what the face shows.
 `int16_t temp_dc` (deci-C) at the same offset `temp_cc` now occupies, and a
 narrower `uint8_t hum_pct` (whole-%) where `hum_cc` (centi-%, `uint16_t`) sits
 now — the wider `hum_cc` absorbed a `reserved` byte to keep the packet's
-total size at 9 B throughout, so `len >= SL2_DIAL_SENSOR_MIN_LEN` alone
+v2/v3 prefix size at 9 B, so `len >= SL2_DIAL_SENSOR_MIN_LEN` alone
 cannot tell old frames from new. A v2 sender's deci-C `247` (24.7 °C), decoded
 as v3 centi-C, reads as 2.47 °C; the reverse misread — a v3 centi-C value
 decoded as v2 deci-C — inflates a real reading 10x (24.7 °C reporting as
@@ -891,8 +970,14 @@ and replace their visible list only after the terminating page
 (`next_cursor == SL2_ROOM_CATALOG_DONE`, `0xFFFF`) arrives. A cursor past the
 end is answered with an empty terminating page, never dropped. A selection
 sends its request id, catalog revision, and source id in `ROOM_SOURCE_SET`.
-The controller always answers
-with `ROOM_SOURCE_ACK`, including the authoritative current selection and one
+Version 5 appends a `u16 epoch` at offset 16, making the packet 18 bytes while
+preserving the historical minimum length of 16. The catalog revision is stable
+across reboots and is not proof of freshness. Both epoch bytes must be present
+and echo the current nonzero STATE epoch. Rejected freshness checks produce
+no source ACK or mutation; they schedule STATE to help the dial resync.
+
+For an accepted freshness check, the controller answers with `ROOM_SOURCE_ACK`,
+including the authoritative current selection and one
 of `OK`, `BAD_SOURCE`, `STALE_CATALOG`, or `UNSUPPORTED`. A stale-catalog result
 causes the dial to refetch before retrying.
 

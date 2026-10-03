@@ -126,7 +126,12 @@ class SerinLinkComponent : public Component {
   const char *pair_result() const { return sl2_link_pair_result(&link_); }
   int dial_count() const { return sl2_link_dial_count(&link_); }
   bool any_dial_live() { return sl2_link_any_live(&link_); }
-  void forget_all_dials() { sl2_link_forget_all(&link_); }
+  bool forget_all_dials() {
+    if (!sl2_link_forget_all(&link_)) return false;
+    room_source_reconcile_();
+    refresh_room_source_select_();
+    return true;
+  }
 
   /* Per-dial management. The core's bond table is COMPACTED on forget
    * (sl2_link_forget_dial), so an index identifies a bond SLOT, not a dial:
@@ -135,10 +140,13 @@ class SerinLinkComponent : public Component {
   bool forget_dial_slot(int idx) {
     uint8_t mac[6];
     if (!sl2_link_dial_mac(&link_, idx, mac)) return false;
-    return sl2_link_forget_dial(&link_, mac);
+    return forget_dial_mac(mac);
   }
   bool forget_dial_mac(const uint8_t mac[6]) {
-    return sl2_link_forget_dial(&link_, mac);
+    if (!sl2_link_forget_dial(&link_, mac)) return false;
+    room_source_reconcile_();
+    refresh_room_source_select_();
+    return true;
   }
   int pair_seconds_left() { return sl2_link_pair_seconds_left(&link_); }
   /* Raw per-dial snapshot, so a YAML lambda can reach the fields the
@@ -248,6 +256,9 @@ class SerinLinkComponent : public Component {
    * as unknown rather than a frozen number) and latches until a fresh
    * reading arrives. */
   void publish_dial_(bool stale);
+  /* A source/MAC change ends the cached reading's ownership, including its
+   * publication history. Per-slot rows have independent caches. */
+  void reset_dial_reading_();
   bool link_sensor_cfg_{false};
   bool link_ota_credentials_{false};
   sensor::Sensor *dial_temp_sensor_{nullptr};
@@ -287,15 +298,15 @@ class SerinLinkComponent : public Component {
   void ext_state_(int idx, float v);
   /* on_room_temperature: fan-out. Every feed path goes through here. */
   void fire_room_temperature_(float t);
-  /* After a selection change: push the new source's last known value (or 0
-   * for Heat pump) so the heat pump does not wait for the next sample. */
+  /* After a selection change: push the external source's last known value,
+   * or 0 for Heat pump. A Link waits for its first fresh frame after reset. */
   void room_source_changed_();
   uint32_t room_catalog_revision_() const;
   bool room_source_slot_(uint64_t id, int *slot) const;
   bool room_catalog_entry_(int idx, struct sl2_room_source_entry *e) const;
   void room_source_apply_(uint64_t id, bool fire = true);
   void room_source_project_();
-  void room_source_reconcile_();
+  void room_source_reconcile_(bool fire = true);
   void refresh_room_source_select_();
   /* Read once at boot for the v3->v4 migration; never written any more. */
   ESPPreferenceObject primary_pref_;
@@ -457,7 +468,7 @@ class ForgetDialAction : public Action<Ts...>, public Parented<SerinLinkComponen
   void play(Ts... x) override {
     const bool ok = has_mac_ ? this->parent_->forget_dial_mac(mac_.data())
                              : this->parent_->forget_dial_slot(this->slot_.value(x...));
-    if (!ok) ESP_LOGW("serin_link", "forget_link: no such Serin Link");
+    if (!ok) ESP_LOGW("serin_link", "forget_link failed: link missing or bond storage unavailable");
   }
 
  protected:
@@ -468,7 +479,10 @@ class ForgetDialAction : public Action<Ts...>, public Parented<SerinLinkComponen
 template<typename... Ts>
 class ForgetAllDialsAction : public Action<Ts...>, public Parented<SerinLinkComponent> {
  public:
-  void play(Ts...) override { this->parent_->forget_all_dials(); }
+  void play(Ts...) override {
+    if (!this->parent_->forget_all_dials())
+      ESP_LOGW("serin_link", "forget_all_links failed: bond storage unavailable");
+  }
 };
 
 }  // namespace serin_link
