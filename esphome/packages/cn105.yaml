@@ -111,8 +111,6 @@ serin_link:
       name: "Serin Link Temperature"
     humidity:
       name: "Serin Link Humidity"
-  room_temperature_source:
-    name: "Room Temperature Source"
     # With max_links > 1, add `links:` (bare) in your device YAML's
     # serin_link: link_sensor: block for per-slot temperature/humidity rows —
     # every Link's reading in HA, not just the primary's. Not defaulted here:
@@ -122,6 +120,8 @@ serin_link:
     # the Serin Link is the selected room source — no guards needed here.
     on_room_temperature:
       - lambda: 'id(hvac).set_remote_temperature(x);'
+  room_temperature_source:
+    name: "Room Temperature Source"
 
 button:
   - platform: template
