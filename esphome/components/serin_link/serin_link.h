@@ -460,6 +460,7 @@ class SerinLinkComponent : public Component {
   uint8_t transport_attempts_{0};
   uint32_t last_transport_attempt_ms_{0};
   uint32_t last_transport_check_ms_{0};
+  uint32_t last_wifi_ps_check_ms_{0};
   uint32_t last_transport_diag_ms_{0};
   uint32_t rx_frames_{0};
   uint32_t tx_failures_{0};

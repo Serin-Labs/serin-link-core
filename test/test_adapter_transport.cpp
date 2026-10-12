@@ -223,6 +223,81 @@ static void reconnect_forces_power_save_off() {
   require(power_save == WIFI_PS_NONE, "connect event left Wi-Fi power save on");
 }
 
+static void connected_power_save_checked_once_per_second() {
+  Fixture f;
+  wifi_connected = true;
+  const int reads = ps_get_calls, writes = ps_calls;
+  tick(f.component, 999);
+  require(ps_get_calls == reads && ps_calls == writes, "power-save check ran before one second");
+  tick(f.component, 1);
+  require(ps_get_calls == reads + 1, "connected loop missed one-second power-save check");
+  require(ps_calls == writes, "already-disabled power save called setter");
+  tick(f.component, 0);
+  tick(f.component, 999);
+  require(ps_get_calls == reads + 1 && ps_calls == writes, "power-save check ran more than once per second");
+  tick(f.component, 1);
+  require(ps_get_calls == reads + 2 && ps_calls == writes, "power-save check did not repeat at one second");
+}
+
+static void runtime_power_save_reversion_recovers_during_pairing() {
+  Fixture f;
+  wifi_connected = true;
+  f.component.pair_start();
+  tick(f.component, 1000);
+  power_save = 1; // Runtime high-performance release restored modem sleep.
+  const int writes = ps_calls, installs = peer_calls, callbacks = callback_calls;
+  tick(f.component, 999);
+  require(power_save == 1 && ps_calls == writes, "runtime reversion ignored one-second cadence");
+  tick(f.component, 1);
+  require(power_save == WIFI_PS_NONE && ps_calls == writes + 1,
+          "runtime power-save reversion survived one-second check during pairing");
+  require(f.component.pairing() && peer_calls == installs && callback_calls == callbacks,
+          "power-save correction disturbed pairing transport");
+}
+
+static void disconnected_periodic_power_save_check_is_idle() {
+  Fixture f;
+  power_save = 1;
+  const int reads = ps_get_calls, writes = ps_calls;
+  // Stay below the existing five-second transport audit to isolate the new cadence.
+  for (unsigned i = 0; i < 3; ++i) tick(f.component, 1000);
+  tick(f.component, 999);
+  require(ps_get_calls == reads && ps_calls == writes && power_save == 1,
+          "disconnected periodic check accessed power save");
+  wifi_connected = true;
+  tick(f.component, 1);
+  require(ps_get_calls == reads + 1 && ps_calls == writes + 1 && power_save == WIFI_PS_NONE,
+          "connected periodic check did not resume after disconnected loops");
+}
+
+static void periodic_power_save_check_wraps_clock() {
+  reset();
+  now_ms = UINT32_MAX - 500;
+  wifi_connected = true;
+  initialize_bonds({1});
+  AdapterProbe component;
+  component.setup();
+  const int reads = ps_get_calls, writes = ps_calls;
+  power_save = 1;
+  tick(component, 999);
+  require(ps_get_calls == reads && ps_calls == writes, "power-save check fired early across clock wrap");
+  tick(component, 1);
+  require(ps_get_calls == reads + 1 && ps_calls == writes + 1 && power_save == WIFI_PS_NONE,
+          "power-save check stalled across clock wrap");
+}
+
+static void periodic_power_save_check_preserves_transport_audit_cadence() {
+  Fixture f;
+  wifi_connected = true;
+  peers.erase(dial_mac(1));
+  const int installs = peer_calls;
+  for (unsigned i = 0; i < 4; ++i) tick(f.component, 1000);
+  tick(f.component, 999);
+  require(peer_calls == installs && !peers.count(dial_mac(1)), "transport audit ran before five seconds");
+  tick(f.component, 1);
+  require(peer_calls == installs + 1 && peers.count(dial_mac(1)), "five-second transport audit missed peer loss");
+}
+
 /* A dial's long-lived Ed25519 identity, derived from its number. */
 static void dial_identity(uint8_t dial, uint8_t id_priv[64], uint8_t id_pub[32]) {
   uint8_t seed[32];
@@ -352,6 +427,11 @@ int main() {
     {"repair defers during pairing", recovery_defers_while_pairing},
     {"power-save failure retries", power_save_failure_retries},
     {"connect forces power save off", reconnect_forces_power_save_off},
+    {"connected power save checked once per second", connected_power_save_checked_once_per_second},
+    {"runtime power-save reversion recovers during pairing", runtime_power_save_reversion_recovers_during_pairing},
+    {"disconnected periodic power-save check is idle", disconnected_periodic_power_save_check_is_idle},
+    {"periodic power-save clock wrap", periodic_power_save_check_wraps_clock},
+    {"periodic power save preserves transport audit cadence", periodic_power_save_check_preserves_transport_audit_cadence},
     {"pairing refused past max_links", pairing_refused_past_max_links},
     {"bonded Link re-pairs at max_links", bonded_link_repairs_at_max_links},
     {"foreign PAIR_REQ outside a window", foreign_pair_request_without_window_is_ignored},

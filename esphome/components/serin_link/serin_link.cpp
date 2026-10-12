@@ -1647,6 +1647,7 @@ void SerinLinkComponent::try_start_(uint32_t now) {
   started_ = true;
   transport_attempts_ = 0;
   last_transport_check_ms_ = now;
+  last_wifi_ps_check_ms_ = now;
   this->status_clear_warning();
   room_source_reconcile_(false);
 
@@ -1869,6 +1870,15 @@ void SerinLinkComponent::log_transport_(uint32_t now) {
 void SerinLinkComponent::loop() {
   uint32_t now = millis();
   process_wifi_events_();
+  /* ESPHome's runtime high-performance release can restore modem sleep
+   * between transport audits. Keep RX awake even during pairing. */
+  if (wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected() &&
+      now - last_wifi_ps_check_ms_ >= 1000) {
+    last_wifi_ps_check_ms_ = now;
+    wifi_ps_type_t ps;
+    if (transport_ok("esp_wifi_get_ps", esp_wifi_get_ps(&ps)) && ps != WIFI_PS_NONE)
+      transport_ok("esp_wifi_set_ps(NONE)", esp_wifi_set_ps(WIFI_PS_NONE));
+  }
   /* External room-source heartbeat. Home Assistant publishes only on change
    * and cn105 re-arms remote_temperature_timeout only on each
    * set_remote_temperature call, so a steady room would trip the timeout and
