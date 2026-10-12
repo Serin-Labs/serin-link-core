@@ -1477,8 +1477,18 @@ bool SerinLinkComponent::pair_req_past_max_links_(const uint8_t *data, size_t le
   for (int i = 0; i < bonded; i++)
     if (sl2_link_dial_mac(&link_, i, mac) && std::memcmp(mac, src, 6) == 0) return false;
   /* Mid-confirm the core ignores other Links without a status change; only
-   * an open window reports "full", as the core does for a full table. */
+   * an open window reports "full", as the core does for a full table. Match
+   * its request authentication before reporting this capacity verdict; an
+   * invalid request is still dropped. */
   if (link_.pair == SL2_PAIR_WINDOW && std::strcmp(link_.pair_result, "full") != 0) {
+    sl2_pair_req_pkt req;
+    sl2_decode_pkt(&req, sizeof req, data, len);
+    if (req.version < SL2_PAIR_AUTH_MIN_VER) return true;
+    uint8_t transcript[SL2_REQ_TRANSCRIPT_LEN];
+    sl2_pair_req_transcript(&req, transcript);
+    if (link_.crypto->ed25519_verify(link_.crypto->ctx, req.id_pub,
+                                     transcript, sizeof transcript, req.sig) != 0)
+      return true;
     link_.pair_result = "full";
     ESP_LOGW(TAG, "pairing refused for a new Serin Link: %d bonded, max_links is %d — "
              "forget one or raise max_links", bonded, max_links_);
@@ -1647,6 +1657,7 @@ void SerinLinkComponent::try_start_(uint32_t now) {
   started_ = true;
   transport_attempts_ = 0;
   last_transport_check_ms_ = now;
+  last_wifi_ps_check_ms_ = now;
   this->status_clear_warning();
   room_source_reconcile_(false);
 
@@ -1869,6 +1880,15 @@ void SerinLinkComponent::log_transport_(uint32_t now) {
 void SerinLinkComponent::loop() {
   uint32_t now = millis();
   process_wifi_events_();
+  /* ESPHome's runtime high-performance release can restore modem sleep
+   * between transport audits. Keep RX awake even during pairing. */
+  if (wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected() &&
+      now - last_wifi_ps_check_ms_ >= 1000) {
+    last_wifi_ps_check_ms_ = now;
+    wifi_ps_type_t ps;
+    if (transport_ok("esp_wifi_get_ps", esp_wifi_get_ps(&ps)) && ps != WIFI_PS_NONE)
+      transport_ok("esp_wifi_set_ps(NONE)", esp_wifi_set_ps(WIFI_PS_NONE));
+  }
   /* External room-source heartbeat. Home Assistant publishes only on change
    * and cn105 re-arms remote_temperature_timeout only on each
    * set_remote_temperature call, so a steady room would trip the timeout and
