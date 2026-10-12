@@ -26,6 +26,10 @@ namespace serin_link {
 
 static const char *const TAG = "serin_link";
 static SerinLinkComponent *g_self = nullptr;
+/* on_room_temperature re-send floor, shared by the dial reading's publish
+ * heartbeat and the external-source heartbeat in loop(): a steady room must
+ * not let the climate's remote-temperature timeout expire. */
+static const uint32_t ROOM_TEMP_HEARTBEAT_MS = 30000;
 
 /* bytes -> "AA:BB:CC:DD:EE:FF". publish_dial_() had the only copy; the
  * diagnostics rows and the dump_config bond table need the same format. */
@@ -821,10 +825,16 @@ int SerinLinkComponent::ext_index_(uint64_t id) const {
 
 void SerinLinkComponent::ext_state_(int idx, float v) {
   if (idx < 0 || idx >= static_cast<int>(ext_sources_.size())) return;
-  if (std::isnan(v)) return;             /* NaN is "no reading", not a reading */
+  /* NaN is "no reading", not a reading: it never fires and leaves last_ms
+   * alone, but it does replace the cached value, so neither loop()'s
+   * heartbeat nor a re-selection re-sends a reading the source withdrew. */
   ext_sources_[idx].last = v;
+  if (std::isnan(v)) return;
   ext_sources_[idx].last_ms = millis();
-  if (selected_ext_ == idx) fire_room_temperature_(v);
+  if (selected_ext_ == idx) {
+    fire_room_temperature_(v);
+    ext_fire_ms_ = millis();
+  }
 }
 
 void SerinLinkComponent::fire_room_temperature_(float t) {
@@ -834,7 +844,10 @@ void SerinLinkComponent::fire_room_temperature_(float t) {
 void SerinLinkComponent::room_source_changed_() {
   if (selected_ext_ >= 0) {
     const ext_source_t &e = ext_sources_[selected_ext_];
-    if (room_src_status_() == SL2_ROOMST_OK) fire_room_temperature_(e.last);
+    if (room_src_status_() == SL2_ROOMST_OK && !std::isnan(e.last)) {
+      fire_room_temperature_(e.last);
+      ext_fire_ms_ = millis();
+    }
   } else if (has_primary_dial_) {
     if (room_src_status_() == SL2_ROOMST_OK)
       fire_room_temperature_(dial_temp_cc_ / 100.0f);
@@ -995,7 +1008,7 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
    * point of the change; the 30 s `due` floor and the 0.5 C send gate on the
    * dial still bound it. */
   const bool changed = dial_temp_cc_ != dial_pub_cc_;
-  const bool due = dial_pub_ms_ == 0 || millis() - dial_pub_ms_ >= 30000;
+  const bool due = dial_pub_ms_ == 0 || millis() - dial_pub_ms_ >= ROOM_TEMP_HEARTBEAT_MS;
   if (changed || due || dial_stale_) publish_dial_(false);
 }
 
@@ -1265,6 +1278,9 @@ void SerinLinkComponent::room_source_apply_(uint64_t id, bool fire) {
   if (changed) {
     n_ignored_logged_ = 0;
     reset_dial_reading_();
+    /* The external heartbeat re-sends only what this selection has sent, so
+     * a stale source picked again stays silent until it publishes. */
+    ext_fire_ms_ = 0;
   }
   selected_source_id_ = id;
   room_source_project_();
@@ -1756,6 +1772,19 @@ void SerinLinkComponent::log_transport_(uint32_t now) {
 void SerinLinkComponent::loop() {
   uint32_t now = millis();
   process_wifi_events_();
+  /* External room-source heartbeat. Home Assistant publishes only on change
+   * and cn105 re-arms remote_temperature_timeout only on each
+   * set_remote_temperature call, so a steady room would trip the timeout and
+   * flap back on the next change. Re-send the selected source's reading
+   * until it publishes NaN: gated on the reading, not the 90 s freshness
+   * window, because a quiet sensor cannot be judged by publish age. Ahead of
+   * the transport gate: an external source needs no radio. */
+  if (selected_ext_ >= 0 && ext_fire_ms_ != 0 &&
+      !std::isnan(ext_sources_[selected_ext_].last) &&
+      now - ext_fire_ms_ >= ROOM_TEMP_HEARTBEAT_MS) {
+    fire_room_temperature_(ext_sources_[selected_ext_].last);
+    ext_fire_ms_ = now;
+  }
   if (!started_) {
     if (transport_attempts_ < 5 && (transport_attempts_ == 0 ||
         now - last_transport_attempt_ms_ >= (1000u << (transport_attempts_ - 1))))

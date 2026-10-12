@@ -288,13 +288,16 @@ class SerinLinkComponent : public Component {
     std::string name;
     sensor::Sensor *sensor;
     uint64_t id;
-    float last{NAN};
+    float last{NAN};       /* latest value; NaN once the sensor withdraws it */
     uint32_t last_ms{0};   /* millis() of the last non-NaN value; 0 = never */
   };
   std::vector<ext_source_t> ext_sources_;
   /* Third projection of selected_source_id_ (with has_primary_dial_ and
    * selected_src_): index into ext_sources_, or -1. */
   int selected_ext_{-1};
+  /* millis() of the last on_room_temperature fire from the selected external
+   * source; 0 = none since it was selected. loop() re-sends from here. */
+  uint32_t ext_fire_ms_{0};
   int ext_index_(uint64_t id) const;
   void ext_state_(int idx, float v);
   /* on_room_temperature: fan-out. Every feed path goes through here. */

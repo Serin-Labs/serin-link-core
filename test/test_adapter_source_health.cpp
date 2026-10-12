@@ -210,6 +210,63 @@ static void legacy_edits_reset_health_and_allow_catalog_recovery() {
   require(f.room_temperature.emitted == std::vector<float>{22.0f, 0.0f, 22.0f}, "legacy B first equal sample must publish");
 }
 
+/* Home Assistant publishes only on change, and cn105 re-arms its
+ * remote_temperature_timeout only on each set_remote_temperature call, so a
+ * quiet selected source is re-sent at the 30 s floor until it publishes NaN.
+ * The gate is the reading itself, not the 90 s freshness window. */
+static void quiet_external_source_is_resent() {
+  Fixture f;
+  esphome::sensor::Sensor external;
+  f.component.add_room_source("External", &external);
+  const uint64_t id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External");
+  f.select_id(id);
+  external.publish_state(21.0f);
+  require(f.room_temperature.emitted == std::vector<float>{21.0f}, "external publish did not feed");
+  f.run_loop(35000);
+  require(f.room_temperature.emitted == std::vector<float>{21.0f, 21.0f},
+          "quiet external source was not re-sent after 30 s");
+  f.run_loop(20000);
+  require(f.room_temperature.emitted.size() == 2, "heartbeat re-sent within 30 s of the last send");
+  f.run_loop(40000); // 95 s after the only publish: reported stale, still a reading
+  selected(f, id, SL2_ROOMST_STALE);
+  require(f.room_temperature.emitted == std::vector<float>{21.0f, 21.0f, 21.0f},
+          "heartbeat stopped at the freshness window");
+  external.publish_state(NAN);
+  f.run_loop(35000);
+  require(f.room_temperature.emitted.size() == 3, "heartbeat kept re-sending after the source published NaN");
+}
+
+static void reselected_stale_source_is_not_resent() {
+  Fixture f;
+  esphome::sensor::Sensor external;
+  f.component.add_room_source("External", &external);
+  const uint64_t id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External");
+  f.select_id(id);
+  external.publish_state(21.0f);
+  f.select_id(link_id(1));
+  now_ms += 3600000;
+  f.select_id(id);
+  selected(f, id, SL2_ROOMST_STALE);
+  f.run_loop(1000);
+  require(f.room_temperature.emitted == std::vector<float>{21.0f},
+          "re-selecting a stale external source resumed its heartbeat");
+}
+
+static void withdrawn_external_reading_is_not_resent() {
+  Fixture f;
+  esphome::sensor::Sensor external;
+  f.component.add_room_source("External", &external);
+  const uint64_t id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External");
+  f.select_id(id);
+  external.publish_state(21.0f);
+  external.publish_state(NAN);
+  f.select_id(link_id(1));
+  f.select_id(id); // inside the freshness window, but the reading was withdrawn
+  f.run_loop(35000);
+  require(f.room_temperature.emitted == std::vector<float>{21.0f},
+          "re-selection or heartbeat re-sent a withdrawn external reading");
+}
+
 int main() {
   const struct { const char *name; void (*run)(); } tests[] = {
     {"never-seen selected dial", never_seen_selected_dial_is_unavailable},
@@ -221,6 +278,9 @@ int main() {
     {"external selection freshness boundary", external_selection_obeys_freshness_boundary},
     {"unavailable external selection", unavailable_external_selection_does_not_renew_outgoing_override},
     {"legacy edit transitions", legacy_edits_reset_health_and_allow_catalog_recovery},
+    {"quiet external source heartbeat", quiet_external_source_is_resent},
+    {"stale external re-selection", reselected_stale_source_is_not_resent},
+    {"withdrawn external reading", withdrawn_external_reading_is_not_resent},
   };
   unsigned failed = 0;
   for (const auto &test : tests) {

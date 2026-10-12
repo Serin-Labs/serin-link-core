@@ -188,7 +188,9 @@ than 90 s old. A stale or never-seen source stays selected and waits for a
 fresh reading. The selection emits no temperature or reset value, and the
 previous source stops feeding the callback. The climate's configured remote
 temperature timeout governs fallback; selecting a stale source does not renew
-that timeout.
+that timeout. While the selected source holds a reading, the component re-sends
+it every 30 s even when it does not change, so that timeout trips only when the
+source is actually gone (its sensor reports unknown).
 
 `link_sensor: primary_select:` has been removed; `room_temperature_source:`
 replaces it.
