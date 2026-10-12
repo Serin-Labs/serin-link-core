@@ -223,8 +223,10 @@ ROOM_SOURCE_SELECT_SCHEMA = select.select_schema(
         # sources: — external readings offered alongside the Serin Links. Each
         # is any ESPHome sensor (typically `platform: homeassistant`); the
         # component subscribes to it, lists it on the dial and in this
-        # dropdown, reports it stale after 90 s of silence, and feeds it to
-        # on_room_temperature: while it is the selection. No YAML guards.
+        # dropdown, and feeds it to on_room_temperature: while it is the
+        # selection. Health follows the sensor state (stale once it reads
+        # unknown or Home Assistant disconnects), not its publish age, since
+        # Home Assistant publishes only on change. No YAML guards.
         cv.Optional(CONF_SOURCES): cv.All(
             cv.ensure_list(ROOM_SOURCE_ENTRY_SCHEMA),
             cv.Length(max=MAX_ROOM_SOURCES),

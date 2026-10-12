@@ -151,7 +151,10 @@ static void internal_and_external_transitions_do_not_reuse_dial_history() {
   require(f.room_temperature.emitted.back() == 22.0f && f.room_temperature.emitted.size() == 5, "internal return skipped first Link sample");
 }
 
-static void external_selection_obeys_freshness_boundary() {
+/* Home Assistant publishes only on change, so publish age says nothing about
+ * an external reading: a quiet one is selected and fed at any age while Home
+ * Assistant is connected. */
+static void quiet_external_selection_reuses_cached_reading() {
   for (uint32_t age : {0u, 89999u, 90000u, 3600000u}) {
     Fixture f;
     esphome::sensor::Sensor external;
@@ -160,14 +163,39 @@ static void external_selection_obeys_freshness_boundary() {
     external.publish_state(8.0f);
     now_ms += age;
     f.select_id(id);
-    const bool fresh = age < 90000u;
-    selected(f, id, fresh ? SL2_ROOMST_OK : SL2_ROOMST_STALE);
-    require(f.room_temperature.emitted == (fresh ? std::vector<float>{8.0f} : std::vector<float>{}),
-            "external selection injected an expired reading");
+    selected(f, id, SL2_ROOMST_OK);
+    require(f.room_temperature.emitted == std::vector<float>{8.0f},
+            "selecting a quiet external source did not feed its cached reading");
     external.publish_state(19.0f);
     selected(f, id, SL2_ROOMST_OK);
-    require(f.room_temperature.emitted.back() == 19.0f, "fresh external update did not recover feed");
+    require(f.room_temperature.emitted.back() == 19.0f, "external update did not feed");
   }
+}
+
+/* External health is the sensor state plus the API link it arrives over; Link
+ * sources keep the 90 s freshness rule. */
+static void quiet_external_source_health_follows_state_and_api() {
+  Fixture f;
+  esphome::sensor::Sensor external;
+  f.component.add_room_source("External", &external);
+  const uint64_t id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External");
+  external.publish_state(21.0f);
+  f.select_id(id);
+  now_ms += 120000;
+  selected(f, id, SL2_ROOMST_OK);
+  api_connected = false;
+  selected(f, id, SL2_ROOMST_STALE);
+  api_log_client = true; // an `esphome logs` session receives no sensor states
+  selected(f, id, SL2_ROOMST_STALE);
+  api_log_client = false;
+  api_connected = true;
+  selected(f, id, SL2_ROOMST_OK);
+  external.publish_state(NAN);
+  selected(f, id, SL2_ROOMST_STALE);
+  f.select_id(link_id(1));
+  f.feed(1, 2200);
+  now_ms += 90000;
+  selected(f, link_id(1), SL2_ROOMST_STALE);
 }
 
 static void unavailable_external_selection_does_not_renew_outgoing_override() {
@@ -176,7 +204,10 @@ static void unavailable_external_selection_does_not_renew_outgoing_override() {
     esphome::sensor::Sensor external;
     f.component.add_room_source("External", &external);
     const uint64_t id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External");
-    if (seen) external.publish_state(8.0f);
+    if (seen) { // seen, then withdrawn: stale rather than never-seen
+      external.publish_state(8.0f);
+      external.publish_state(NAN);
+    }
     now_ms += 3600000;
     f.select_id(link_id(1));
     f.feed(1, 2200);
@@ -227,8 +258,8 @@ static void quiet_external_source_is_resent() {
           "quiet external source was not re-sent after 30 s");
   f.run_loop(20000);
   require(f.room_temperature.emitted.size() == 2, "heartbeat re-sent within 30 s of the last send");
-  f.run_loop(40000); // 95 s after the only publish: reported stale, still a reading
-  selected(f, id, SL2_ROOMST_STALE);
+  f.run_loop(40000); // 95 s after the only publish: still a current reading
+  selected(f, id, SL2_ROOMST_OK);
   require(f.room_temperature.emitted == std::vector<float>{21.0f, 21.0f, 21.0f},
           "heartbeat stopped at the freshness window");
   external.publish_state(NAN);
@@ -244,12 +275,16 @@ static void reselected_stale_source_is_not_resent() {
   f.select_id(id);
   external.publish_state(21.0f);
   f.select_id(link_id(1));
-  now_ms += 3600000;
+  api_connected = false; // Home Assistant gone: the cached reading is unverified
   f.select_id(id);
   selected(f, id, SL2_ROOMST_STALE);
-  f.run_loop(1000);
+  f.run_loop(35000);
   require(f.room_temperature.emitted == std::vector<float>{21.0f},
-          "re-selecting a stale external source resumed its heartbeat");
+          "re-selecting a stale external source injected or re-sent its cached reading");
+  api_connected = true;
+  external.publish_state(21.5f); // Home Assistant re-sends states on reconnect
+  require(f.room_temperature.emitted == std::vector<float>{21.0f, 21.5f},
+          "a fresh publish after reconnect did not feed");
 }
 
 static void withdrawn_external_reading_is_not_resent() {
@@ -313,7 +348,8 @@ int main() {
     {"stale switch-back and recovery", stale_switch_back_never_injects_expired_value},
     {"independent sensor rows", nonselected_slot_readings_remain_independent},
     {"internal/external source transitions", internal_and_external_transitions_do_not_reuse_dial_history},
-    {"external selection freshness boundary", external_selection_obeys_freshness_boundary},
+    {"quiet external selection reuses cached reading", quiet_external_selection_reuses_cached_reading},
+    {"external health follows sensor state and API", quiet_external_source_health_follows_state_and_api},
     {"unavailable external selection", unavailable_external_selection_does_not_renew_outgoing_override},
     {"legacy edit transitions", legacy_edits_reset_health_and_allow_catalog_recovery},
     {"quiet external source heartbeat", quiet_external_source_is_resent},

@@ -878,9 +878,14 @@ void SerinLinkComponent::room_source_changed_() {
 
 uint8_t SerinLinkComponent::room_src_status_() const {
   if (selected_ext_ >= 0) {
+    /* An external reading's health is its sensor state, not its publish
+     * age: Home Assistant publishes only on change, so a steady room goes
+     * quiet for hours while the reading stays true. What ends it is NaN (the
+     * entity went unknown) or losing the API link it arrives over, which
+     * leaves a homeassistant sensor silent rather than NaN. */
     const ext_source_t &e = ext_sources_[selected_ext_];
     if (e.last_ms == 0) return SL2_ROOMST_UNAVAILABLE;
-    return (millis() - e.last_ms >= dial_stale_ms_) ? SL2_ROOMST_STALE : SL2_ROOMST_OK;
+    return (!std::isnan(e.last) && api_client_connected()) ? SL2_ROOMST_OK : SL2_ROOMST_STALE;
   }
   switch (selected_src_) {
     case SL2_ROOMSRC_LINK:

@@ -159,8 +159,11 @@ own readings.
 
 To offer a reading that lives outside the controller — a Home Assistant
 temperature, for example — bind the sensor as a source. The component
-subscribes to it, lists it on the dial, reports it stale after 90 s of
-silence, and feeds it through `on_room_temperature:` while it is selected.
+subscribes to it, lists it on the dial, and feeds it through
+`on_room_temperature:` while it is selected. Its health follows the sensor
+state rather than publish age, because Home Assistant publishes only on
+change: it reads OK while it holds a reading and Home Assistant is connected,
+and stale once the sensor reports unknown or Home Assistant disconnects.
 No guard lambdas are needed anywhere:
 
 ```yaml
@@ -183,8 +186,8 @@ serin_link:
 when `Heat pump` is chosen — cn105's own "use the built-in sensor" value, so
 the switch is immediate.
 
-Selecting an external source reuses its cached reading only while it is less
-than 90 s old. A stale or never-seen source stays selected and waits for a
+Selecting an external source reuses its cached reading only while that source
+reads OK. A stale or never-seen source stays selected and waits for a
 fresh reading. The selection emits no temperature or reset value, and the
 previous source stops feeding the callback. The climate's configured remote
 temperature timeout governs fallback; selecting a stale source does not renew
