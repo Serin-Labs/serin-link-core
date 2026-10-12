@@ -17,7 +17,7 @@
 
 namespace adapter_host {
 // Model platform boundaries; protocol and adapter behavior stays in the
-// production translation units. Climate calls and scheduling are no-ops.
+// production translation units. Scheduling and unrelated climate fields are no-ops.
 inline uint32_t now_ms = 1000;
 inline bool fail_storage = false;
 inline std::map<std::string, std::vector<uint8_t>> nvs;
@@ -184,7 +184,12 @@ enum ClimateFeature { CLIMATE_SUPPORTS_CURRENT_TEMPERATURE = 1,
   CLIMATE_SUPPORTS_ACTION = 2, CLIMATE_SUPPORTS_TWO_POINT_TARGET_TEMPERATURE = 4,
   CLIMATE_SUPPORTS_CURRENT_HUMIDITY = 8, CLIMATE_SUPPORTS_TARGET_HUMIDITY = 16 };
 struct ClimateTraits {
-  bool supports_fan_mode(ClimateFanMode) const { return true; }
+  std::vector<ClimateFanMode> fan_modes{CLIMATE_FAN_AUTO, CLIMATE_FAN_ON,
+    CLIMATE_FAN_QUIET, CLIMATE_FAN_LOW, CLIMATE_FAN_MIDDLE, CLIMATE_FAN_MEDIUM,
+    CLIMATE_FAN_FOCUS, CLIMATE_FAN_DIFFUSE, CLIMATE_FAN_HIGH};
+  bool supports_fan_mode(ClimateFanMode mode) const {
+    return std::find(fan_modes.begin(), fan_modes.end(), mode) != fan_modes.end();
+  }
   bool supports_mode(ClimateMode) const { return true; }
   bool supports_preset(ClimatePreset) const { return true; }
   bool has_feature_flags(ClimateFeature) const { return false; }
@@ -192,16 +197,21 @@ struct ClimateTraits {
   float get_visual_max_temperature() const { return 30; }
   float get_visual_target_temperature_step() const { return 0.5f; }
 };
+class Climate;
 class ClimateCall {
  public:
+  explicit ClimateCall(Climate *parent) : parent_(parent) {}
   void set_mode(ClimateMode) {}
   void set_target_temperature(float) {}
   void set_target_temperature_low(float) {}
   void set_target_temperature_high(float) {}
   void set_target_humidity(float) {}
-  void set_fan_mode(ClimateFanMode) {}
+  void set_fan_mode(ClimateFanMode mode) { fan_mode_ = mode; }
   void set_preset(ClimatePreset) {}
-  void perform() {}
+  void perform();
+ private:
+  Climate *parent_;
+  std::optional<ClimateFanMode> fan_mode_;
 };
 class Climate {
  public:
@@ -212,10 +222,19 @@ class Climate {
   float current_humidity{NAN}, target_humidity{NAN};
   std::optional<ClimateFanMode> fan_mode;
   std::optional<ClimatePreset> preset;
-  ClimateTraits get_traits() const { return {}; }
-  ClimateCall make_call() { return {}; }
+  ClimateTraits traits;
+  unsigned rejected_fan_calls{0};
+  ClimateTraits get_traits() const { return traits; }
+  ClimateCall make_call() { return ClimateCall(this); }
   std::string get_name() const { return "host climate"; }
 };
+inline void ClimateCall::perform() {
+  if (!fan_mode_) return;
+  // ESPHome ClimateCall::validate_ drops fan modes absent from the traits.
+  // A test must observe accepted state, not merely a captured set_fan_mode().
+  if (parent_->get_traits().supports_fan_mode(*fan_mode_)) parent_->fan_mode = fan_mode_;
+  else ++parent_->rejected_fan_calls;
+}
 }
 namespace network {
 constexpr size_t IP_ADDRESS_BUFFER_SIZE = 40;

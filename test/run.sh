@@ -46,3 +46,8 @@ g++ -std=c++17 -Wall -Werror -Iadapter/stubs -I$MC \
     "$BUILD_DIR/monocypher.o" "$BUILD_DIR/monocypher-ed25519.o" \
     -o "$BUILD_DIR/test_adapter_transport" -lm
 "$BUILD_DIR/test_adapter_transport"
+g++ -std=c++17 -Wall -Werror -Iadapter/stubs -I$MC \
+    test_adapter_fan.cpp $MC/serin_link.cpp "$BUILD_DIR/sl2_link.o" \
+    "$BUILD_DIR/monocypher.o" "$BUILD_DIR/monocypher-ed25519.o" \
+    -o "$BUILD_DIR/test_adapter_fan" -lm
+"$BUILD_DIR/test_adapter_fan"

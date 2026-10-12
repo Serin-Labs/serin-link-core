@@ -245,8 +245,10 @@ bool sl2_link_pairing(const sl2_link_t *l);
 int  sl2_link_pair_seconds_left(sl2_link_t *l);
 const char *sl2_link_pair_result(const sl2_link_t *l);   /* "idle"/"listening"/"confirming"/"paired"/"timeout"/"full"/"pin-mismatch"/"storage-error" */
 
-/* Bond management. Mutations take effect only after durable save succeeds.
- * Forget returns false for a missing dial or storage failure (logged). */
+/* Bond management. Saved-bond mutations take effect only after durable save
+ * succeeds. Forget also cancels a matching pending candidate; Forget All
+ * closes any pairing window/handshake. Storage failure (logged) preserves
+ * both bonds and pairing. Forget returns false for an unknown MAC. */
 int  sl2_link_dial_count(const sl2_link_t *l);
 bool sl2_link_dial_mac(const sl2_link_t *l, int idx, uint8_t out[6]);
 bool sl2_link_forget_dial(sl2_link_t *l, const uint8_t mac[6]);

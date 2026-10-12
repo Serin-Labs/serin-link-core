@@ -151,6 +151,48 @@ static void internal_and_external_transitions_do_not_reuse_dial_history() {
   require(f.room_temperature.emitted.back() == 22.0f && f.room_temperature.emitted.size() == 5, "internal return skipped first Link sample");
 }
 
+static void external_selection_obeys_freshness_boundary() {
+  for (uint32_t age : {0u, 89999u, 90000u, 3600000u}) {
+    Fixture f;
+    esphome::sensor::Sensor external;
+    f.component.add_room_source("External", &external);
+    const uint64_t id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External");
+    external.publish_state(8.0f);
+    now_ms += age;
+    f.select_id(id);
+    const bool fresh = age < 90000u;
+    selected(f, id, fresh ? SL2_ROOMST_OK : SL2_ROOMST_STALE);
+    require(f.room_temperature.emitted == (fresh ? std::vector<float>{8.0f} : std::vector<float>{}),
+            "external selection injected an expired reading");
+    external.publish_state(19.0f);
+    selected(f, id, SL2_ROOMST_OK);
+    require(f.room_temperature.emitted.back() == 19.0f, "fresh external update did not recover feed");
+  }
+}
+
+static void unavailable_external_selection_does_not_renew_outgoing_override() {
+  for (bool seen : {false, true}) {
+    Fixture f;
+    esphome::sensor::Sensor external;
+    f.component.add_room_source("External", &external);
+    const uint64_t id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External");
+    if (seen) external.publish_state(8.0f);
+    now_ms += 3600000;
+    f.select_id(link_id(1));
+    f.feed(1, 2200);
+    f.select_id(id);
+    selected(f, id, seen ? SL2_ROOMST_STALE : SL2_ROOMST_UNAVAILABLE);
+    f.feed(1, 2300); // The outgoing Link must stop renewing the climate override.
+    external.publish_state(NAN);
+    require(f.room_temperature.emitted == std::vector<float>{22.0f},
+            "unavailable external selection renewed an override or emitted a reset sentinel");
+    external.publish_state(18.0f);
+    require(f.room_temperature.emitted == std::vector<float>{22.0f, 18.0f},
+            "external recovery did not replace the outgoing source");
+    selected(f, id, SL2_ROOMST_OK);
+  }
+}
+
 static void legacy_edits_reset_health_and_allow_catalog_recovery() {
   Fixture f;
   f.feed(1, 2200, 4500, SL2_DSF_HAS_SENSOR, SL2_ROOMSRC_LINK);
@@ -176,6 +218,8 @@ int main() {
     {"stale switch-back and recovery", stale_switch_back_never_injects_expired_value},
     {"independent sensor rows", nonselected_slot_readings_remain_independent},
     {"internal/external source transitions", internal_and_external_transitions_do_not_reuse_dial_history},
+    {"external selection freshness boundary", external_selection_obeys_freshness_boundary},
+    {"unavailable external selection", unavailable_external_selection_does_not_renew_outgoing_override},
     {"legacy edit transitions", legacy_edits_reset_health_and_allow_catalog_recovery},
   };
   unsigned failed = 0;

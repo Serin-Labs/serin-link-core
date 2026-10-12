@@ -915,6 +915,7 @@ bool sl2_link_dial_mac(const sl2_link_t *l, int idx, uint8_t out[6]) {
 }
 
 bool sl2_link_forget_dial(sl2_link_t *l, const uint8_t mac[6]) {
+    bool candidate = l->pair == SL2_PAIR_CONFIRM && sl2_mac_eq(l->cand_mac, mac);
     for (int i = 0; i < l->n_dials; i++) {
         if (!sl2_mac_eq(l->dial[i].bond.mac, mac)) continue;
         sl2_dial_bond_t recs[SL2_MAX_DIALS];
@@ -931,6 +932,14 @@ bool sl2_link_forget_dial(sl2_link_t *l, const uint8_t mac[6]) {
         for (int j = i; j < l->n_dials - 1; j++) l->dial[j] = l->dial[j + 1];
         l->n_dials--;
         memset(&l->dial[l->n_dials], 0, sizeof l->dial[l->n_dials]);
+        /* Cancel after removal: cleanup must not restore the forgotten peer. */
+        if (candidate) sl2_link_pair_cancel(l);
+        return true;
+    }
+    /* A new candidate has no saved bond to erase, but must not be allowed to
+     * commit a queued proof after an explicit forget of its MAC. */
+    if (candidate) {
+        sl2_link_pair_cancel(l);
         return true;
     }
     return false;
@@ -946,6 +955,7 @@ bool sl2_link_forget_all(sl2_link_t *l) {
     memset(l->dial, 0, sizeof l->dial);
     l->n_dials = 0;
     l->wifi_owner_valid = false;
+    sl2_link_pair_cancel(l);
     return true;
 }
 

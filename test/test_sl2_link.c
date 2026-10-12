@@ -2290,6 +2290,134 @@ static void storage_begin_pair(sl2_link_t *l, fdial_t *d) {
     dial_accept_pair_response(d, sends_before);
 }
 
+static void forgotten_candidate_stays_forgotten(sl2_link_t *l, const fdial_t *d) {
+    int n_dials = l->n_dials;
+    int writes = F.bond_write_attempts;
+    int sends = F.n_sent;
+    assert(!sl2_link_pairing(l));
+    assert(strcmp(sl2_link_pair_result(l), "cancelled") == 0);
+    assert(!f_find_peer(BCAST) && !f_find_peer(d->mac));
+    const uint8_t zeros[32] = {0};
+    assert(memcmp(l->cand_mac, zeros, sizeof l->cand_mac) == 0);
+    assert(memcmp(l->cand_lmk, zeros, sizeof l->cand_lmk) == 0);
+    assert(memcmp(l->eph_priv, zeros, sizeof l->eph_priv) == 0);
+    dial_confirm(l, d); // Even a valid proof already queued before Forget is rejected.
+    struct sl2_pair_req_pkt req;
+    dial_req(d, &req);
+    sl2_link_on_recv(l, d->mac, BCAST, (const uint8_t *)&req, sizeof req);
+    assert(l->n_dials == n_dials && F.bond_write_attempts == writes);
+    assert(F.n_sent == sends && !f_find_peer(d->mac));
+}
+
+static void test_forget_all_closes_pair_window(void) {
+    sl2_link_t l;
+    fresh(&l);
+    fdial_t d;
+    dial_make(&d, 0xD1);
+    sl2_link_pair_start(&l, 60000);
+    assert(l.pair == SL2_PAIR_WINDOW && f_find_peer(BCAST));
+    assert(sl2_link_forget_all(&l));
+    assert(!sl2_link_pairing(&l) && !f_find_peer(BCAST));
+    struct sl2_pair_req_pkt req;
+    dial_req(&d, &req);
+    int sends = F.n_sent;
+    sl2_link_on_recv(&l, d.mac, BCAST, (const uint8_t *)&req, sizeof req);
+    assert(F.n_sent == sends && l.n_dials == 0);
+    printf("forget all closes pair window ok\n");
+}
+
+static void test_forget_all_cancels_pair_confirm(void) {
+    for (int existing = 0; existing < 2; existing++) {
+        sl2_link_t l;
+        fresh(&l);
+        fdial_t keep, d;
+        dial_make(&keep, 0xD1);
+        pair_dial(&l, &keep);
+        dial_make(&d, 0xD2);
+        if (existing) pair_dial(&l, &d);
+        storage_begin_pair(&l, &d);
+        assert(sl2_link_forget_all(&l));
+        assert(l.n_dials == 0 && !f_find_peer(keep.mac));
+        forgotten_candidate_stays_forgotten(&l, &d);
+        storage_reboot(&l);
+        assert(l.n_dials == 0 && !f_find_peer(d.mac));
+    }
+    printf("forget all cancels pair confirm ok\n");
+}
+
+static void test_forget_cancels_matching_candidate(void) {
+    for (int existing = 0; existing < 2; existing++) {
+        sl2_link_t l;
+        fresh(&l);
+        fdial_t keep, d;
+        dial_make(&keep, 0xD1);
+        pair_dial(&l, &keep);
+        sl2_dial_bond_t original = l.dial[0].bond;
+        dial_make(&d, 0xD2);
+        if (existing) pair_dial(&l, &d);
+        storage_begin_pair(&l, &d);
+        assert(sl2_link_forget_dial(&l, d.mac));
+        assert(l.n_dials == 1 && f_find_peer(keep.mac));
+        forgotten_candidate_stays_forgotten(&l, &d);
+        assert(memcmp(&l.dial[0].bond, &original, sizeof original) == 0);
+        storage_reboot(&l);
+        assert(l.n_dials == 1 && !f_find_peer(d.mac));
+        assert(memcmp(&l.dial[0].bond, &original, sizeof original) == 0);
+    }
+    printf("forget cancels matching candidate ok\n");
+}
+
+static void test_forget_preserves_unrelated_pairing(void) {
+    for (int confirming = 0; confirming < 2; confirming++) {
+        sl2_link_t l;
+        fresh(&l);
+        fdial_t remove, candidate, unknown;
+        dial_make(&remove, 0xD1);
+        pair_dial(&l, &remove);
+        dial_make(&candidate, 0xD2);
+        dial_make(&unknown, 0xD3);
+        sl2_link_pair_start(&l, 60000);
+        if (confirming) storage_begin_pair(&l, &candidate);
+        assert(!sl2_link_forget_dial(&l, unknown.mac));
+        assert(sl2_link_forget_dial(&l, remove.mac));
+        assert(l.n_dials == 0 && !f_find_peer(remove.mac));
+        assert(l.pair == (confirming ? SL2_PAIR_CONFIRM : SL2_PAIR_WINDOW));
+        assert(f_find_peer(BCAST));
+        if (!confirming) storage_begin_pair(&l, &candidate);
+        dial_confirm(&l, &candidate);
+        assert(l.n_dials == 1 && strcmp(sl2_link_pair_result(&l), "paired") == 0);
+        storage_reboot(&l);
+        assert(l.n_dials == 1 && f_find_peer(candidate.mac) && !f_find_peer(remove.mac));
+    }
+    printf("forget preserves unrelated pairing ok\n");
+}
+
+static void test_forget_failure_preserves_pairing(void) {
+    for (int all = 0; all < 2; all++) {
+        for (int confirming = 0; confirming < 2; confirming++) {
+            sl2_link_t l;
+            fresh(&l);
+            fdial_t d;
+            dial_make(&d, 0xD1);
+            pair_dial(&l, &d);
+            sl2_link_pair_start(&l, 60000);
+            if (confirming) storage_begin_pair(&l, &d);
+            sl2_link_t original = l;
+            fpeer_t peers[8];
+            memcpy(peers, F.peers, sizeof peers);
+            F.fail_bond_writes = true;
+            assert(!(all ? sl2_link_forget_all(&l) : sl2_link_forget_dial(&l, d.mac)));
+            assert(memcmp(&l, &original, sizeof l) == 0);
+            assert(memcmp(F.peers, peers, sizeof peers) == 0);
+            F.fail_bond_writes = false;
+            if (!confirming) storage_begin_pair(&l, &d);
+            dial_confirm(&l, &d);
+            assert(l.n_dials == 1 && strcmp(sl2_link_pair_result(&l), "paired") == 0);
+        }
+    }
+    printf("forget storage failure preserves pairing ok\n");
+}
+
 static void test_pair_storage_failure(void) {
     /* Cover an empty table and an addition beside an unrelated bond. */
     for (int keep_existing = 0; keep_existing < 2; keep_existing++) {
@@ -2581,10 +2709,20 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[1], "epoch-storage") == 0) test_epoch_storage_failure();
         else if (strcmp(argv[1], "candidate-install") == 0) test_candidate_install_failure();
         else if (strcmp(argv[1], "broadcast-install") == 0) test_pair_broadcast_install_failure();
+        else if (strcmp(argv[1], "forget-all-window") == 0) test_forget_all_closes_pair_window();
+        else if (strcmp(argv[1], "forget-all-confirm") == 0) test_forget_all_cancels_pair_confirm();
+        else if (strcmp(argv[1], "forget-candidate") == 0) test_forget_cancels_matching_candidate();
+        else if (strcmp(argv[1], "forget-unrelated") == 0) test_forget_preserves_unrelated_pairing();
+        else if (strcmp(argv[1], "forget-pairing-storage") == 0) test_forget_failure_preserves_pairing();
         else return 2;
         return 0;
     }
     test_candidate_install_failure();
+    test_forget_all_closes_pair_window();
+    test_forget_all_cancels_pair_confirm();
+    test_forget_cancels_matching_candidate();
+    test_forget_preserves_unrelated_pairing();
+    test_forget_failure_preserves_pairing();
     test_pair_broadcast_install_failure();
     test_pair_storage_failure();
     test_repair_storage_failure();

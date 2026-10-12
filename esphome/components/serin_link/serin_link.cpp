@@ -259,8 +259,7 @@ void SerinLinkComponent::rebuild_fan_detents_() {
   auto traits = climate_->get_traits();
   for (auto m : FAN_ORDER)
     if (traits.supports_fan_mode(m)) fan_detents_.push_back(m);
-  fan_has_auto_ = traits.supports_fan_mode(climate::CLIMATE_FAN_AUTO) ||
-                  traits.supports_fan_mode(climate::CLIMATE_FAN_ON);
+  fan_has_auto_ = traits.supports_fan_mode(climate::CLIMATE_FAN_AUTO);
 }
 
 /* ── vane axes bound to select entities ───────────────────────────────────
@@ -834,7 +833,7 @@ void SerinLinkComponent::fire_room_temperature_(float t) {
 void SerinLinkComponent::room_source_changed_() {
   if (selected_ext_ >= 0) {
     const ext_source_t &e = ext_sources_[selected_ext_];
-    if (e.last_ms != 0) fire_room_temperature_(e.last);
+    if (room_src_status_() == SL2_ROOMST_OK) fire_room_temperature_(e.last);
   } else if (has_primary_dial_) {
     if (room_src_status_() == SL2_ROOMST_OK)
       fire_room_temperature_(dial_temp_cc_ / 100.0f);
