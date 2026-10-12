@@ -61,8 +61,8 @@ RoomSourceSelect = serin_link_ns.class_(
 PairLinkButton = serin_link_ns.class_(
     "PairLinkButton", button.Button, cg.Parented.template(SerinLinkComponent)
 )
-ScreenSwitch = serin_link_ns.class_("ScreenSwitch", switch.Switch)
-NightSwitch = serin_link_ns.class_("NightSwitch", switch.Switch)
+ScreenSwitch = serin_link_ns.class_("ScreenSwitch", switch.Switch, cg.Component)
+NightSwitch = serin_link_ns.class_("NightSwitch", switch.Switch, cg.Component)
 
 PairStartAction = serin_link_ns.class_("PairStartAction", automation.Action)
 PairCancelAction = serin_link_ns.class_("PairCancelAction", automation.Action)
@@ -443,7 +443,7 @@ def _pair_button_schema(value):
 SCREEN_SCHEMA = switch.switch_schema(
     ScreenSwitch,
     default_restore_mode="RESTORE_DEFAULT_ON",
-)
+).extend(cv.COMPONENT_SCHEMA)
 
 
 def _screen_schema(value):
@@ -460,7 +460,7 @@ def _screen_schema(value):
 NIGHT_SCHEMA = switch.switch_schema(
     NightSwitch,
     default_restore_mode="RESTORE_DEFAULT_OFF",
-)
+).extend(cv.COMPONENT_SCHEMA)
 
 
 def _night_schema(value):
@@ -962,9 +962,11 @@ async def to_code(config):
         cg.add(btn.set_window(pb[CONF_WINDOW].total_milliseconds))
     if CONF_SCREEN in config:
         sw = await switch.new_switch(config[CONF_SCREEN])
+        await cg.register_component(sw, config[CONF_SCREEN])
         cg.add(var.set_screen_switch(sw))
     if CONF_NIGHT in config:
         sw = await switch.new_switch(config[CONF_NIGHT])
+        await cg.register_component(sw, config[CONF_NIGHT])
         cg.add(var.set_night_switch(sw))
     if config[CONF_LINK_OTA_CREDENTIALS]:
         cg.add(var.set_link_ota_credentials(True))

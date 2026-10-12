@@ -54,7 +54,7 @@ template<typename... Args> void log(const char *, const char *format, Args... ar
 
 namespace esphome {
 inline uint32_t millis() { return adapter_host::now_ms; }
-namespace setup_priority { constexpr float LATE = -100; }
+namespace setup_priority { constexpr float DATA = 600; constexpr float LATE = -100; }
 class Component {
  public:
   virtual ~Component() = default;
@@ -158,8 +158,15 @@ namespace switch_ {
 class Switch {
  public:
   bool state{false};
+  std::vector<bool> emitted;
+  // What ESPHome's get_initial_state_with_restore_mode() would return: the
+  // stored value or the restore_mode default; nullopt = RESTORE_DISABLED.
+  std::optional<bool> initial_state;
   virtual ~Switch() = default;
-  void publish_state(bool v) { state = v; }
+  void publish_state(bool v) { state = v; emitted.push_back(v); }
+  void turn_on() { write_state(true); }
+  void turn_off() { write_state(false); }
+  std::optional<bool> get_initial_state_with_restore_mode() { return initial_state; }
  protected: virtual void write_state(bool) {}
 };
 }

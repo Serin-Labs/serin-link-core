@@ -434,17 +434,41 @@ class RoomSourceSelect : public select::Select, public Parented<SerinLinkCompone
  * every core tick, and the STATE fan-out's change detection carries the flip
  * to every Link inside SL2_STATE_MIN_INTERVAL_MS. Restored (schema default
  * RESTORE_DEFAULT_ON) so a reboot resumes the last gate rather than waking
- * an empty room. */
-class ScreenSwitch : public switch_::Switch {
+ * an empty room.
+ *
+ * ESPHome restores a switch only when its platform applies the restore mode
+ * itself (as the template and gpio switches do), hence the Component base and
+ * setup(): without them the state stayed at the constructor's false and every
+ * boot sent SCREEN_OFF to every Link until HA toggled the switch. DATA runs
+ * before serin_link's LATE setup, so the first STATE already carries it. */
+class ScreenSwitch : public switch_::Switch, public Component {
+ public:
+  void setup() override {
+    auto initial = this->get_initial_state_with_restore_mode();
+    if (!initial.has_value()) return;          /* RESTORE_DISABLED */
+    if (initial.value()) this->turn_on();
+    else this->turn_off();
+  }
+  float get_setup_priority() const override { return setup_priority::DATA; }
+
  protected:
   void write_state(bool state) override { this->publish_state(state); }
 };
 
-/* night: — the sun-down gate switch. Same optimistic contract as
- * ScreenSwitch above; restored OFF (schema default) so a reboot in a
- * controller HA never touches keeps daytime behavior rather than waking
+/* night: — the sun-down gate switch. Same optimistic contract and boot-time
+ * restore as ScreenSwitch above; restored OFF (schema default) so a reboot in
+ * a controller HA never touches keeps daytime behavior rather than waking
  * the house to a capped dial. */
-class NightSwitch : public switch_::Switch {
+class NightSwitch : public switch_::Switch, public Component {
+ public:
+  void setup() override {
+    auto initial = this->get_initial_state_with_restore_mode();
+    if (!initial.has_value()) return;          /* RESTORE_DISABLED */
+    if (initial.value()) this->turn_on();
+    else this->turn_off();
+  }
+  float get_setup_priority() const override { return setup_priority::DATA; }
+
  protected:
   void write_state(bool state) override { this->publish_state(state); }
 };
