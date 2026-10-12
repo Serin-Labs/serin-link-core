@@ -396,7 +396,8 @@ bool SerinLinkComponent::hvac_get_state(sl2_hvac_state_t *out) {
       climate_->current_temperature);
   out->mode = mode_to_sl2(climate_->mode);
   out->action = traits.has_feature_flags(climate::CLIMATE_SUPPORTS_ACTION)
-                    ? action_to_sl2(climate_->action) : SL2_ACT_UNKNOWN;
+                    ? action_to_sl2(climate_->action)
+                    : static_cast<uint8_t>(SL2_ACT_UNKNOWN);
   out->room_dc = c_to_dc_or(climate_->current_temperature, 0);
   if (traits.has_feature_flags(climate::CLIMATE_SUPPORTS_TWO_POINT_TARGET_TEMPERATURE)) {
     out->set_low_dc = c_to_dc_or(climate_->target_temperature_low, SL2_DC_NA);
