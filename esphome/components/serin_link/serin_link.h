@@ -136,8 +136,10 @@ class SerinLinkComponent : public Component {
    * has entities for. 0 = unset: only the core's SL2_MAX_DIALS applies. */
   void set_max_links(int n) { max_links_ = n; }
 
-  /* For template buttons / lambdas in YAML. */
-  void pair_start(uint32_t window_ms = 60000);
+  /* For template buttons / lambdas in YAML. The window opens even with
+   * max_links bonded, so a bonded Link can re-pair; loop() drops a new
+   * Link's PAIR_REQ instead (pair_req_past_max_links_). */
+  void pair_start(uint32_t window_ms = 60000) { sl2_link_pair_start(&link_, window_ms); }
   void pair_cancel() { sl2_link_pair_cancel(&link_); }
   bool pairing() const { return sl2_link_pairing(&link_); }
   const char *pair_result() const { return sl2_link_pair_result(&link_); }
@@ -421,6 +423,9 @@ class SerinLinkComponent : public Component {
   uint16_t overlay_mask_{0};             /* still masking STATE (confirm/timeout clears) */
   uint32_t overlay_since_ms_{0};
   uint32_t cmd_debounce_ms_{300};
+  /* rx drain filter: true = drop this frame, a PAIR_REQ from an unbonded
+   * Link while max_links are already bonded */
+  bool pair_req_past_max_links_(const uint8_t *data, size_t len);
   bool setup_transport_();
   void try_start_(uint32_t now);
   static bool port_send_(void *ctx, const uint8_t mac[6], const void *buf, size_t len);

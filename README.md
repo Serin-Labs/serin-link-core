@@ -137,10 +137,11 @@ serin_link:
 That single number generates the four per-slot diagnostics entities (MAC /
 Connected / Last Seen / Firmware) for each slot and sizes the room-temperature
 source dropdown below — no other part of the config repeats it. It also caps
-pairing: with `max_links` Links bonded, Pair is refused and the pairing status
-reads `full`, so no Link can bond without a row in Home Assistant. Forget a
-Link or raise `max_links:` to add another. Everything that follows describes
-what the multi-Link machinery does underneath.
+pairing. With `max_links` Links bonded, Pair still opens so a bonded Link can
+re-pair, but a new Link is refused and the pairing status reads `full`. No
+Link can bond without a row in Home Assistant. Forget a Link or raise
+`max_links:` to add another. Everything that follows describes what the
+multi-Link machinery does underneath.
 
 All bonded Links get the STATE stream, and a command from any of them is
 accepted. A Link selected as the room-temperature source is pinned to that

@@ -223,37 +223,67 @@ static void reconnect_forces_power_save_off() {
   require(power_save == WIFI_PS_NONE, "connect event left Wi-Fi power save on");
 }
 
-/* A correctly signed PAIR_REQ from a new dial, handed to the core the way the
- * radio delivers the broadcast. */
+/* A dial's long-lived Ed25519 identity, derived from its number. */
+static void dial_identity(uint8_t dial, uint8_t id_priv[64], uint8_t id_pub[32]) {
+  uint8_t seed[32];
+  std::memset(seed, 0x20 + dial, sizeof seed);
+  crypto_ed25519_key_pair(id_priv, id_pub, seed);
+}
+
+/* A correctly signed PAIR_REQ, delivered the way the radio does: into the
+ * receive queue, drained by loop(). */
 static void pair_request(AdapterProbe &component, uint8_t dial) {
   sl2_pair_req_pkt req{};
   req.type = SL2_PKT_PAIR_REQ;
   req.version = SL2_PROTO_VERSION;
   std::memcpy(req.src_mac, dial_mac(dial).data(), 6);
-  uint8_t eph_priv[32], seed[32], id_priv[64];
+  uint8_t eph_priv[32], id_priv[64];
   std::memset(eph_priv, 0x10 + dial, sizeof eph_priv);
-  std::memset(seed, 0x20 + dial, sizeof seed);
   crypto_x25519_public_key(req.eph_pub, eph_priv);
-  crypto_ed25519_key_pair(id_priv, req.id_pub, seed);
+  dial_identity(dial, id_priv, req.id_pub);
   uint8_t transcript[SL2_REQ_TRANSCRIPT_LEN];
   sl2_pair_req_transcript(&req, transcript);
   crypto_ed25519_sign(req.sig, id_priv, transcript, sizeof transcript);
-  sl2_link_on_recv(component.core(), dial_mac(dial).data(), SL2_BCAST_MAC,
-                   reinterpret_cast<const uint8_t *>(&req), sizeof req);
+  sl2_rxq_push(&component.rxq_, dial_mac(dial).data(), SL2_BCAST_MAC,
+               reinterpret_cast<const uint8_t *>(&req), sizeof req);
+  tick(component, 1);
 }
 
 /* max_links: sizes every per-slot entity and the room-source dropdown, so a
- * Link bonded past it would work but have no row in Home Assistant. */
-static void pairing_refused_at_max_links() {
+ * Link bonded past it would work but have no row in Home Assistant. The
+ * window still opens (a bonded Link may re-pair); a new Link is refused. */
+static void pairing_refused_past_max_links() {
   Fixture f(false, {1});
   f.component.set_max_links(1);
-  const int sent = sends;
   f.component.pair_start();
-  require(!f.component.pairing(), "pairing window opened with max_links already bonded");
-  require(std::strcmp(f.component.pair_result(), "full") == 0, "refused pairing did not report full");
+  require(f.component.pairing() && std::strcmp(f.component.pair_result(), "listening") == 0,
+          "pairing window did not open at max_links");
+  const int sent = sends;
   pair_request(f.component, 2);
-  require(f.component.dial_count() == 1 && sends == sent && !f.component.pairing(),
-          "a PAIR_REQ past max_links was answered");
+  require(std::strcmp(f.component.pair_result(), "full") == 0, "new Link past max_links did not report full");
+  require(f.component.dial_count() == 1 && sends == sent, "a PAIR_REQ past max_links was answered");
+}
+
+/* At the cap, the bonded Link presenting its pinned identity re-pairs. */
+static void bonded_link_repairs_at_max_links() {
+  Fixture f(false, {1});
+  f.component.set_max_links(1);
+  uint8_t id_priv[64];
+  dial_identity(1, id_priv, f.component.core()->dial[0].bond.id_pub); // pinned at first pairing
+  f.component.pair_start();
+  pair_request(f.component, 1);
+  require(std::strcmp(f.component.pair_result(), "confirming") == 0,
+          "the bonded Link could not re-pair at max_links");
+}
+
+/* Outside a pairing window the core ignores PAIR_REQ, so a neighbour's Link
+ * pairing elsewhere must not turn the pairing status to "full". */
+static void foreign_pair_request_without_window_is_ignored() {
+  Fixture f(false, {1});
+  f.component.set_max_links(1);
+  const std::string before = f.component.pair_result();
+  pair_request(f.component, 2);
+  require(f.component.pair_result() == before, "a PAIR_REQ outside a window changed the pairing status");
 }
 
 static void pairing_opens_below_max_links() {
@@ -297,7 +327,9 @@ int main() {
     {"repair defers during pairing", recovery_defers_while_pairing},
     {"power-save failure retries", power_save_failure_retries},
     {"connect forces power save off", reconnect_forces_power_save_off},
-    {"pairing refused at max_links", pairing_refused_at_max_links},
+    {"pairing refused past max_links", pairing_refused_past_max_links},
+    {"bonded Link re-pairs at max_links", bonded_link_repairs_at_max_links},
+    {"foreign PAIR_REQ outside a window", foreign_pair_request_without_window_is_ignored},
     {"pairing opens below max_links", pairing_opens_below_max_links},
   };
   unsigned failed = 0;

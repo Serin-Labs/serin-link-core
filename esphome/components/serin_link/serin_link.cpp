@@ -11,6 +11,7 @@
 
 #include <cctype>
 #include <cinttypes>
+#include <cstddef>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1447,18 +1448,31 @@ void SerinLinkComponent::refresh_room_source_select_() {
   }
 }
 
-void SerinLinkComponent::pair_start(uint32_t window_ms) {
-  /* max_links: sizes every per-slot entity and the room-source dropdown at
-   * build time, so a Link bonded past it would work but be invisible in Home
-   * Assistant. Refuse the window the way the core refuses a full table. */
+/* max_links: sizes every per-slot entity and the room-source dropdown at
+ * build time, so a Link bonded past it would work but be invisible in Home
+ * Assistant. The window itself still opens: a bonded Link may re-pair (the
+ * core accepts a known MAC only with its pinned identity). A PAIR_REQ from
+ * any other Link is dropped before the core sees it, mirroring the core's own
+ * full-table refusal. Outside a window the core ignores PAIR_REQ anyway, so
+ * a neighbour's Link pairing elsewhere is left alone. */
+bool SerinLinkComponent::pair_req_past_max_links_(const uint8_t *data, size_t len) {
+  if (max_links_ <= 0 || len < SL2_PAIR_MIN_LEN || data[0] != SL2_PKT_PAIR_REQ ||
+      !sl2_link_pairing(&link_))
+    return false;
   const int bonded = sl2_link_dial_count(&link_);
-  if (max_links_ > 0 && bonded >= max_links_) {
+  if (bonded < max_links_) return false;
+  const uint8_t *src = data + offsetof(struct sl2_pair_req_pkt, src_mac);
+  uint8_t mac[6];
+  for (int i = 0; i < bonded; i++)
+    if (sl2_link_dial_mac(&link_, i, mac) && std::memcmp(mac, src, 6) == 0) return false;
+  /* Mid-confirm the core ignores other Links without a status change; only
+   * an open window reports "full", as the core does for a full table. */
+  if (link_.pair == SL2_PAIR_WINDOW && std::strcmp(link_.pair_result, "full") != 0) {
     link_.pair_result = "full";
-    ESP_LOGW(TAG, "pairing refused: %d Serin Link(s) bonded, max_links is %d — "
+    ESP_LOGW(TAG, "pairing refused for a new Serin Link: %d bonded, max_links is %d — "
              "forget one or raise max_links", bonded, max_links_);
-    return;
   }
-  sl2_link_pair_start(&link_, window_ms);
+  return true;
 }
 
 std::string SerinLinkComponent::dial_mac_str(int idx) {
@@ -1899,6 +1913,7 @@ void SerinLinkComponent::loop() {
     ESP_LOGV(TAG, "rx type=%u len=%u from %02X:%02X:%02X:%02X:%02X:%02X",
              f.len >= 1 ? f.data[0] : 0, f.len,
              f.src[0], f.src[1], f.src[2], f.src[3], f.src[4], f.src[5]);
+    if (pair_req_past_max_links_(f.data, f.len)) continue;
     sl2_link_on_recv(&link_, f.src, f.dst, f.data, f.len);
   }
   sl2_link_loop(&link_);
