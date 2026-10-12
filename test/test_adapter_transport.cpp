@@ -305,12 +305,14 @@ static void dial_identity(uint8_t dial, uint8_t id_priv[64], uint8_t id_pub[32])
   crypto_ed25519_key_pair(id_priv, id_pub, seed);
 }
 
-/* A correctly signed PAIR_REQ, delivered the way the radio does: into the
+/* A PAIR_REQ, signed by default, delivered the way the radio does: into the
  * receive queue, drained by loop(). */
-static void pair_request(AdapterProbe &component, uint8_t dial) {
+static void pair_request(AdapterProbe &component, uint8_t dial,
+                         uint8_t version = SL2_PROTO_VERSION,
+                         size_t len = sizeof(sl2_pair_req_pkt), bool sign = true) {
   sl2_pair_req_pkt req{};
   req.type = SL2_PKT_PAIR_REQ;
-  req.version = SL2_PROTO_VERSION;
+  req.version = version;
   std::memcpy(req.src_mac, dial_mac(dial).data(), 6);
   uint8_t eph_priv[32], id_priv[64];
   std::memset(eph_priv, 0x10 + dial, sizeof eph_priv);
@@ -318,10 +320,53 @@ static void pair_request(AdapterProbe &component, uint8_t dial) {
   dial_identity(dial, id_priv, req.id_pub);
   uint8_t transcript[SL2_REQ_TRANSCRIPT_LEN];
   sl2_pair_req_transcript(&req, transcript);
-  crypto_ed25519_sign(req.sig, id_priv, transcript, sizeof transcript);
+  if (sign) crypto_ed25519_sign(req.sig, id_priv, transcript, sizeof transcript);
   sl2_rxq_push(&component.rxq_, dial_mac(dial).data(), SL2_BCAST_MAC,
-               reinterpret_cast<const uint8_t *>(&req), sizeof req);
+               reinterpret_cast<const uint8_t *>(&req), len);
   tick(component, 1);
+}
+
+/* Unauthenticated or malformed new-dial requests must not produce a capacity
+ * verdict; the real receive drain still discards them without a response. */
+static void invalid_pair_request_at_capacity(uint8_t version, size_t len, bool sign) {
+  Fixture f(false, {1});
+  f.component.set_max_links(1);
+  f.component.pair_start();
+  const std::string before = f.component.pair_result();
+  const auto saved = nvs;
+  const int sent = sends;
+  pair_request(f.component, 2, version, len, sign);
+  require(f.component.pair_result() == before,
+          "invalid PAIR_REQ at capacity changed the pairing status");
+  require(f.component.core()->pair == SL2_PAIR_WINDOW &&
+          f.component.dial_count() == 1 && sends == sent && nvs == saved,
+          "invalid PAIR_REQ at capacity was accepted or answered");
+}
+
+static void unsigned_pair_request_at_capacity_is_ignored() {
+  invalid_pair_request_at_capacity(SL2_PROTO_VERSION, sizeof(sl2_pair_req_pkt), false);
+}
+
+static void old_version_pair_request_at_capacity_is_ignored() {
+  invalid_pair_request_at_capacity(SL2_PAIR_AUTH_MIN_VER - 1, sizeof(sl2_pair_req_pkt), true);
+}
+
+static void short_pair_request_at_capacity_is_ignored() {
+  invalid_pair_request_at_capacity(SL2_PROTO_VERSION, SL2_PAIR_MIN_LEN - 1, true);
+}
+
+static void minimum_length_signed_pair_request_at_capacity_reports_full() {
+  Fixture f(false, {1});
+  f.component.set_max_links(1);
+  f.component.pair_start();
+  const int sent = sends;
+  const auto saved = nvs;
+  pair_request(f.component, 2, SL2_PROTO_VERSION, SL2_PAIR_MIN_LEN);
+  require(std::strcmp(f.component.pair_result(), "full") == 0,
+          "valid minimum-length PAIR_REQ at capacity did not report full");
+  require(f.component.core()->pair == SL2_PAIR_WINDOW &&
+          f.component.dial_count() == 1 && sends == sent && nvs == saved,
+          "valid PAIR_REQ at capacity was accepted or answered");
 }
 
 /* max_links: sizes every per-slot entity and the room-source dropdown, so a
@@ -433,6 +478,10 @@ int main() {
     {"periodic power-save clock wrap", periodic_power_save_check_wraps_clock},
     {"periodic power save preserves transport audit cadence", periodic_power_save_check_preserves_transport_audit_cadence},
     {"pairing refused past max_links", pairing_refused_past_max_links},
+    {"unsigned PAIR_REQ at capacity ignored", unsigned_pair_request_at_capacity_is_ignored},
+    {"old-version PAIR_REQ at capacity ignored", old_version_pair_request_at_capacity_is_ignored},
+    {"short PAIR_REQ at capacity ignored", short_pair_request_at_capacity_is_ignored},
+    {"minimum-length signed PAIR_REQ at capacity reports full", minimum_length_signed_pair_request_at_capacity_reports_full},
     {"bonded Link re-pairs at max_links", bonded_link_repairs_at_max_links},
     {"foreign PAIR_REQ outside a window", foreign_pair_request_without_window_is_ignored},
     {"full bond table: new refused, bonded re-pairs", full_bond_table_refuses_new_and_repairs_bonded},
