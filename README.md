@@ -583,7 +583,8 @@ Notes:
   `energy_sensor`) — each group sets its CAPS feature bit and INFO TLV; Wi-Fi,
   firmware, and system info are always served. Any platform's entities
   work; `example_cn105.yaml` shows the cn105 set.
-- Compile-verified against ESPHome 2026.6.5 / IDF 5.5.
+- Compile-verified against ESPHome 2026.7.4 / IDF 5.5.5. The supported floor
+  is ESPHome 2026.3.0 (see the quickstart).
 
 ### Letting the Serin Link update itself
 
