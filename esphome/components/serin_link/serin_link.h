@@ -122,8 +122,12 @@ class SerinLinkComponent : public Component {
    * room source. */
   bool room_src_is_link() const { return selected_src_ == SL2_ROOMSRC_LINK; }
 
+  /* max_links: (or the link_devices: count) — the bond slots Home Assistant
+   * has entities for. 0 = unset: only the core's SL2_MAX_DIALS applies. */
+  void set_max_links(int n) { max_links_ = n; }
+
   /* For template buttons / lambdas in YAML. */
-  void pair_start(uint32_t window_ms = 60000) { sl2_link_pair_start(&link_, window_ms); }
+  void pair_start(uint32_t window_ms = 60000);
   void pair_cancel() { sl2_link_pair_cancel(&link_); }
   bool pairing() const { return sl2_link_pairing(&link_); }
   const char *pair_result() const { return sl2_link_pair_result(&link_); }
@@ -264,6 +268,7 @@ class SerinLinkComponent : public Component {
   void reset_dial_reading_();
   bool link_sensor_cfg_{false};
   bool link_ota_credentials_{false};
+  int max_links_{0};
   sensor::Sensor *dial_temp_sensor_{nullptr};
   sensor::Sensor *dial_hum_sensor_{nullptr};
   text_sensor::TextSensor *dial_mac_sensor_{nullptr};

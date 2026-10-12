@@ -993,6 +993,14 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     cg.add(var.set_zone_name(config[CONF_ZONE_NAME]))
+    # The slot count every generated entity and the dropdown were sized from
+    # (link_devices: alone implies it, as in _expand_max_links): pairing past
+    # it is refused, so no Link can bond without a row in Home Assistant.
+    max_links = config.get(CONF_MAX_LINKS)
+    if max_links is None and CONF_LINK_DEVICES in config:
+        max_links = len(config[CONF_LINK_DEVICES])
+    if max_links is not None:
+        cg.add(var.set_max_links(max_links))
     if CONF_CLIMATE_ID in config:
         entity = await cg.get_variable(config[CONF_CLIMATE_ID])
         cg.add(var.set_climate(entity))

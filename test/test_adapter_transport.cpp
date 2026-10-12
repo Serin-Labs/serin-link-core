@@ -1,4 +1,6 @@
 #include "adapter/fixture.h"
+#include "monocypher.h"
+#include "monocypher-ed25519.h"
 #include <cstdio>
 
 using namespace adapter_host;
@@ -203,6 +205,50 @@ static void recovery_defers_while_pairing() {
   require(peers.at(dial_mac(1)).lmk[0] == 0, "deferred repair did not resume after pairing");
 }
 
+/* A correctly signed PAIR_REQ from a new dial, handed to the core the way the
+ * radio delivers the broadcast. */
+static void pair_request(AdapterProbe &component, uint8_t dial) {
+  sl2_pair_req_pkt req{};
+  req.type = SL2_PKT_PAIR_REQ;
+  req.version = SL2_PROTO_VERSION;
+  std::memcpy(req.src_mac, dial_mac(dial).data(), 6);
+  uint8_t eph_priv[32], seed[32], id_priv[64];
+  std::memset(eph_priv, 0x10 + dial, sizeof eph_priv);
+  std::memset(seed, 0x20 + dial, sizeof seed);
+  crypto_x25519_public_key(req.eph_pub, eph_priv);
+  crypto_ed25519_key_pair(id_priv, req.id_pub, seed);
+  uint8_t transcript[SL2_REQ_TRANSCRIPT_LEN];
+  sl2_pair_req_transcript(&req, transcript);
+  crypto_ed25519_sign(req.sig, id_priv, transcript, sizeof transcript);
+  sl2_link_on_recv(component.core(), dial_mac(dial).data(), SL2_BCAST_MAC,
+                   reinterpret_cast<const uint8_t *>(&req), sizeof req);
+}
+
+/* max_links: sizes every per-slot entity and the room-source dropdown, so a
+ * Link bonded past it would work but have no row in Home Assistant. */
+static void pairing_refused_at_max_links() {
+  Fixture f(false, {1});
+  f.component.set_max_links(1);
+  const int sent = sends;
+  f.component.pair_start();
+  require(!f.component.pairing(), "pairing window opened with max_links already bonded");
+  require(std::strcmp(f.component.pair_result(), "full") == 0, "refused pairing did not report full");
+  pair_request(f.component, 2);
+  require(f.component.dial_count() == 1 && sends == sent && !f.component.pairing(),
+          "a PAIR_REQ past max_links was answered");
+}
+
+static void pairing_opens_below_max_links() {
+  Fixture f(false, {1});
+  f.component.set_max_links(2);
+  f.component.pair_start();
+  require(f.component.pairing() && std::strcmp(f.component.pair_result(), "listening") == 0,
+          "pairing refused below max_links");
+  pair_request(f.component, 2);
+  require(std::strcmp(f.component.pair_result(), "confirming") == 0,
+          "a valid PAIR_REQ below max_links was not answered");
+}
+
 static void power_save_failure_retries() {
   Fixture f;
   power_save = 1;
@@ -232,6 +278,8 @@ int main() {
     {"missing event handler connection fallback", missing_wifi_handler_can_recover_on_connection_edge},
     {"repair defers during pairing", recovery_defers_while_pairing},
     {"power-save failure retries", power_save_failure_retries},
+    {"pairing refused at max_links", pairing_refused_at_max_links},
+    {"pairing opens below max_links", pairing_opens_below_max_links},
   };
   unsigned failed = 0;
   for (const auto &test : tests) {

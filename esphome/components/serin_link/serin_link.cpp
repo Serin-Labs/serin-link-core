@@ -1424,6 +1424,20 @@ void SerinLinkComponent::refresh_room_source_select_() {
   }
 }
 
+void SerinLinkComponent::pair_start(uint32_t window_ms) {
+  /* max_links: sizes every per-slot entity and the room-source dropdown at
+   * build time, so a Link bonded past it would work but be invisible in Home
+   * Assistant. Refuse the window the way the core refuses a full table. */
+  const int bonded = sl2_link_dial_count(&link_);
+  if (max_links_ > 0 && bonded >= max_links_) {
+    link_.pair_result = "full";
+    ESP_LOGW(TAG, "pairing refused: %d Serin Link(s) bonded, max_links is %d — "
+             "forget one or raise max_links", bonded, max_links_);
+    return;
+  }
+  sl2_link_pair_start(&link_, window_ms);
+}
+
 std::string SerinLinkComponent::dial_mac_str(int idx) {
   uint8_t mac[6];
   if (!sl2_link_dial_mac(&link_, idx, mac)) return "";
