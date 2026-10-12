@@ -171,6 +171,8 @@ subscribes to it, lists it on the dial, and feeds it through
 state rather than publish age, because Home Assistant publishes only on
 change: it reads OK while it holds a reading and Home Assistant is connected,
 and stale once the sensor reports unknown or Home Assistant disconnects.
+A source fed by a local sensor rather than Home Assistant follows the same
+rule, so its status reads stale whenever Home Assistant is disconnected.
 No guard lambdas are needed anywhere:
 
 ```yaml
