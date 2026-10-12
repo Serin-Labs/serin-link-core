@@ -324,7 +324,12 @@ void sl2_link_pair_start(sl2_link_t *l, uint32_t window_ms) {
         lg(l, 0, "sl2: eph keypair failed");
         return;
     }
-    l->port->peer_add(l->port->ctx, SL2_BCAST_MAC, NULL, false);
+    if (!l->port->peer_add(l->port->ctx, SL2_BCAST_MAC, NULL, false)) {
+        lg(l, 0, "sl2: pairing broadcast-peer install FAILED");
+        memset(l->eph_priv, 0, sizeof l->eph_priv);
+        l->pair_result = "idle";
+        return;
+    }
     l->pair = SL2_PAIR_WINDOW;
     l->pair_deadline_ms = l->port->now_ms(l->port->ctx) + window_ms;
     l->pair_result = "listening";
@@ -424,7 +429,9 @@ static void on_pair_req(sl2_link_t *l, const uint8_t *data, int len) {
     l->port->peer_del(l->port->ctx, l->cand_mac);
     if (!l->port->peer_add(l->port->ctx, l->cand_mac, l->cand_lmk, true)) {
         lg(l, 0, "sl2: candidate encrypted-peer install FAILED");
-        memset(l->cand_lmk, 0, sizeof l->cand_lmk);
+        pair_cleanup_candidate(l);
+        pair_end(l, "cancelled");
+        memset(lmk, 0, sizeof lmk);
         return;
     }
     l->port->send(l->port->ctx, SL2_BCAST_MAC, &resp, sizeof resp);
@@ -869,7 +876,12 @@ bool sl2_link_start(sl2_link_t *l) {
             for (int i = 0; i < n; i++) {
                 memset(&l->dial[i], 0, sizeof l->dial[i]);
                 l->dial[i].bond = recs[i];
-                l->port->peer_add(l->port->ctx, recs[i].mac, recs[i].lmk, true);
+            }
+            for (int i = 0; i < n; i++) {
+                if (!l->port->peer_add(l->port->ctx, recs[i].mac, recs[i].lmk, true)) {
+                    lg(l, 0, "sl2: saved encrypted-peer install FAILED");
+                    return false;
+                }
             }
         }
     }

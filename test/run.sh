@@ -4,6 +4,13 @@ BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/serin-link-host-tests.XXXXXX")
 trap 'rm -rf "$BUILD_DIR"' EXIT
 cd "$(dirname "$0")"
 CFLAGS="-std=c11 -Wall -Wextra -Werror -I../include"
+gcc $CFLAGS test_sl2_rxq.c -o "$BUILD_DIR/test_sl2_rxq"
+"$BUILD_DIR/test_sl2_rxq"
+RXQ_FLAGS=""
+if [[ "${RUN_TSAN:-0}" == 1 ]]; then RXQ_FLAGS="-fsanitize=thread -g"; fi
+g++ -std=c++17 -O1 -Wall -Wextra -Werror -pthread $RXQ_FLAGS -I../include \
+    test_sl2_rxq_thread.cpp -o "$BUILD_DIR/test_sl2_rxq_thread"
+"$BUILD_DIR/test_sl2_rxq_thread"
 gcc $CFLAGS test_sl2_proto.c -o "$BUILD_DIR/test_sl2_proto" -lm
 "$BUILD_DIR/test_sl2_proto"
 gcc $CFLAGS test_sl2_pair_auth.c -o "$BUILD_DIR/test_sl2_pair_auth" -lm
@@ -34,3 +41,8 @@ g++ -std=c++17 -Wall -Werror -Iadapter/stubs -I$MC \
     "$BUILD_DIR/monocypher.o" "$BUILD_DIR/monocypher-ed25519.o" \
     -o "$BUILD_DIR/test_adapter_source_reconcile" -lm
 "$BUILD_DIR/test_adapter_source_reconcile"
+g++ -std=c++17 -Wall -Werror -Iadapter/stubs -I$MC \
+    test_adapter_transport.cpp $MC/serin_link.cpp "$BUILD_DIR/sl2_link.o" \
+    "$BUILD_DIR/monocypher.o" "$BUILD_DIR/monocypher-ed25519.o" \
+    -o "$BUILD_DIR/test_adapter_transport" -lm
+"$BUILD_DIR/test_adapter_transport"
