@@ -67,13 +67,13 @@ static void fahrenheit_setpoint_round_trips_on_half_degree_grid() {
   ClimateAdapter component;
   esphome::climate::Climate climate;
   climate.traits.visual_step = 0.5f;
+  climate.traits.visual_max = 31.0f;
   component.set_climate(&climate);
   component.setup();
   sl2_caps_pkt caps{};
   require(component.hvac_get_caps(&caps), "CAPS unavailable");
   require(caps.ftab_id == 1, "0.5 °C grid climate did not advertise the Mitsubishi °F table");
-  /* 61..87 °F: 88 °F is 30.5 °C, past this climate's 30 °C visual max. */
-  for (int f = SL2_FTAB1_MIN_F; f < SL2_FTAB1_MAX_F; ++f) {
+  for (int f = SL2_FTAB1_MIN_F; f <= SL2_FTAB1_MAX_F; ++f) {
     sl2_cmd_pkt cmd{};
     cmd.set_dc = sl2_display_to_dc(f, true, caps.ftab_id);
     require(component.hvac_apply(SL2_CM_TEMP, &cmd), "setpoint CMD rejected");
@@ -86,7 +86,7 @@ static void fahrenheit_setpoint_round_trips_on_half_degree_grid() {
       throw std::runtime_error("°F setpoint did not round-trip through the entity");
     }
   }
-  require(climate.target_temperature == 30.0f, "sweep did not reach the top of the range");
+  require(climate.target_temperature == 30.5f, "sweep did not reach the top of the table");
   sl2_cmd_pkt cmd{};
   cmd.set_dc = sl2_display_to_dc(72, true, caps.ftab_id);
   require(component.hvac_apply(SL2_CM_TEMP, &cmd), "72 °F CMD rejected");
@@ -142,12 +142,87 @@ static void other_steps_keep_linear_fahrenheit() {
   }
 }
 
+/* One bound climate under a given fahrenheit_table: setting. */
+struct Zone {
+  ClimateAdapter component;
+  esphome::climate::Climate climate;
+  Zone(float step, float lo, float hi,
+       esphome::serin_link::FahrenheitTable table = esphome::serin_link::FAHRENHEIT_TABLE_AUTO) {
+    reset();
+    climate.traits.visual_step = step;
+    climate.traits.visual_min = lo;
+    climate.traits.visual_max = hi;
+    component.set_fahrenheit_table(table);
+    component.set_climate(&climate);
+    component.setup();
+  }
+  uint8_t ftab() {
+    sl2_caps_pkt caps{};
+    require(component.hvac_get_caps(&caps), "CAPS unavailable");
+    return caps.ftab_id;
+  }
+  /* A wire setpoint as the entity receives it. */
+  float apply(int16_t dc) {
+    sl2_cmd_pkt cmd{};
+    cmd.set_dc = dc;
+    require(component.hvac_apply(SL2_CM_TEMP, &cmd), "setpoint CMD rejected");
+    component.flush();
+    return climate.target_temperature;
+  }
+  int echo_f() {
+    now_ms += 11000; // past the overlay hold: STATE is the entity's own value
+    return sl2_dc_to_display(state_of(component).set_dc, true, ftab());
+  }
+};
+
+/* auto takes the Mitsubishi table only on a Mitsubishi-shaped entity: 0.5 °C
+ * step AND a visual range inside 16..31 °C. A wider range would leave °F
+ * detents off the table's 61..88 °F span. */
+static void fahrenheit_table_auto_follows_step_and_range() {
+  using namespace esphome::serin_link;
+  {
+    Zone z(0.5f, 16.0f, 31.0f);
+    require(z.ftab() == 1, "auto did not pick the Mitsubishi table on a 16..31 0.5-step climate");
+    require(z.apply(222) == 22.0f, "Mitsubishi table did not snap an off-grid setpoint");
+    require(z.apply(sl2_display_to_dc(72, true, 1)) == 22.5f && z.echo_f() == 72,
+            "72 °F did not round-trip under the Mitsubishi table");
+  }
+  {
+    Zone z(0.5f, 10.0f, 35.0f);
+    require(z.ftab() == 0, "auto picked the Mitsubishi table on a 10..35 climate");
+    require(z.apply(222) == sl2_dc_to_c(222), "linear °F snapped a setpoint");
+  }
+}
+
+/* An explicit fahrenheit_table: wins over auto. linear is what cn105 with
+ * fahrenheit_compatibility needs: its setpoints sit in linear-°F space
+ * (72 °F publishes as 22.22 °C), so a snapped 22.5 would never confirm. */
+static void fahrenheit_table_explicit_values_override_auto() {
+  using namespace esphome::serin_link;
+  {
+    Zone z(0.5f, 16.0f, 31.0f, FAHRENHEIT_TABLE_LINEAR);
+    require(z.ftab() == 0, "linear did not override auto on a Mitsubishi-shaped climate");
+    require(z.apply(sl2_display_to_dc(72, true, 0)) == sl2_dc_to_c(222),
+            "linear 72 °F was not applied as sent");
+    require(z.echo_f() == 72, "72 °F did not round-trip under linear");
+  }
+  {
+    Zone z(0.1f, 10.0f, 35.0f, FAHRENHEIT_TABLE_MITSUBISHI);
+    require(z.ftab() == 1, "mitsubishi did not override auto on a 0.1-step 10..35 climate");
+    require(z.apply(sl2_display_to_dc(72, true, 1)) == 22.5f && z.echo_f() == 72,
+            "72 °F did not round-trip under a forced Mitsubishi table");
+    require(z.apply(222) == 22.0f, "forced Mitsubishi table did not snap an off-grid setpoint");
+  }
+}
+
 int main() {
   const struct { const char *name; void (*run)(); } tests[] = {
     {"COMPRESSOR TLV carries CN105 codes", compressor_tlv_carries_cn105_codes},
     {"°F setpoint round-trips on a 0.5 °C grid", fahrenheit_setpoint_round_trips_on_half_degree_grid},
     {"off-grid setpoints snap to 0.5 °C", off_grid_setpoints_snap_to_half_degree},
     {"other steps keep linear °F", other_steps_keep_linear_fahrenheit},
+    {"fahrenheit_table auto follows step and range", fahrenheit_table_auto_follows_step_and_range},
+    {"fahrenheit_table explicit values override", fahrenheit_table_explicit_values_override_auto},
   };
   unsigned failed = 0;
   for (const auto &test : tests) {

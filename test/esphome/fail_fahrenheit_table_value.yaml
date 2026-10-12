@@ -1,0 +1,24 @@
+# fahrenheit_table: takes auto, linear or mitsubishi only.
+esphome:
+  name: t-fahrenheit-table
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  fahrenheit_table: celsius

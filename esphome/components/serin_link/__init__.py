@@ -66,6 +66,12 @@ RoomSourceSelect = serin_link_ns.class_(
 PairLinkButton = serin_link_ns.class_(
     "PairLinkButton", button.Button, cg.Parented.template(SerinLinkComponent)
 )
+FahrenheitTable = serin_link_ns.enum("FahrenheitTable")
+FAHRENHEIT_TABLES = {
+    "auto": FahrenheitTable.FAHRENHEIT_TABLE_AUTO,
+    "linear": FahrenheitTable.FAHRENHEIT_TABLE_LINEAR,
+    "mitsubishi": FahrenheitTable.FAHRENHEIT_TABLE_MITSUBISHI,
+}
 ScreenSwitch = serin_link_ns.class_("ScreenSwitch", switch.Switch, cg.Component)
 NightSwitch = serin_link_ns.class_("NightSwitch", switch.Switch, cg.Component)
 
@@ -132,6 +138,7 @@ CONF_WINDOW = "window"
 CONF_SCREEN = "screen"
 CONF_NIGHT = "night"
 CONF_LINK_OTA_CREDENTIALS = "link_ota_credentials"
+CONF_FAHRENHEIT_TABLE = "fahrenheit_table"
 
 # Mirrors SL2_MAX_DIALS in sl2_bond.h. If that #define ever changes, change
 # this with it: the C side silently ignores rows past the limit, so the error
@@ -602,6 +609,15 @@ _BASE_SCHEMA = cv.Schema(
         # itself. Unset = CAPS omits SL2_FEAT_LINK_OTA_CREDS and the Link
         # hides its update path.
         cv.Optional(CONF_LINK_OTA_CREDENTIALS, default=False): cv.boolean,
+        # fahrenheit_table: — the °F scale a Serin Link shows in °F mode.
+        # auto: the Mitsubishi table (72 °F = 22.5 °C, as on the unit's own
+        # remote) when the climate has a 0.5 °C step and a visual range
+        # inside 16..31 °C, else linear. cn105 with
+        # `fahrenheit_compatibility: true` keeps its setpoints in linear-°F
+        # space and needs `linear`.
+        cv.Optional(CONF_FAHRENHEIT_TABLE, default="auto"): cv.enum(
+            FAHRENHEIT_TABLES, lower=True
+        ),
         cv.Optional(CONF_LINK_SENSOR): _link_sensor_schema,
         cv.Optional(CONF_ROOM_TEMPERATURE_SOURCE): _room_source_schema,
         cv.Optional(CONF_DIAGNOSTICS): _diagnostics_schema,
@@ -1035,6 +1051,7 @@ async def to_code(config):
         cg.add(var.set_night_switch(sw))
     if config[CONF_LINK_OTA_CREDENTIALS]:
         cg.add(var.set_link_ota_credentials(True))
+    cg.add(var.set_fahrenheit_table(config[CONF_FAHRENHEIT_TABLE]))
     if CONF_VANE_V_SELECT in config:
         sel = await cg.get_variable(config[CONF_VANE_V_SELECT])
         cg.add(var.set_vane_v_select(sel))

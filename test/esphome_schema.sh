@@ -25,6 +25,7 @@ declare -A MUST_CONTAIN=(
   # list itself is built in to_code, which `esphome config` does not run)
   [pass_room_temperature_source.yaml]='Room Temperature Source'
   [pass_room_sources.yaml]='Room Temperature Source'
+  [pass_fahrenheit_table.yaml]='fahrenheit_table: linear'
   # the validation-time warning, backtick-guarded so the config echo cannot
   # supply it
   [pass_room_sources_no_unit.yaml]='(sensor `room_temp`) declares no `unit_of_measurement:`'
@@ -58,6 +59,8 @@ declare -A MUST_REJECT_WITH=(
   [fail_primary_select_removed.yaml]='room_temperature_source: sources'
   # backtick-guarded / unit-pair phrases the config echo cannot contain
   [fail_room_sources_unit.yaml]='must be °C or °F'
+  # the option list, which the config echo cannot contain
+  [fail_fahrenheit_table_value.yaml]="valid options are 'auto', 'linear', 'mitsubishi'"
 )
 
 fails=0

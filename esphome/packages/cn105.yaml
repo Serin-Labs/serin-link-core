@@ -94,6 +94,8 @@ serin_link:
   id: serin          # NB: `id: link` collides with libc link() in generated code
   climate_id: hvac
   max_links: ${max_links}
+  # If you add `fahrenheit_compatibility: true` to the climate, also set
+  # `fahrenheit_table: linear` here (README, "ESPHome component details").
   hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'
   vane_v_select: vane_v
   vane_h_select: vane_h

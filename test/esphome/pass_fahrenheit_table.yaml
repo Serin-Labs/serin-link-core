@@ -1,0 +1,25 @@
+# fahrenheit_table: — an explicit °F scale overrides auto (cn105 with
+# fahrenheit_compatibility: true needs linear).
+esphome:
+  name: t-fahrenheit-table
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+serin_link:
+  id: serin
+  fahrenheit_table: linear

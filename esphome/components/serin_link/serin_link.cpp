@@ -445,9 +445,20 @@ float SerinLinkComponent::clamp_setpoint_(float c) {
   return c;
 }
 
-bool SerinLinkComponent::half_degree_grid_() const {
-  return climate_ != nullptr &&
-         std::lround(climate_->get_traits().get_visual_target_temperature_step() * 10.0f) == 5;
+/* fahrenheit_table: auto picks the Mitsubishi table only for a Mitsubishi-
+ * shaped entity: a 0.5 °C step and a visual range inside 16..31 °C. A wider
+ * range would leave °F detents off the table's 61..88 °F span (a dead zone
+ * on the knob). linear/mitsubishi force one; cn105 with
+ * fahrenheit_compatibility keeps its setpoints in linear-°F space and needs
+ * linear. */
+bool SerinLinkComponent::mitsubishi_ftab_() const {
+  if (climate_ == nullptr) return false;
+  if (fahrenheit_table_ != FAHRENHEIT_TABLE_AUTO)
+    return fahrenheit_table_ == FAHRENHEIT_TABLE_MITSUBISHI;
+  auto traits = climate_->get_traits();
+  return std::lround(traits.get_visual_target_temperature_step() * 10.0f) == 5 &&
+         sl2_c_to_dc(traits.get_visual_min_temperature()) >= 160 &&
+         sl2_c_to_dc(traits.get_visual_max_temperature()) <= 310;
 }
 
 /* Off-grid values (a linear-°F dial, any rounding upstream) snap before they
@@ -456,7 +467,7 @@ bool SerinLinkComponent::half_degree_grid_() const {
  * overlay never confirms, and the dial's echo jumps when it expires. */
 float SerinLinkComponent::setpoint_from_wire_(int16_t dc) {
   float c = sl2_dc_to_c(dc);
-  if (half_degree_grid_()) c = std::round(c * 2.0f) / 2.0f;
+  if (mitsubishi_ftab_()) c = std::round(c * 2.0f) / 2.0f;
   return clamp_setpoint_(c);
 }
 
@@ -709,10 +720,10 @@ bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
   float step = traits.get_visual_target_temperature_step();
   int step_dc = static_cast<int>(std::lround(step * 10.0f));
   out->set_step_dc = static_cast<uint8_t>(step_dc < 5 ? 5 : step_dc);
-  /* A 0.5 °C grid is Mitsubishi's, whose °F scale is the non-linear ftab 1
-   * table (sl2_proto.h): linear °F lands between grid points (72 °F = 22.2,
-   * stored as 22.0, shown as 71 °F on the unit). Any other step: linear. */
-  out->ftab_id = half_degree_grid_() ? 1 : 0;
+  /* Mitsubishi's °F scale is the non-linear ftab 1 table (sl2_proto.h):
+   * linear °F lands between its 0.5 °C grid points (72 °F = 22.2, stored as
+   * 22.0, shown as 71 °F on the unit). See mitsubishi_ftab_() for when. */
+  out->ftab_id = mitsubishi_ftab_() ? 1 : 0;
   if (traits.has_feature_flags(climate::CLIMATE_SUPPORTS_TWO_POINT_TARGET_TEMPERATURE))
     out->band_min_gap_dc = 5;
   if (traits.has_feature_flags(climate::CLIMATE_SUPPORTS_TARGET_HUMIDITY)) {

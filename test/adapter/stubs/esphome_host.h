@@ -203,11 +203,12 @@ struct ClimateTraits {
   }
   unsigned feature_flags{0};
   float visual_step{0.5f};
+  float visual_min{16}, visual_max{30};
   bool supports_mode(ClimateMode) const { return true; }
   bool supports_preset(ClimatePreset) const { return true; }
   bool has_feature_flags(ClimateFeature f) const { return (feature_flags & f) != 0; }
-  float get_visual_min_temperature() const { return 16; }
-  float get_visual_max_temperature() const { return 30; }
+  float get_visual_min_temperature() const { return visual_min; }
+  float get_visual_max_temperature() const { return visual_max; }
   float get_visual_target_temperature_step() const { return visual_step; }
 };
 class Climate;

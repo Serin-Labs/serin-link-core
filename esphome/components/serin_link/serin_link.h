@@ -35,6 +35,15 @@ static constexpr uint8_t CN105_SUB_DEFROST = 0x02;
 static constexpr uint8_t CN105_SUB_PREHEAT = 0x04;
 static constexpr uint8_t CN105_SUB_STANDBY = 0x08;
 
+/* fahrenheit_table: — the °F scale CAPS declare (ftab_id). AUTO picks the
+ * Mitsubishi table for a Mitsubishi-shaped entity, LINEAR/MITSUBISHI force
+ * one (cn105 with fahrenheit_compatibility needs LINEAR). */
+enum FahrenheitTable : uint8_t {
+  FAHRENHEIT_TABLE_AUTO = 0,
+  FAHRENHEIT_TABLE_LINEAR,
+  FAHRENHEIT_TABLE_MITSUBISHI,
+};
+
 /* ESPHome adapter around the platform-free sl2_link core.
  *
  * Bind any `climate` entity (climate_id:) and the component derives the CAPS
@@ -222,6 +231,8 @@ class SerinLinkComponent : public Component {
    * network. Off by default — see hvac_wifi_creds. */
   void set_link_ota_credentials(bool v) { link_ota_credentials_ = v; }
 
+  void set_fahrenheit_table(FahrenheitTable t) { fahrenheit_table_ = t; }
+
   /* HVAC iface backing (public: called from the C hook trampolines). */
   bool hvac_get_state(sl2_hvac_state_t *out);
   bool hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd);
@@ -239,10 +250,10 @@ class SerinLinkComponent : public Component {
   /* wire setpoints clamp to the entity's visual range (not every platform
    * clamps in its own control()) */
   float clamp_setpoint_(float c);
-  /* the entity's visual step is 0.5 °C: Mitsubishi's grid, °F via ftab 1 */
-  bool half_degree_grid_() const;
-  /* wire setpoint -> the °C value to stage: snapped to a 0.5 °C grid when
-   * the entity has one, then clamped */
+  /* the Mitsubishi °F table (ftab_id 1) is in force, per fahrenheit_table: */
+  bool mitsubishi_ftab_() const;
+  /* wire setpoint -> the °C value to stage: snapped to the table's 0.5 °C
+   * grid while the Mitsubishi table is in force, then clamped */
   float setpoint_from_wire_(int16_t dc);
   /* Dial CMDs are staged, not applied inline: a burst of detent edits merges
    * into hold_ (latest wins) and one ClimateCall goes out after cmd_debounce_
@@ -286,6 +297,7 @@ class SerinLinkComponent : public Component {
   bool link_sensor_cfg_{false};
   bool link_ota_credentials_{false};
   int max_links_{0};
+  FahrenheitTable fahrenheit_table_{FAHRENHEIT_TABLE_AUTO};
   sensor::Sensor *dial_temp_sensor_{nullptr};
   sensor::Sensor *dial_hum_sensor_{nullptr};
   text_sensor::TextSensor *dial_mac_sensor_{nullptr};
