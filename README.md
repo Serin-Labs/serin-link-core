@@ -52,7 +52,10 @@ Put the Serin Link in pairing mode, press **Pair Serin Link** (Home Assistant or
 ESPHome web UI) within the 60 s window, done. The Serin Link pulls the zone's
 capabilities and renders only what the entity actually supports: its mode ring
 shows the entity's modes, the setpoint clamps to the entity's visual range,
-fan detents follow its discrete fan modes.
+fan detents follow its discrete fan modes. Auto is offered only when the
+climate supports `CLIMATE_FAN_AUTO`; `CLIMATE_FAN_ON` alone does not imply
+Auto. A climate with only On and no discrete fan speeds has no fan control
+on the Serin Link.
 
 Complete examples in [`esphome/`](esphome/):
 
@@ -180,6 +183,13 @@ serin_link:
 when `Heat pump` is chosen — cn105's own "use the built-in sensor" value, so
 the switch is immediate.
 
+Selecting an external source reuses its cached reading only while it is less
+than 90 s old. A stale or never-seen source stays selected and waits for a
+fresh reading. The selection emits no temperature or reset value, and the
+previous source stops feeding the callback. The climate's configured remote
+temperature timeout governs fallback; selecting a stale source does not renew
+that timeout.
+
 `link_sensor: primary_select:` has been removed; `room_temperature_source:`
 replaces it.
 
@@ -198,6 +208,12 @@ consequences you can watch for:
   emitting `0` through `on_room_temperature:` immediately. This also works
   without a Home Assistant dropdown. A failed forget keeps the bond and source
   selection and logs an error. An offline pinned Link keeps its pin.
+
+Successful **Forget All** also closes any pairing window or in-progress
+handshake. Forgetting a specific Link cancels a pending handshake with that
+Link, including a candidate that has not yet saved a bond. Unrelated bonds
+and pairing attempts remain intact. If saving a bond removal fails, both the
+existing bonds and pairing state are preserved.
 
 Selecting an empty slot is ignored, logged, and the dropdown snaps back to
 what is actually in force.
