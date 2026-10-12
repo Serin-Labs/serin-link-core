@@ -58,10 +58,48 @@ static void fan_modes_follow_climate_traits() {
   }
 }
 
+/* cn105 maps CLIMATE_FAN_MEDIUM to Mitsubishi speed 2 and CLIMATE_FAN_MIDDLE
+ * to speed 3, so a rising dial detent must walk QUIET..HIGH in that order. */
+static void cn105_fan_detents_rise_monotonically() {
+  reset();
+  FanAdapter component;
+  Climate climate;
+  climate.traits.fan_modes = {CLIMATE_FAN_AUTO, CLIMATE_FAN_QUIET, CLIMATE_FAN_LOW,
+                              CLIMATE_FAN_MEDIUM, CLIMATE_FAN_MIDDLE, CLIMATE_FAN_HIGH};
+  component.set_climate(&climate);
+  component.setup();
+  require(!component.failed, "fan adapter setup failed");
+  sl2_caps_pkt caps{};
+  require(component.hvac_get_caps(&caps) && caps.fan_steps == 5,
+          "cn105 fan set must expose five speed detents");
+
+  const ClimateFanMode rising[] = {CLIMATE_FAN_QUIET, CLIMATE_FAN_LOW, CLIMATE_FAN_MEDIUM,
+                                   CLIMATE_FAN_MIDDLE, CLIMATE_FAN_HIGH};
+  sl2_cmd_pkt command{};
+  for (size_t i = 0; i < 5; ++i) {
+    command.fan = static_cast<uint8_t>((i + 1) * 20);
+    require(component.hvac_apply(SL2_CM_FAN, &command), "fan detent rejected");
+    component.flush();
+    require(climate.fan_mode == rising[i], "rising dial detents did not map to rising cn105 speeds");
+    sl2_hvac_state_t state{};
+    require(component.hvac_get_state(&state) && state.fan == command.fan,
+            "fan detent did not round-trip through STATE");
+  }
+
+  sl2_hvac_state_t medium{}, middle{};
+  climate.fan_mode = CLIMATE_FAN_MEDIUM;
+  require(component.hvac_get_state(&medium), "STATE unavailable");
+  climate.fan_mode = CLIMATE_FAN_MIDDLE;
+  require(component.hvac_get_state(&middle), "STATE unavailable");
+  require(medium.fan < middle.fan, "STATE reports MEDIUM at or above MIDDLE");
+}
+
 int main() {
   try {
     fan_modes_follow_climate_traits();
     std::puts("adapter fan: PASS: six climate trait combinations");
+    cn105_fan_detents_rise_monotonically();
+    std::puts("adapter fan: PASS: cn105 MEDIUM below MIDDLE");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "adapter fan: FAIL: %s\n", error.what());

@@ -25,6 +25,25 @@
 namespace esphome {
 namespace serin_link {
 
+/* COMPRESSOR TLV vendor_sub byte (wire spec §9): the raw CN105 sub-mode codes
+ * the reference controller forwards (CN105_SUB_* in mitsubishi-cn105-homekit
+ * cn105_protocol.h), which is what a Serin Link decodes. They are bit codes,
+ * not the table positions sl2_info_sub_mode_code() returns. Stage and
+ * auto-sub need no table: their CN105 codes equal those positions. */
+static constexpr uint8_t CN105_SUB_NORMAL = 0x00;
+static constexpr uint8_t CN105_SUB_DEFROST = 0x02;
+static constexpr uint8_t CN105_SUB_PREHEAT = 0x04;
+static constexpr uint8_t CN105_SUB_STANDBY = 0x08;
+
+/* fahrenheit_table: — the °F scale CAPS declare (ftab_id). AUTO picks the
+ * Mitsubishi table for a Mitsubishi-shaped entity, LINEAR/MITSUBISHI force
+ * one (cn105 with fahrenheit_compatibility needs LINEAR). */
+enum FahrenheitTable : uint8_t {
+  FAHRENHEIT_TABLE_AUTO = 0,
+  FAHRENHEIT_TABLE_LINEAR,
+  FAHRENHEIT_TABLE_MITSUBISHI,
+};
+
 /* ESPHome adapter around the platform-free sl2_link core.
  *
  * Bind any `climate` entity (climate_id:) and the component derives the CAPS
@@ -103,8 +122,10 @@ class SerinLinkComponent : public Component {
   /* room_temperature_source: sources: — an external reading (any ESPHome
    * sensor) offered as a selectable room source. Registered in YAML order;
    * the position is the dropdown index (after Heat pump) and the catalog
-   * position on the dial. The id is a hash of the label (sl2_proto.h). */
-  void add_room_source(const std::string &name, sensor::Sensor *s);
+   * position on the dial. The id is a hash of the label (sl2_proto.h).
+   * fahrenheit: the sensor's schema-checked unit is °F; its readings are
+   * converted to °C as they arrive. */
+  void add_room_source(const std::string &name, sensor::Sensor *s, bool fahrenheit = false);
   void room_source_select_control(size_t index);
   bool room_catalog_page(uint16_t cursor, struct sl2_room_source_entry *entries,
                          uint8_t cap, uint8_t *count, uint16_t *next,
@@ -120,7 +141,13 @@ class SerinLinkComponent : public Component {
    * room source. */
   bool room_src_is_link() const { return selected_src_ == SL2_ROOMSRC_LINK; }
 
-  /* For template buttons / lambdas in YAML. */
+  /* max_links: (or the link_devices: count) — the bond slots Home Assistant
+   * has entities for. 0 = unset: only the core's SL2_MAX_DIALS applies. */
+  void set_max_links(int n) { max_links_ = n; }
+
+  /* For template buttons / lambdas in YAML. The window opens even with
+   * max_links bonded, so a bonded Link can re-pair; loop() drops a new
+   * Link's PAIR_REQ instead (pair_req_past_max_links_). */
   void pair_start(uint32_t window_ms = 60000) { sl2_link_pair_start(&link_, window_ms); }
   void pair_cancel() { sl2_link_pair_cancel(&link_); }
   bool pairing() const { return sl2_link_pairing(&link_); }
@@ -204,6 +231,8 @@ class SerinLinkComponent : public Component {
    * network. Off by default — see hvac_wifi_creds. */
   void set_link_ota_credentials(bool v) { link_ota_credentials_ = v; }
 
+  void set_fahrenheit_table(FahrenheitTable t) { fahrenheit_table_ = t; }
+
   /* HVAC iface backing (public: called from the C hook trampolines). */
   bool hvac_get_state(sl2_hvac_state_t *out);
   bool hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd);
@@ -221,6 +250,11 @@ class SerinLinkComponent : public Component {
   /* wire setpoints clamp to the entity's visual range (not every platform
    * clamps in its own control()) */
   float clamp_setpoint_(float c);
+  /* the Mitsubishi °F table (ftab_id 1) is in force, per fahrenheit_table: */
+  bool mitsubishi_ftab_() const;
+  /* wire setpoint -> the °C value to stage: snapped to the table's 0.5 °C
+   * grid while the Mitsubishi table is in force, then clamped */
+  float setpoint_from_wire_(int16_t dc);
   /* Dial CMDs are staged, not applied inline: a burst of detent edits merges
    * into hold_ (latest wins) and one ClimateCall goes out after cmd_debounce_
    * of quiet. The same staged values overlay hvac_get_state until the entity
@@ -262,6 +296,8 @@ class SerinLinkComponent : public Component {
   void reset_dial_reading_();
   bool link_sensor_cfg_{false};
   bool link_ota_credentials_{false};
+  int max_links_{0};
+  FahrenheitTable fahrenheit_table_{FAHRENHEIT_TABLE_AUTO};
   sensor::Sensor *dial_temp_sensor_{nullptr};
   sensor::Sensor *dial_hum_sensor_{nullptr};
   text_sensor::TextSensor *dial_mac_sensor_{nullptr};
@@ -288,13 +324,17 @@ class SerinLinkComponent : public Component {
     std::string name;
     sensor::Sensor *sensor;
     uint64_t id;
-    float last{NAN};
+    float last{NAN};       /* latest value in °C; NaN once the sensor withdraws it */
     uint32_t last_ms{0};   /* millis() of the last non-NaN value; 0 = never */
+    bool fahrenheit{false};  /* sensor reports °F (unit checked in __init__.py) */
   };
   std::vector<ext_source_t> ext_sources_;
   /* Third projection of selected_source_id_ (with has_primary_dial_ and
    * selected_src_): index into ext_sources_, or -1. */
   int selected_ext_{-1};
+  /* millis() of the last on_room_temperature fire from the selected external
+   * source; 0 = none since it was selected. loop() re-sends from here. */
+  uint32_t ext_fire_ms_{0};
   int ext_index_(uint64_t id) const;
   void ext_state_(int idx, float v);
   /* on_room_temperature: fan-out. Every feed path goes through here. */
@@ -395,6 +435,9 @@ class SerinLinkComponent : public Component {
   uint16_t overlay_mask_{0};             /* still masking STATE (confirm/timeout clears) */
   uint32_t overlay_since_ms_{0};
   uint32_t cmd_debounce_ms_{300};
+  /* rx drain filter: true = drop this frame, a PAIR_REQ from an unbonded
+   * Link while max_links are already bonded */
+  bool pair_req_past_max_links_(const uint8_t *data, size_t len);
   bool setup_transport_();
   void try_start_(uint32_t now);
   static bool port_send_(void *ctx, const uint8_t mac[6], const void *buf, size_t len);
@@ -434,17 +477,41 @@ class RoomSourceSelect : public select::Select, public Parented<SerinLinkCompone
  * every core tick, and the STATE fan-out's change detection carries the flip
  * to every Link inside SL2_STATE_MIN_INTERVAL_MS. Restored (schema default
  * RESTORE_DEFAULT_ON) so a reboot resumes the last gate rather than waking
- * an empty room. */
-class ScreenSwitch : public switch_::Switch {
+ * an empty room.
+ *
+ * ESPHome restores a switch only when its platform applies the restore mode
+ * itself (as the template and gpio switches do), hence the Component base and
+ * setup(): without them the state stayed at the constructor's false and every
+ * boot sent SCREEN_OFF to every Link until HA toggled the switch. DATA runs
+ * before serin_link's LATE setup, so the first STATE already carries it. */
+class ScreenSwitch : public switch_::Switch, public Component {
+ public:
+  void setup() override {
+    auto initial = this->get_initial_state_with_restore_mode();
+    if (!initial.has_value()) return;          /* RESTORE_DISABLED */
+    if (initial.value()) this->turn_on();
+    else this->turn_off();
+  }
+  float get_setup_priority() const override { return setup_priority::DATA; }
+
  protected:
   void write_state(bool state) override { this->publish_state(state); }
 };
 
-/* night: — the sun-down gate switch. Same optimistic contract as
- * ScreenSwitch above; restored OFF (schema default) so a reboot in a
- * controller HA never touches keeps daytime behavior rather than waking
+/* night: — the sun-down gate switch. Same optimistic contract and boot-time
+ * restore as ScreenSwitch above; restored OFF (schema default) so a reboot in
+ * a controller HA never touches keeps daytime behavior rather than waking
  * the house to a capped dial. */
-class NightSwitch : public switch_::Switch {
+class NightSwitch : public switch_::Switch, public Component {
+ public:
+  void setup() override {
+    auto initial = this->get_initial_state_with_restore_mode();
+    if (!initial.has_value()) return;          /* RESTORE_DISABLED */
+    if (initial.value()) this->turn_on();
+    else this->turn_off();
+  }
+  float get_setup_priority() const override { return setup_priority::DATA; }
+
  protected:
   void write_state(bool state) override { this->publish_state(state); }
 };

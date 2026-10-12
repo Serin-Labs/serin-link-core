@@ -25,9 +25,11 @@ sensor:
   - platform: template
     id: a_temp
     name: "Home Assistant"
+    unit_of_measurement: "°C"
   - platform: template
     id: b_temp
     name: "Other"
+    unit_of_measurement: "°C"
 
 serin_link:
   id: serin

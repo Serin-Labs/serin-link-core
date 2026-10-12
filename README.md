@@ -27,6 +27,10 @@ an independent open-source CN105/HomeKit firmware.
 
 ## ESPHome quickstart
 
+Requires ESPHome 2026.3.0 or newer. The CN105 package
+([`packages/cn105.yaml`](esphome/packages/cn105.yaml)) enforces this floor with
+`esphome: min_version:`.
+
 ```yaml
 esp32:
   board: esp32-s3-devkitc-1
@@ -132,8 +136,12 @@ serin_link:
 
 That single number generates the four per-slot diagnostics entities (MAC /
 Connected / Last Seen / Firmware) for each slot and sizes the room-temperature
-source dropdown below — no other part of the config repeats it. Everything that
-follows describes what the multi-Link machinery does underneath.
+source dropdown below — no other part of the config repeats it. It also caps
+pairing. With `max_links` Links bonded, Pair still opens so a bonded Link can
+re-pair, but a new Link is refused and the pairing status reads `full`. No
+Link can bond without a row in Home Assistant. Forget a Link or raise
+`max_links:` to add another. Everything that follows describes what the
+multi-Link machinery does underneath.
 
 All bonded Links get the STATE stream, and a command from any of them is
 accepted. A Link selected as the room-temperature source is pinned to that
@@ -159,8 +167,13 @@ own readings.
 
 To offer a reading that lives outside the controller — a Home Assistant
 temperature, for example — bind the sensor as a source. The component
-subscribes to it, lists it on the dial, reports it stale after 90 s of
-silence, and feeds it through `on_room_temperature:` while it is selected.
+subscribes to it, lists it on the dial, and feeds it through
+`on_room_temperature:` while it is selected. Its health follows the sensor
+state rather than publish age, because Home Assistant publishes only on
+change: it reads OK while it holds a reading and Home Assistant is connected,
+and stale once the sensor reports unknown or Home Assistant disconnects.
+A source fed by a local sensor rather than Home Assistant follows the same
+rule, so its status reads stale whenever Home Assistant is disconnected.
 No guard lambdas are needed anywhere:
 
 ```yaml
@@ -169,6 +182,7 @@ sensor:
     id: ha_room_temp
     name: "Home Assistant"
     entity_id: sensor.living_room_temperature
+    unit_of_measurement: "°C"         # the HA entity's unit: °C or °F
 
 serin_link:
   link_sensor:
@@ -179,16 +193,25 @@ serin_link:
       - sensor: ha_room_temp          # label defaults to the sensor's name
 ```
 
+Declare each source sensor's `unit_of_measurement:` as `°C` or `°F`. A `°F`
+source is converted to °C as each reading arrives, and config validation
+rejects any other unit. A sensor with no unit is taken as °C, and validation
+prints a warning naming it. A `homeassistant` sensor does not inherit its
+entity's unit, so set the unit to match the entity.
+
 `on_room_temperature:` receives the selected source's reading in °C, and `0`
 when `Heat pump` is chosen — cn105's own "use the built-in sensor" value, so
 the switch is immediate.
 
-Selecting an external source reuses its cached reading only while it is less
-than 90 s old. A stale or never-seen source stays selected and waits for a
+Selecting an external source reuses its cached reading only while that source
+reads OK. A stale or never-seen source stays selected and waits for a
 fresh reading. The selection emits no temperature or reset value, and the
 previous source stops feeding the callback. The climate's configured remote
 temperature timeout governs fallback; selecting a stale source does not renew
-that timeout.
+that timeout. While the selected source holds a reading and Home Assistant is
+connected, the component re-sends it every 30 s even when it does not change,
+so that timeout trips only when the source is actually gone: its sensor reports
+unknown, or Home Assistant disconnects.
 
 `link_sensor: primary_select:` has been removed; `room_temperature_source:`
 replaces it.
@@ -312,9 +335,13 @@ Wi-Fi STA start or connection event. Failures remain visible in the logs.
 Every five seconds, the adapter audits driver state and the bonded peers. It
 restores a missing peer or incorrect interface, channel, encryption setting,
 or LMK using the existing bond. Wi-Fi start/connect events also refresh the
-receive callback. Repairs use the same retry limit, preserve the protocol
-session and saved bonds, and leave correct peers alone. Recovery waits while
-pairing is active so it cannot overwrite a candidate key. A failed candidate
+receive callback. A Wi-Fi connect event also forces power save off at once,
+because ESPHome re-applies its own `power_save_mode` when the station restarts
+and modem sleep drops ESP-NOW frames. Keep `power_save_mode: NONE` in the
+`wifi:` block anyway, as the examples do, so the radio stays awake from boot.
+Repairs use the same retry limit, preserve the protocol session and saved
+bonds, and leave correct peers alone. Recovery waits while pairing is active
+so it cannot overwrite a candidate key. A failed candidate
 installation immediately restores the original peer and closes pairing as
 `cancelled`; a failed broadcast-peer installation leaves pairing `idle`.
 
@@ -529,6 +556,15 @@ Notes:
 - Wire input is validated before it reaches the entity: setpoints clamp to
   the entity's visual range, out-of-range humidity is ignored, unknown
   modes/presets are no-ops.
+- `fahrenheit_table:` (`auto`, `linear` or `mitsubishi`) picks the °F scale a
+  Serin Link uses in °F mode. The default `auto` declares the Mitsubishi table
+  (`ftab_id 1`) when the entity has a 0.5 °C visual step and a visual range
+  inside 16..31 °C, so 72 °F means 22.5 °C as on the unit's own remote.
+  Incoming setpoints then snap to that 0.5 °C grid before they apply, so the
+  echo never jumps when the entity stores its own rounding. Any other entity
+  gets linear °F, and `linear` or `mitsubishi` overrides the choice. A cn105
+  climate with `fahrenheit_compatibility: true` keeps its setpoints in
+  linear-°F space, so it must use `fahrenheit_table: linear`.
 - Serin Link edits are debounced: a CMD burst (e.g. scrolling through setpoints)
   merges into one `ClimateCall`, applied after 300 ms of quiet (internal
   tuning, matched to the knob's detent rate). The STATE echoed to Serin Links
@@ -547,7 +583,8 @@ Notes:
   `energy_sensor`) — each group sets its CAPS feature bit and INFO TLV; Wi-Fi,
   firmware, and system info are always served. Any platform's entities
   work; `example_cn105.yaml` shows the cn105 set.
-- Compile-verified against ESPHome 2026.6.5 / IDF 5.5.
+- Compile-verified against ESPHome 2026.7.4 / IDF 5.5.5. The supported floor
+  is ESPHome 2026.3.0 (see the quickstart).
 
 ### Letting the Serin Link update itself
 

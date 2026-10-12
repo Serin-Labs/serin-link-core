@@ -25,10 +25,14 @@ inline std::map<uint32_t, std::vector<uint8_t>> preferences;
 void reset_radio();
 inline std::vector<std::string> logs;
 inline bool wifi_connected = false;
+inline bool api_connected = true;   // a state-subscribed API client (Home Assistant) is connected
+inline bool api_log_client = false; // a client without a state subscription (esphome logs)
 inline void reset() {
   reset_radio();
   logs.clear();
   wifi_connected = false;
+  api_connected = true;
+  api_log_client = false;
   now_ms = 1000;
   fail_storage = false;
   nvs.clear();
@@ -54,7 +58,7 @@ template<typename... Args> void log(const char *, const char *format, Args... ar
 
 namespace esphome {
 inline uint32_t millis() { return adapter_host::now_ms; }
-namespace setup_priority { constexpr float LATE = -100; }
+namespace setup_priority { constexpr float DATA = 600; constexpr float LATE = -100; }
 class Component {
  public:
   virtual ~Component() = default;
@@ -158,8 +162,15 @@ namespace switch_ {
 class Switch {
  public:
   bool state{false};
+  std::vector<bool> emitted;
+  // What ESPHome's get_initial_state_with_restore_mode() would return: the
+  // stored value or the restore_mode default; nullopt = RESTORE_DISABLED.
+  std::optional<bool> initial_state;
   virtual ~Switch() = default;
-  void publish_state(bool v) { state = v; }
+  void publish_state(bool v) { state = v; emitted.push_back(v); }
+  void turn_on() { write_state(true); }
+  void turn_off() { write_state(false); }
+  std::optional<bool> get_initial_state_with_restore_mode() { return initial_state; }
  protected: virtual void write_state(bool) {}
 };
 }
@@ -190,21 +201,24 @@ struct ClimateTraits {
   bool supports_fan_mode(ClimateFanMode mode) const {
     return std::find(fan_modes.begin(), fan_modes.end(), mode) != fan_modes.end();
   }
+  unsigned feature_flags{0};
+  float visual_step{0.5f};
+  float visual_min{16}, visual_max{30};
   bool supports_mode(ClimateMode) const { return true; }
   bool supports_preset(ClimatePreset) const { return true; }
-  bool has_feature_flags(ClimateFeature) const { return false; }
-  float get_visual_min_temperature() const { return 16; }
-  float get_visual_max_temperature() const { return 30; }
-  float get_visual_target_temperature_step() const { return 0.5f; }
+  bool has_feature_flags(ClimateFeature f) const { return (feature_flags & f) != 0; }
+  float get_visual_min_temperature() const { return visual_min; }
+  float get_visual_max_temperature() const { return visual_max; }
+  float get_visual_target_temperature_step() const { return visual_step; }
 };
 class Climate;
 class ClimateCall {
  public:
   explicit ClimateCall(Climate *parent) : parent_(parent) {}
   void set_mode(ClimateMode) {}
-  void set_target_temperature(float) {}
-  void set_target_temperature_low(float) {}
-  void set_target_temperature_high(float) {}
+  void set_target_temperature(float t) { target_ = t; }
+  void set_target_temperature_low(float t) { low_ = t; }
+  void set_target_temperature_high(float t) { high_ = t; }
   void set_target_humidity(float) {}
   void set_fan_mode(ClimateFanMode mode) { fan_mode_ = mode; }
   void set_preset(ClimatePreset) {}
@@ -212,6 +226,7 @@ class ClimateCall {
  private:
   Climate *parent_;
   std::optional<ClimateFanMode> fan_mode_;
+  std::optional<float> target_, low_, high_;
 };
 class Climate {
  public:
@@ -229,6 +244,10 @@ class Climate {
   std::string get_name() const { return "host climate"; }
 };
 inline void ClimateCall::perform() {
+  // Setpoints are stored as sent: no ESPHome-side snapping to the step.
+  if (target_) parent_->target_temperature = *target_;
+  if (low_) parent_->target_temperature_low = *low_;
+  if (high_) parent_->target_temperature_high = *high_;
   if (!fan_mode_) return;
   // ESPHome ClimateCall::validate_ drops fan modes absent from the traits.
   // A test must observe accepted state, not merely a captured set_fan_mode().
@@ -243,6 +262,15 @@ struct IPAddress {
   bool is_set() const { return false; }
   void str_to(char *out) const { out[0] = '\0'; }
 };
+}
+namespace api {
+class APIServer {
+ public:
+  bool is_connected() const { return adapter_host::api_connected || adapter_host::api_log_client; }
+  bool is_connected_with_state_subscription() const { return adapter_host::api_connected; }
+};
+inline APIServer host_api_server;
+inline APIServer *global_api_server = &host_api_server;
 }
 namespace wifi {
 constexpr size_t SSID_BUFFER_SIZE = 33;
@@ -297,6 +325,7 @@ inline void *wifi_event_context = nullptr;
 inline bool radio_initialized = false;
 inline int fail_init = 0, fail_pmk = 0, fail_callback = 0, fail_peer = 0, fail_ps = 0, fail_event = 0;
 inline int init_calls = 0, pmk_calls = 0, callback_calls = 0, peer_calls = 0, sends = 0, event_calls = 0;
+inline int ps_calls = 0;
 inline int wifi_channel = 6, power_save = 0;
 inline Mac mac_key(const uint8_t *p) { Mac m; std::copy(p, p+6, m.begin()); return m; }
 inline bool fail_next(int &count) { if (!count) return false; --count; return true; }
@@ -304,7 +333,7 @@ inline void reset_radio() {
   peers.clear(); receive_callback = nullptr; wifi_event_callback = nullptr; wifi_event_context = nullptr;
   radio_initialized = false;
   fail_init = fail_pmk = fail_callback = fail_peer = fail_ps = fail_event = 0;
-  init_calls = pmk_calls = callback_calls = peer_calls = sends = event_calls = 0;
+  init_calls = pmk_calls = callback_calls = peer_calls = sends = event_calls = ps_calls = 0;
   wifi_channel = 6; power_save = 0;
 }
 inline void wifi_event(int event, uint8_t reason = 0) {
@@ -377,6 +406,7 @@ inline esp_err_t esp_wifi_get_mac(int, uint8_t *out) { const uint8_t mac[6] = {2
 inline esp_err_t esp_wifi_get_channel(uint8_t *channel, wifi_second_chan_t *secondary) { *channel=adapter_host::wifi_channel; *secondary=0; return ESP_OK; }
 inline esp_err_t esp_wifi_get_ps(wifi_ps_type_t *ps) { *ps=adapter_host::power_save; return ESP_OK; }
 inline esp_err_t esp_wifi_set_ps(wifi_ps_type_t ps) {
+  ++adapter_host::ps_calls;
   if (adapter_host::fail_next(adapter_host::fail_ps)) return ESP_FAIL;
   adapter_host::power_save=ps; return ESP_OK;
 }

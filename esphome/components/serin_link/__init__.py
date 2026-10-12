@@ -10,11 +10,13 @@ mutually exclusive with ESPHome's built-in `espnow:` component, which neither
 implements ESP-NOW link-layer encryption nor shares the recv callback.
 """
 
+import logging
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome import automation
-from esphome.core import HexInt
+from esphome.core import CORE, HexInt
 from esphome.components import (
     binary_sensor,
     button,
@@ -32,6 +34,7 @@ from esphome.const import (
     CONF_NAME,
     CONF_TEMPERATURE,
     CONF_TRIGGER_ID,
+    CONF_UNIT_OF_MEASUREMENT,
     DEVICE_CLASS_CONNECTIVITY,
     DEVICE_CLASS_DURATION,
     DEVICE_CLASS_HUMIDITY,
@@ -43,6 +46,8 @@ from esphome.const import (
     UNIT_PERCENT,
     UNIT_SECOND,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@Serin-Labs"]
 DEPENDENCIES = ["wifi", "esp32"]
@@ -61,8 +66,14 @@ RoomSourceSelect = serin_link_ns.class_(
 PairLinkButton = serin_link_ns.class_(
     "PairLinkButton", button.Button, cg.Parented.template(SerinLinkComponent)
 )
-ScreenSwitch = serin_link_ns.class_("ScreenSwitch", switch.Switch)
-NightSwitch = serin_link_ns.class_("NightSwitch", switch.Switch)
+FahrenheitTable = serin_link_ns.enum("FahrenheitTable")
+FAHRENHEIT_TABLES = {
+    "auto": FahrenheitTable.FAHRENHEIT_TABLE_AUTO,
+    "linear": FahrenheitTable.FAHRENHEIT_TABLE_LINEAR,
+    "mitsubishi": FahrenheitTable.FAHRENHEIT_TABLE_MITSUBISHI,
+}
+ScreenSwitch = serin_link_ns.class_("ScreenSwitch", switch.Switch, cg.Component)
+NightSwitch = serin_link_ns.class_("NightSwitch", switch.Switch, cg.Component)
 
 PairStartAction = serin_link_ns.class_("PairStartAction", automation.Action)
 PairCancelAction = serin_link_ns.class_("PairCancelAction", automation.Action)
@@ -107,6 +118,11 @@ MAX_ROOM_SOURCES = 7
 HEAT_PUMP_LABEL = "Heat pump"
 # Must match SL2_ROOM_SOURCE_NAME_LEN - 1 in sl2_proto.h.
 ROOM_SOURCE_NAME_MAX = 23
+UNIT_FAHRENHEIT = "°F"
+# CORE.data key: ids of `sources:` sensors whose readings are °F. Found in
+# FINAL_VALIDATE_SCHEMA (the only phase that can see a sensor declared
+# elsewhere) and read back by to_code.
+KEY_FAHRENHEIT_SOURCES = "serin_link_fahrenheit_sources"
 
 
 CONF_DIAGNOSTICS = "diagnostics"
@@ -122,6 +138,7 @@ CONF_WINDOW = "window"
 CONF_SCREEN = "screen"
 CONF_NIGHT = "night"
 CONF_LINK_OTA_CREDENTIALS = "link_ota_credentials"
+CONF_FAHRENHEIT_TABLE = "fahrenheit_table"
 
 # Mirrors SL2_MAX_DIALS in sl2_bond.h. If that #define ever changes, change
 # this with it: the C side silently ignores rows past the limit, so the error
@@ -223,8 +240,10 @@ ROOM_SOURCE_SELECT_SCHEMA = select.select_schema(
         # sources: — external readings offered alongside the Serin Links. Each
         # is any ESPHome sensor (typically `platform: homeassistant`); the
         # component subscribes to it, lists it on the dial and in this
-        # dropdown, reports it stale after 90 s of silence, and feeds it to
-        # on_room_temperature: while it is the selection. No YAML guards.
+        # dropdown, and feeds it to on_room_temperature: while it is the
+        # selection. Health follows the sensor state (stale once it reads
+        # unknown or Home Assistant disconnects), not its publish age, since
+        # Home Assistant publishes only on change. No YAML guards.
         cv.Optional(CONF_SOURCES): cv.All(
             cv.ensure_list(ROOM_SOURCE_ENTRY_SCHEMA),
             cv.Length(max=MAX_ROOM_SOURCES),
@@ -443,7 +462,7 @@ def _pair_button_schema(value):
 SCREEN_SCHEMA = switch.switch_schema(
     ScreenSwitch,
     default_restore_mode="RESTORE_DEFAULT_ON",
-)
+).extend(cv.COMPONENT_SCHEMA)
 
 
 def _screen_schema(value):
@@ -460,7 +479,7 @@ def _screen_schema(value):
 NIGHT_SCHEMA = switch.switch_schema(
     NightSwitch,
     default_restore_mode="RESTORE_DEFAULT_OFF",
-)
+).extend(cv.COMPONENT_SCHEMA)
 
 
 def _night_schema(value):
@@ -560,8 +579,8 @@ _BASE_SCHEMA = cv.Schema(
         # cn105 give its sensor blocks ids and bind them here.
         cv.Optional(CONF_OUTSIDE_TEMP_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_COMPRESSOR_HZ_SENSOR): cv.use_id(sensor.Sensor),
-        # stage/sub-mode are text on cn105; strings map to wire codes via the
-        # Mitsubishi value tables in sl2_info.h (wire spec §9, COMPRESSOR TLV)
+        # stage/sub-mode are text on cn105; strings map back to the raw CN105
+        # codes (wire spec §9, COMPRESSOR codes)
         cv.Optional(CONF_STAGE_SENSOR): cv.use_id(text_sensor.TextSensor),
         cv.Optional(CONF_SUB_MODE_SENSOR): cv.use_id(text_sensor.TextSensor),
         cv.Optional(CONF_AUTO_SUB_MODE_SENSOR): cv.use_id(text_sensor.TextSensor),
@@ -590,6 +609,15 @@ _BASE_SCHEMA = cv.Schema(
         # itself. Unset = CAPS omits SL2_FEAT_LINK_OTA_CREDS and the Link
         # hides its update path.
         cv.Optional(CONF_LINK_OTA_CREDENTIALS, default=False): cv.boolean,
+        # fahrenheit_table: — the °F scale a Serin Link shows in °F mode.
+        # auto: the Mitsubishi table (72 °F = 22.5 °C, as on the unit's own
+        # remote) when the climate has a 0.5 °C step and a visual range
+        # inside 16..31 °C, else linear. cn105 with
+        # `fahrenheit_compatibility: true` keeps its setpoints in linear-°F
+        # space and needs `linear`.
+        cv.Optional(CONF_FAHRENHEIT_TABLE, default="auto"): cv.enum(
+            FAHRENHEIT_TABLES, lower=True
+        ),
         cv.Optional(CONF_LINK_SENSOR): _link_sensor_schema,
         cv.Optional(CONF_ROOM_TEMPERATURE_SOURCE): _room_source_schema,
         cv.Optional(CONF_DIAGNOSTICS): _diagnostics_schema,
@@ -825,10 +853,55 @@ def _room_sources_labels_unique(config):
     return config
 
 
+def _room_sources_units(config):
+    """A source's value reaches on_room_temperature: as °C, so its unit must
+    be known: °C as is, °F converted on arrival, anything else rejected. A
+    missing unit is taken as °C, which keeps v0.1.5 configs valid, with a
+    warning naming the sensor: a homeassistant sensor does not inherit its
+    entity's unit, so silence here is how a °F reading gets fed as °C.
+    The declaration is found by id, so a sensor nested inside another
+    platform (with that platform's default unit) works the same way.
+    Recomputed on every validation, so an id from an earlier pass in the
+    same process cannot linger (serin_link is single-instance)."""
+    fahrenheit = CORE.data[KEY_FAHRENHEIT_SOURCES] = set()
+    rts = config.get(CONF_ROOM_TEMPERATURE_SOURCE)
+    if not rts or not rts.get(CONF_SOURCES):
+        return config
+    full = fv.full_config.get()
+    for src, label in zip(rts[CONF_SOURCES], room_source_labels(rts)):
+        sid = src[CONF_SENSOR]
+        decl = full.get_config_for_path(full.get_path_for_id(sid)[:-1])
+        unit = decl.get(CONF_UNIT_OF_MEASUREMENT)
+        if unit == UNIT_CELSIUS:
+            continue
+        if unit == UNIT_FAHRENHEIT:
+            fahrenheit.add(str(sid))
+            continue
+        if unit is None:
+            _LOGGER.warning(
+                "serin_link: room source `%s` (sensor `%s`) declares no "
+                "`unit_of_measurement:` — treating its readings as °C. A "
+                "homeassistant sensor does not inherit its entity's unit; if "
+                "the entity reports °F, set `unit_of_measurement: \"°F\"` so "
+                "the reading is converted instead of fed to the heat pump as °C.",
+                label,
+                sid,
+            )
+            continue
+        raise cv.Invalid(
+            f"room source `{label}` (sensor `{sid}`) reports `{unit}`, but a "
+            f"room temperature source must be °C or °F (°F is converted) — "
+            f"set the sensor's `unit_of_measurement:` to the unit its value "
+            f"is actually in."
+        )
+    return config
+
+
 def _final_validate(config):
     _no_builtin_espnow(config)
     _ota_creds_need_a_psk(config)
     _room_sources_labels_unique(config)
+    _room_sources_units(config)
     return config
 
 
@@ -944,6 +1017,14 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     cg.add(var.set_zone_name(config[CONF_ZONE_NAME]))
+    # The slot count every generated entity and the dropdown were sized from
+    # (link_devices: alone implies it, as in _expand_max_links): pairing past
+    # it is refused, so no Link can bond without a row in Home Assistant.
+    max_links = config.get(CONF_MAX_LINKS)
+    if max_links is None and CONF_LINK_DEVICES in config:
+        max_links = len(config[CONF_LINK_DEVICES])
+    if max_links is not None:
+        cg.add(var.set_max_links(max_links))
     if CONF_CLIMATE_ID in config:
         entity = await cg.get_variable(config[CONF_CLIMATE_ID])
         cg.add(var.set_climate(entity))
@@ -962,12 +1043,15 @@ async def to_code(config):
         cg.add(btn.set_window(pb[CONF_WINDOW].total_milliseconds))
     if CONF_SCREEN in config:
         sw = await switch.new_switch(config[CONF_SCREEN])
+        await cg.register_component(sw, config[CONF_SCREEN])
         cg.add(var.set_screen_switch(sw))
     if CONF_NIGHT in config:
         sw = await switch.new_switch(config[CONF_NIGHT])
+        await cg.register_component(sw, config[CONF_NIGHT])
         cg.add(var.set_night_switch(sw))
     if config[CONF_LINK_OTA_CREDENTIALS]:
         cg.add(var.set_link_ota_credentials(True))
+    cg.add(var.set_fahrenheit_table(config[CONF_FAHRENHEIT_TABLE]))
     if CONF_VANE_V_SELECT in config:
         sel = await cg.get_variable(config[CONF_VANE_V_SELECT])
         cg.add(var.set_vane_v_select(sel))
@@ -1022,9 +1106,10 @@ async def to_code(config):
         sel = await select.new_select(rts, options=room_source_options(config))
         await cg.register_parented(sel, var)
         cg.add(var.set_room_source_select(sel))
+        fahrenheit = CORE.data.get(KEY_FAHRENHEIT_SOURCES, set())
         for src, label in zip(rts.get(CONF_SOURCES) or [], room_source_labels(rts)):
             sens = await cg.get_variable(src[CONF_SENSOR])
-            cg.add(var.add_room_source(label, sens))
+            cg.add(var.add_room_source(label, sens, str(src[CONF_SENSOR]) in fahrenheit))
     if CONF_DIAGNOSTICS in config:
         diag = config[CONF_DIAGNOSTICS]
         if CONF_CONNECTED in diag:

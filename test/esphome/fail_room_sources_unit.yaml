@@ -1,0 +1,36 @@
+# A `sources:` reading that is not a temperature in °C or °F would be fed to
+# the heat pump as °C — reject it at config time.
+esphome:
+  name: t-room-sources-unit
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "test"
+  password: "testpass123"
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../esphome/components
+    components: [serin_link]
+
+sensor:
+  - platform: template
+    id: room_temp
+    name: "Home Assistant"
+    unit_of_measurement: "%"
+
+serin_link:
+  id: serin
+  link_sensor:
+    temperature:
+      name: "Serin Link Temperature"
+  room_temperature_source:
+    sources:
+      - sensor: room_temp

@@ -296,7 +296,9 @@ The controller keeps a **bond table**, not a single bond: up to
 `SL2_MAX_DIALS 4` records `{dial_mac[6], lmk[16], dial_id_pub[32], flags}`
 (flags bit 0 = the epoch-echo ratchet, section 3b). The pairing
 window *adds* (or refreshes, same pinned key) without forgetting existing dials;
-a full table refuses new pairs until one is forgotten. All bonded dials get the
+a full table still opens the window, so a bonded dial can refresh, but refuses
+a new dial (`full`, kept when the window times out) until one is forgotten.
+All bonded dials get the
 STATE stream (unicast per peer, same change/heartbeat policy); CMD is accepted
 from any bonded dial; the post-CMD STATE echo goes to **all** bonded dials so
 every head converges within one send. Per-dial forget via the controller UI
@@ -668,6 +670,20 @@ meaning, new fields append, new facts get new types. `COMPRESSOR.stage/
 vendor_sub_mode` carry Mitsubishi value tables — generic running-state already
 lives in `STATE.action`, so other vendors simply omit this TLV or ship a
 vendor TLV with their own semantics.
+
+**COMPRESSOR codes.** Bytes 1–3 are the raw CN105 values, exactly as the
+reference controller forwards them from the 0x09 status reply:
+
+| Byte | Field | Codes |
+|------|-------|-------|
+| 1 | `stage` | 0x00 IDLE, 0x01 LOW, 0x02 GENTLE, 0x03 MEDIUM, 0x04 MODERATE, 0x05 HIGH, 0x06 DIFFUSE |
+| 2 | `vendor_sub_mode` | 0x00 NORMAL, 0x02 DEFROST, 0x04 PREHEAT, 0x08 STANDBY |
+| 3 | `vendor_auto_sub` | 0x00 AUTO_OFF, 0x01 AUTO_COOL, 0x02 AUTO_HEAT, 0x03 AUTO_LEADER |
+
+`vendor_sub_mode` holds bit codes, not table positions. An adapter that
+starts from the state names (the ESPHome cn105 text sensors, through
+`sl2_info_sub_mode_code()`, which returns a position) must translate to
+these codes. A code outside the table names no sub-state.
 
 ## 10. Link OTA credential relay
 

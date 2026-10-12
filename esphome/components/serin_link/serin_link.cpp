@@ -4,9 +4,14 @@
 #include "esphome/components/network/util.h"
 #include "esphome/components/wifi/wifi_component.h"
 #include "esphome/core/version.h"
+#include "esphome/core/defines.h"
+#ifdef USE_API
+#include "esphome/components/api/api_server.h"
+#endif
 
 #include <cctype>
 #include <cinttypes>
+#include <cstddef>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -26,6 +31,24 @@ namespace serin_link {
 
 static const char *const TAG = "serin_link";
 static SerinLinkComponent *g_self = nullptr;
+/* on_room_temperature re-send floor, shared by the dial reading's publish
+ * heartbeat and the external-source heartbeat in loop(): a steady room must
+ * not let the climate's remote-temperature timeout expire. */
+static const uint32_t ROOM_TEMP_HEARTBEAT_MS = 30000;
+
+/* A homeassistant sensor goes silent, not NaN, when the API link drops, so a
+ * quiet reading is only trustworthy while Home Assistant is connected. Only a
+ * state-subscribed client receives those states: a bare is_connected() also
+ * counts an `esphome logs` session or a client mid-handshake. A node without
+ * the api component has no such link to lose. */
+static bool api_client_connected() {
+#ifdef USE_API
+  return api::global_api_server != nullptr &&
+         api::global_api_server->is_connected_with_state_subscription();
+#else
+  return true;
+#endif
+}
 
 /* bytes -> "AA:BB:CC:DD:EE:FF". publish_dial_() had the only copy; the
  * diagnostics rows and the dump_config bond table need the same format. */
@@ -244,10 +267,11 @@ static int16_t c_to_dc_or(float c, int16_t fallback) {
 }
 
 /* Canonical detent order for discrete fan modes (spec: dial sends canonical
- * detent percents; the ordering here defines what "higher" means). */
+ * detent percents; the ordering here defines what "higher" means). MEDIUM
+ * sits below MIDDLE: cn105 maps them to Mitsubishi speeds 2 and 3. */
 static const climate::ClimateFanMode FAN_ORDER[] = {
     climate::CLIMATE_FAN_QUIET,  climate::CLIMATE_FAN_LOW,
-    climate::CLIMATE_FAN_MIDDLE, climate::CLIMATE_FAN_MEDIUM,
+    climate::CLIMATE_FAN_MEDIUM, climate::CLIMATE_FAN_MIDDLE,
     climate::CLIMATE_FAN_FOCUS,  climate::CLIMATE_FAN_DIFFUSE,
     climate::CLIMATE_FAN_HIGH,
 };
@@ -373,7 +397,8 @@ bool SerinLinkComponent::hvac_get_state(sl2_hvac_state_t *out) {
       climate_->current_temperature);
   out->mode = mode_to_sl2(climate_->mode);
   out->action = traits.has_feature_flags(climate::CLIMATE_SUPPORTS_ACTION)
-                    ? action_to_sl2(climate_->action) : SL2_ACT_UNKNOWN;
+                    ? action_to_sl2(climate_->action)
+                    : static_cast<uint8_t>(SL2_ACT_UNKNOWN);
   out->room_dc = c_to_dc_or(climate_->current_temperature, 0);
   if (traits.has_feature_flags(climate::CLIMATE_SUPPORTS_TWO_POINT_TARGET_TEMPERATURE)) {
     out->set_low_dc = c_to_dc_or(climate_->target_temperature_low, SL2_DC_NA);
@@ -420,6 +445,32 @@ float SerinLinkComponent::clamp_setpoint_(float c) {
   return c;
 }
 
+/* fahrenheit_table: auto picks the Mitsubishi table only for a Mitsubishi-
+ * shaped entity: a 0.5 °C step and a visual range inside 16..31 °C. A wider
+ * range would leave °F detents off the table's 61..88 °F span (a dead zone
+ * on the knob). linear/mitsubishi force one; cn105 with
+ * fahrenheit_compatibility keeps its setpoints in linear-°F space and needs
+ * linear. */
+bool SerinLinkComponent::mitsubishi_ftab_() const {
+  if (climate_ == nullptr) return false;
+  if (fahrenheit_table_ != FAHRENHEIT_TABLE_AUTO)
+    return fahrenheit_table_ == FAHRENHEIT_TABLE_MITSUBISHI;
+  auto traits = climate_->get_traits();
+  return std::lround(traits.get_visual_target_temperature_step() * 10.0f) == 5 &&
+         sl2_c_to_dc(traits.get_visual_min_temperature()) >= 160 &&
+         sl2_c_to_dc(traits.get_visual_max_temperature()) <= 310;
+}
+
+/* Off-grid values (a linear-°F dial, any rounding upstream) snap before they
+ * are staged, so the overlay holds what the entity will confirm. Otherwise
+ * the entity stores its own rounding (cn105 truncates to the grid), the
+ * overlay never confirms, and the dial's echo jumps when it expires. */
+float SerinLinkComponent::setpoint_from_wire_(int16_t dc) {
+  float c = sl2_dc_to_c(dc);
+  if (mitsubishi_ftab_()) c = std::round(c * 2.0f) / 2.0f;
+  return clamp_setpoint_(c);
+}
+
 bool SerinLinkComponent::hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd) {
   if (mask & SL2_CM_UNITS) {
     use_f_ = cmd->use_f != 0;
@@ -451,14 +502,14 @@ bool SerinLinkComponent::hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd
     stage_(SL2_CM_MODE); any = true;
   }
   if (mask & SL2_CM_TEMP) {
-    hold_.set_dc = sl2_c_to_dc(clamp_setpoint_(sl2_dc_to_c(cmd->set_dc)));
+    hold_.set_dc = sl2_c_to_dc(setpoint_from_wire_(cmd->set_dc));
     stage_(SL2_CM_TEMP); any = true;
   }
   if (mask & SL2_CM_TEMP_BAND) {
     hold_.set_low_dc = cmd->set_low_dc != SL2_DC_NA
-        ? sl2_c_to_dc(clamp_setpoint_(sl2_dc_to_c(cmd->set_low_dc))) : SL2_DC_NA;
+        ? sl2_c_to_dc(setpoint_from_wire_(cmd->set_low_dc)) : SL2_DC_NA;
     hold_.set_high_dc = cmd->set_high_dc != SL2_DC_NA
-        ? sl2_c_to_dc(clamp_setpoint_(sl2_dc_to_c(cmd->set_high_dc))) : SL2_DC_NA;
+        ? sl2_c_to_dc(setpoint_from_wire_(cmd->set_high_dc)) : SL2_DC_NA;
     stage_(SL2_CM_TEMP_BAND); any = true;
   }
   if ((mask & SL2_CM_FAN) && !fan_detents_.empty()) {
@@ -669,7 +720,10 @@ bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
   float step = traits.get_visual_target_temperature_step();
   int step_dc = static_cast<int>(std::lround(step * 10.0f));
   out->set_step_dc = static_cast<uint8_t>(step_dc < 5 ? 5 : step_dc);
-  out->ftab_id = 0;                          /* linear °F display */
+  /* Mitsubishi's °F scale is the non-linear ftab 1 table (sl2_proto.h):
+   * linear °F lands between its 0.5 °C grid points (72 °F = 22.2, stored as
+   * 22.0, shown as 71 °F on the unit). See mitsubishi_ftab_() for when. */
+  out->ftab_id = mitsubishi_ftab_() ? 1 : 0;
   if (traits.has_feature_flags(climate::CLIMATE_SUPPORTS_TWO_POINT_TARGET_TEMPERATURE))
     out->band_min_gap_dc = 5;
   if (traits.has_feature_flags(climate::CLIMATE_SUPPORTS_TARGET_HUMIDITY)) {
@@ -748,8 +802,12 @@ size_t SerinLinkComponent::fill_info_tlvs(uint8_t *buf, size_t cap) {
     uint8_t stage = 0, sub = 0, autosub = 0;
     if (stage_sensor_ != nullptr && stage_sensor_->has_state())
       stage = sl2_info_stage_code(stage_sensor_->state.c_str());
-    if (sub_mode_sensor_ != nullptr && sub_mode_sensor_->has_state())
-      sub = sl2_info_sub_mode_code(sub_mode_sensor_->state.c_str());
+    if (sub_mode_sensor_ != nullptr && sub_mode_sensor_->has_state()) {
+      /* indexed by sl2_info_sub_mode_code(): NORMAL, DEFROST, PREHEAT, STANDBY */
+      static const uint8_t CN105_SUB[] = {CN105_SUB_NORMAL, CN105_SUB_DEFROST,
+                                          CN105_SUB_PREHEAT, CN105_SUB_STANDBY};
+      sub = CN105_SUB[sl2_info_sub_mode_code(sub_mode_sensor_->state.c_str())];
+    }
     if (auto_sub_mode_sensor_ != nullptr && auto_sub_mode_sensor_->has_state())
       autosub = sl2_info_auto_sub_code(auto_sub_mode_sensor_->state.c_str());
     sl2_info_put_compressor(buf, cap, &off, hz, stage, sub, autosub);
@@ -802,10 +860,12 @@ static bool is_room_src_valid(uint8_t v) {
   return v == SL2_ROOMSRC_INTERNAL || v == SL2_ROOMSRC_BLE || v == SL2_ROOMSRC_LINK;
 }
 
-void SerinLinkComponent::add_room_source(const std::string &name, sensor::Sensor *s) {
+void SerinLinkComponent::add_room_source(const std::string &name, sensor::Sensor *s,
+                                         bool fahrenheit) {
   ext_source_t e;
   e.name = name;
   e.sensor = s;
+  e.fahrenheit = fahrenheit;
   e.id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, name.c_str());
   const int idx = static_cast<int>(ext_sources_.size());
   ext_sources_.push_back(e);
@@ -820,10 +880,19 @@ int SerinLinkComponent::ext_index_(uint64_t id) const {
 
 void SerinLinkComponent::ext_state_(int idx, float v) {
   if (idx < 0 || idx >= static_cast<int>(ext_sources_.size())) return;
-  if (std::isnan(v)) return;             /* NaN is "no reading", not a reading */
+  /* Convert once, here, so the cache, the heartbeat and on_room_temperature:
+   * all carry °C. */
+  if (ext_sources_[idx].fahrenheit && !std::isnan(v)) v = (v - 32.0f) * 5.0f / 9.0f;
+  /* NaN is "no reading", not a reading: it never fires and leaves last_ms
+   * alone, but it does replace the cached value, so neither loop()'s
+   * heartbeat nor a re-selection re-sends a reading the source withdrew. */
   ext_sources_[idx].last = v;
+  if (std::isnan(v)) return;
   ext_sources_[idx].last_ms = millis();
-  if (selected_ext_ == idx) fire_room_temperature_(v);
+  if (selected_ext_ == idx) {
+    fire_room_temperature_(v);
+    ext_fire_ms_ = millis();
+  }
 }
 
 void SerinLinkComponent::fire_room_temperature_(float t) {
@@ -833,7 +902,10 @@ void SerinLinkComponent::fire_room_temperature_(float t) {
 void SerinLinkComponent::room_source_changed_() {
   if (selected_ext_ >= 0) {
     const ext_source_t &e = ext_sources_[selected_ext_];
-    if (room_src_status_() == SL2_ROOMST_OK) fire_room_temperature_(e.last);
+    if (room_src_status_() == SL2_ROOMST_OK && !std::isnan(e.last)) {
+      fire_room_temperature_(e.last);
+      ext_fire_ms_ = millis();
+    }
   } else if (has_primary_dial_) {
     if (room_src_status_() == SL2_ROOMST_OK)
       fire_room_temperature_(dial_temp_cc_ / 100.0f);
@@ -846,9 +918,14 @@ void SerinLinkComponent::room_source_changed_() {
 
 uint8_t SerinLinkComponent::room_src_status_() const {
   if (selected_ext_ >= 0) {
+    /* An external reading's health is its sensor state, not its publish
+     * age: Home Assistant publishes only on change, so a steady room goes
+     * quiet for hours while the reading stays true. What ends it is NaN (the
+     * entity went unknown) or losing the API link it arrives over, which
+     * leaves a homeassistant sensor silent rather than NaN. */
     const ext_source_t &e = ext_sources_[selected_ext_];
     if (e.last_ms == 0) return SL2_ROOMST_UNAVAILABLE;
-    return (millis() - e.last_ms >= dial_stale_ms_) ? SL2_ROOMST_STALE : SL2_ROOMST_OK;
+    return (!std::isnan(e.last) && api_client_connected()) ? SL2_ROOMST_OK : SL2_ROOMST_STALE;
   }
   switch (selected_src_) {
     case SL2_ROOMSRC_LINK:
@@ -994,7 +1071,7 @@ void SerinLinkComponent::room_sensor_feed(const uint8_t src_mac[6],
    * point of the change; the 30 s `due` floor and the 0.5 C send gate on the
    * dial still bound it. */
   const bool changed = dial_temp_cc_ != dial_pub_cc_;
-  const bool due = dial_pub_ms_ == 0 || millis() - dial_pub_ms_ >= 30000;
+  const bool due = dial_pub_ms_ == 0 || millis() - dial_pub_ms_ >= ROOM_TEMP_HEARTBEAT_MS;
   if (changed || due || dial_stale_) publish_dial_(false);
 }
 
@@ -1264,6 +1341,9 @@ void SerinLinkComponent::room_source_apply_(uint64_t id, bool fire) {
   if (changed) {
     n_ignored_logged_ = 0;
     reset_dial_reading_();
+    /* The external heartbeat re-sends only what this selection has sent, so
+     * a stale source picked again stays silent until it publishes. */
+    ext_fire_ms_ = 0;
   }
   selected_source_id_ = id;
   room_source_project_();
@@ -1377,6 +1457,33 @@ void SerinLinkComponent::refresh_room_source_select_() {
     pub_room_source_idx_ = idx;
     room_source_select_->publish_state(static_cast<size_t>(idx));
   }
+}
+
+/* max_links: sizes every per-slot entity and the room-source dropdown at
+ * build time, so a Link bonded past it would work but be invisible in Home
+ * Assistant. The window itself still opens: a bonded Link may re-pair (the
+ * core accepts a known MAC only with its pinned identity). A PAIR_REQ from
+ * any other Link is dropped before the core sees it, mirroring the core's own
+ * full-table refusal. Outside a window the core ignores PAIR_REQ anyway, so
+ * a neighbour's Link pairing elsewhere is left alone. */
+bool SerinLinkComponent::pair_req_past_max_links_(const uint8_t *data, size_t len) {
+  if (max_links_ <= 0 || len < SL2_PAIR_MIN_LEN || data[0] != SL2_PKT_PAIR_REQ ||
+      !sl2_link_pairing(&link_))
+    return false;
+  const int bonded = sl2_link_dial_count(&link_);
+  if (bonded < max_links_) return false;
+  const uint8_t *src = data + offsetof(struct sl2_pair_req_pkt, src_mac);
+  uint8_t mac[6];
+  for (int i = 0; i < bonded; i++)
+    if (sl2_link_dial_mac(&link_, i, mac) && std::memcmp(mac, src, 6) == 0) return false;
+  /* Mid-confirm the core ignores other Links without a status change; only
+   * an open window reports "full", as the core does for a full table. */
+  if (link_.pair == SL2_PAIR_WINDOW && std::strcmp(link_.pair_result, "full") != 0) {
+    link_.pair_result = "full";
+    ESP_LOGW(TAG, "pairing refused for a new Serin Link: %d bonded, max_links is %d — "
+             "forget one or raise max_links", bonded, max_links_);
+  }
+  return true;
 }
 
 std::string SerinLinkComponent::dial_mac_str(int idx) {
@@ -1619,6 +1726,13 @@ void SerinLinkComponent::process_wifi_events_() {
     ESP_LOGI(TAG, "Wi-Fi disconnect reason=%" PRIu32 " count=%" PRIu32,
              __atomic_load_n(&wifi_disconnect_reason_, __ATOMIC_RELAXED),
              __atomic_load_n(&wifi_disconnects_, __ATOMIC_RELAXED));
+  if (events & WIFI_CONNECTED) {
+    /* ESPHome re-applies its power_save_mode at STA start, and modem sleep
+     * drops ESP-NOW RX. Force it off on the connect edge itself: the audit
+     * in maintain_transport_ would catch it later, but waits out any open
+     * pairing window, which is when the broadcasts must get through. */
+    transport_ok("esp_wifi_set_ps(NONE)", esp_wifi_set_ps(WIFI_PS_NONE));
+  }
   if (events & (WIFI_STARTED | WIFI_CONNECTED)) {
     /* Reassert the receiver once per lifecycle change. Do not assume the
      * driver erased its peers, and do not restart the protocol core. */
@@ -1755,6 +1869,21 @@ void SerinLinkComponent::log_transport_(uint32_t now) {
 void SerinLinkComponent::loop() {
   uint32_t now = millis();
   process_wifi_events_();
+  /* External room-source heartbeat. Home Assistant publishes only on change
+   * and cn105 re-arms remote_temperature_timeout only on each
+   * set_remote_temperature call, so a steady room would trip the timeout and
+   * flap back on the next change. Re-send the selected source's reading
+   * until it publishes NaN: gated on the reading, not the 90 s freshness
+   * window, because a quiet sensor cannot be judged by publish age. Paused
+   * while no API client is connected, so the timeout still trips when Home
+   * Assistant is gone. Ahead of the transport gate: an external source needs
+   * no radio. */
+  if (selected_ext_ >= 0 && ext_fire_ms_ != 0 &&
+      !std::isnan(ext_sources_[selected_ext_].last) &&
+      now - ext_fire_ms_ >= ROOM_TEMP_HEARTBEAT_MS && api_client_connected()) {
+    fire_room_temperature_(ext_sources_[selected_ext_].last);
+    ext_fire_ms_ = now;
+  }
   if (!started_) {
     if (transport_attempts_ < 5 && (transport_attempts_ == 0 ||
         now - last_transport_attempt_ms_ >= (1000u << (transport_attempts_ - 1))))
@@ -1795,6 +1924,7 @@ void SerinLinkComponent::loop() {
     ESP_LOGV(TAG, "rx type=%u len=%u from %02X:%02X:%02X:%02X:%02X:%02X",
              f.len >= 1 ? f.data[0] : 0, f.len,
              f.src[0], f.src[1], f.src[2], f.src[3], f.src[4], f.src[5]);
+    if (pair_req_past_max_links_(f.data, f.len)) continue;
     sl2_link_on_recv(&link_, f.src, f.dst, f.data, f.len);
   }
   sl2_link_loop(&link_);
@@ -1945,7 +2075,8 @@ void SerinLinkComponent::dump_config() {
       ESP_LOGCONFIG(TAG, "    per-slot sensor rows: %d (every Link's reading, "
                     "arbitration feeds only the pair above)", n_rows);
     for (const auto &e : ext_sources_)
-      ESP_LOGCONFIG(TAG, "    external room source: %s", e.name.c_str());
+      ESP_LOGCONFIG(TAG, "    external room source: %s%s", e.name.c_str(),
+                    e.fahrenheit ? " (°F, converted to °C)" : "");
   }
   int n_dials = sl2_link_dial_count(&link_);
   ESP_LOGCONFIG(TAG, "  bonded Serin Links: %d", n_dials);
