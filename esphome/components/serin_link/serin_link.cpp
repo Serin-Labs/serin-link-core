@@ -1678,6 +1678,13 @@ void SerinLinkComponent::process_wifi_events_() {
     ESP_LOGI(TAG, "Wi-Fi disconnect reason=%" PRIu32 " count=%" PRIu32,
              __atomic_load_n(&wifi_disconnect_reason_, __ATOMIC_RELAXED),
              __atomic_load_n(&wifi_disconnects_, __ATOMIC_RELAXED));
+  if (events & WIFI_CONNECTED) {
+    /* ESPHome re-applies its power_save_mode at STA start, and modem sleep
+     * drops ESP-NOW RX. Force it off on the connect edge itself: the audit
+     * in maintain_transport_ would catch it later, but waits out any open
+     * pairing window, which is when the broadcasts must get through. */
+    transport_ok("esp_wifi_set_ps(NONE)", esp_wifi_set_ps(WIFI_PS_NONE));
+  }
   if (events & (WIFI_STARTED | WIFI_CONNECTED)) {
     /* Reassert the receiver once per lifecycle change. Do not assume the
      * driver erased its peers, and do not restart the protocol core. */

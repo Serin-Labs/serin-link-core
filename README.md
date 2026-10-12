@@ -331,9 +331,13 @@ Wi-Fi STA start or connection event. Failures remain visible in the logs.
 Every five seconds, the adapter audits driver state and the bonded peers. It
 restores a missing peer or incorrect interface, channel, encryption setting,
 or LMK using the existing bond. Wi-Fi start/connect events also refresh the
-receive callback. Repairs use the same retry limit, preserve the protocol
-session and saved bonds, and leave correct peers alone. Recovery waits while
-pairing is active so it cannot overwrite a candidate key. A failed candidate
+receive callback. A Wi-Fi connect event also forces power save off at once,
+because ESPHome re-applies its own `power_save_mode` when the station restarts
+and modem sleep drops ESP-NOW frames. Keep `power_save_mode: NONE` in the
+`wifi:` block anyway, as the examples do, so the radio stays awake from boot.
+Repairs use the same retry limit, preserve the protocol session and saved
+bonds, and leave correct peers alone. Recovery waits while pairing is active
+so it cannot overwrite a candidate key. A failed candidate
 installation immediately restores the original peer and closes pairing as
 `cancelled`; a failed broadcast-peer installation leaves pairing `idle`.
 

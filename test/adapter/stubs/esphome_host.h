@@ -317,6 +317,7 @@ inline void *wifi_event_context = nullptr;
 inline bool radio_initialized = false;
 inline int fail_init = 0, fail_pmk = 0, fail_callback = 0, fail_peer = 0, fail_ps = 0, fail_event = 0;
 inline int init_calls = 0, pmk_calls = 0, callback_calls = 0, peer_calls = 0, sends = 0, event_calls = 0;
+inline int ps_calls = 0;
 inline int wifi_channel = 6, power_save = 0;
 inline Mac mac_key(const uint8_t *p) { Mac m; std::copy(p, p+6, m.begin()); return m; }
 inline bool fail_next(int &count) { if (!count) return false; --count; return true; }
@@ -324,7 +325,7 @@ inline void reset_radio() {
   peers.clear(); receive_callback = nullptr; wifi_event_callback = nullptr; wifi_event_context = nullptr;
   radio_initialized = false;
   fail_init = fail_pmk = fail_callback = fail_peer = fail_ps = fail_event = 0;
-  init_calls = pmk_calls = callback_calls = peer_calls = sends = event_calls = 0;
+  init_calls = pmk_calls = callback_calls = peer_calls = sends = event_calls = ps_calls = 0;
   wifi_channel = 6; power_save = 0;
 }
 inline void wifi_event(int event, uint8_t reason = 0) {
@@ -397,6 +398,7 @@ inline esp_err_t esp_wifi_get_mac(int, uint8_t *out) { const uint8_t mac[6] = {2
 inline esp_err_t esp_wifi_get_channel(uint8_t *channel, wifi_second_chan_t *secondary) { *channel=adapter_host::wifi_channel; *secondary=0; return ESP_OK; }
 inline esp_err_t esp_wifi_get_ps(wifi_ps_type_t *ps) { *ps=adapter_host::power_save; return ESP_OK; }
 inline esp_err_t esp_wifi_set_ps(wifi_ps_type_t ps) {
+  ++adapter_host::ps_calls;
   if (adapter_host::fail_next(adapter_host::fail_ps)) return ESP_FAIL;
   adapter_host::power_save=ps; return ESP_OK;
 }

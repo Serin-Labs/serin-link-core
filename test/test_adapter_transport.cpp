@@ -205,6 +205,24 @@ static void recovery_defers_while_pairing() {
   require(peers.at(dial_mac(1)).lmk[0] == 0, "deferred repair did not resume after pairing");
 }
 
+/* ESPHome re-applies its power_save_mode when the STA restarts, and modem
+ * sleep drops ESP-NOW RX. The connect edge forces it off at once: the 5 s
+ * audit is deferred while a pairing window is open, exactly when the pairing
+ * broadcasts must get through. */
+static void reconnect_forces_power_save_off() {
+  Fixture f;
+  f.component.pair_start();
+  require(f.component.pairing(), "pairing window did not open");
+  wifi_event(WIFI_EVENT_STA_DISCONNECTED, 8);
+  power_save = 1; // ESPHome's STA_START handler re-applied modem sleep
+  const int calls = ps_calls;
+  wifi_event(WIFI_EVENT_STA_CONNECTED);
+  require(ps_calls == calls, "Wi-Fi event callback mutated the radio");
+  tick(f.component, 1);
+  require(ps_calls == calls + 1, "connect event did not call the power-save setter");
+  require(power_save == WIFI_PS_NONE, "connect event left Wi-Fi power save on");
+}
+
 /* A correctly signed PAIR_REQ from a new dial, handed to the core the way the
  * radio delivers the broadcast. */
 static void pair_request(AdapterProbe &component, uint8_t dial) {
@@ -278,6 +296,7 @@ int main() {
     {"missing event handler connection fallback", missing_wifi_handler_can_recover_on_connection_edge},
     {"repair defers during pairing", recovery_defers_while_pairing},
     {"power-save failure retries", power_save_failure_retries},
+    {"connect forces power save off", reconnect_forces_power_save_off},
     {"pairing refused at max_links", pairing_refused_at_max_links},
     {"pairing opens below max_links", pairing_opens_below_max_links},
   };
