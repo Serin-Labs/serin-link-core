@@ -309,7 +309,8 @@ static void pair_end(sl2_link_t *l, const char *result) {
 
 void sl2_link_pair_start(sl2_link_t *l, uint32_t window_ms) {
     if (!l->started) { l->pair_result = "idle"; return; }
-    if (l->n_dials >= SL2_MAX_DIALS) { l->pair_result = "full"; return; }
+    /* A full table still opens: a bonded dial may re-pair into its own slot.
+     * on_pair_req() refuses a new dial with "full", which the timeout keeps. */
     /* Already pairing (double button press, on_boot + button): only extend
      * the window. Regenerating the ephemeral or resetting CONFIRM here
      * killed a mid-flight handshake — the dial's confirming probe arrived
@@ -784,7 +785,7 @@ void sl2_link_loop(sl2_link_t *l) {
     /* pairing timeouts */
     if (l->pair == SL2_PAIR_WINDOW &&
         (int32_t)(now - l->pair_deadline_ms) >= 0) {
-        pair_end(l, "timeout");
+        pair_end(l, strcmp(l->pair_result, "full") == 0 ? "full" : "timeout");
     } else if (l->pair == SL2_PAIR_CONFIRM &&
                ((int32_t)(now - l->confirm_deadline_ms) >= 0 ||
                 (int32_t)(now - l->pair_deadline_ms) >= 0)) {

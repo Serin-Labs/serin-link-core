@@ -691,19 +691,54 @@ static void test_bad_signature_ignored(void) {
     printf("bad signature ok\n");
 }
 
+/* A full bond table still opens the window: a bonded dial may re-pair (same
+ * pinned identity, fresh LMK, slot reused), while a fifth dial is refused and
+ * the window's verdict stays "full" rather than decaying to "timeout". */
 static void test_full_table(void) {
     sl2_link_t l;
     fresh(&l);
+    fdial_t d[SL2_MAX_DIALS];
     for (int i = 0; i < SL2_MAX_DIALS; i++) {
-        fdial_t d;
-        dial_make(&d, (uint8_t)(0xA0 + i));
-        pair_dial(&l, &d);
+        dial_make(&d[i], (uint8_t)(0xA0 + i));
+        F.n_sent = 0;
+        pair_dial(&l, &d[i]);
     }
     assert(sl2_link_dial_count(&l) == SL2_MAX_DIALS);
+
+    fdial_t *again = &d[2];
+    uint8_t old_lmk[16];
+    memcpy(old_lmk, again->lmk, sizeof old_lmk);
+    t_xkp(NULL, again->eph_priv, again->eph_pub);   /* the dial's new handshake */
+    F.n_sent = 0;
+    pair_dial(&l, again);              /* window opens; re-pair commits */
+    assert(sl2_link_dial_count(&l) == SL2_MAX_DIALS);
+    assert(memcmp(again->lmk, old_lmk, 16) != 0);
+    uint8_t blob[SL2_BONDS_BLOB_MAX];
+    size_t len = sizeof blob;
+    assert(f_kv_get(NULL, SL2_KV_BONDS, blob, &len));
+    sl2_dial_bond_t recs[SL2_MAX_DIALS];
+    assert(sl2_bonds_decode(blob, len, recs) == SL2_MAX_DIALS);
+    assert(memcmp(recs[2].mac, again->mac, 6) == 0);
+    assert(memcmp(recs[2].lmk, again->lmk, 16) == 0);
+    assert(memcmp(recs[2].id_pub, again->id_pub, 32) == 0);
+
+    /* A dial the table has no room for is refused, and says so. */
+    fdial_t extra;
+    dial_make(&extra, 0xEE);
+    F.n_sent = 0;
     sl2_link_pair_start(&l, 60000);
+    assert(sl2_link_pairing(&l));
+    struct sl2_pair_req_pkt req;
+    dial_req(&extra, &req);
+    sl2_link_on_recv(&l, extra.mac, BCAST, (const uint8_t *)&req, (int)sizeof req);
+    assert(count_sends_of(SL2_PKT_PAIR_RESP, NULL) == 0);
+    assert(strcmp(sl2_link_pair_result(&l), "full") == 0);
+    F.now += 60001;
+    sl2_link_loop(&l);
     assert(!sl2_link_pairing(&l));
     assert(strcmp(sl2_link_pair_result(&l), "full") == 0);
-    printf("full table ok\n");
+    assert(sl2_link_dial_count(&l) == SL2_MAX_DIALS);
+    printf("full table allows bonded re-pair ok\n");
 }
 
 static void test_pair_start_mid_handshake_is_harmless(void) {

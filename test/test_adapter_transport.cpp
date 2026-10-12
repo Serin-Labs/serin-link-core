@@ -262,6 +262,31 @@ static void pairing_refused_past_max_links() {
   pair_request(f.component, 2);
   require(std::strcmp(f.component.pair_result(), "full") == 0, "new Link past max_links did not report full");
   require(f.component.dial_count() == 1 && sends == sent, "a PAIR_REQ past max_links was answered");
+  tick(f.component, 60001);
+  require(!f.component.pairing() && std::strcmp(f.component.pair_result(), "full") == 0,
+          "the window's timeout did not keep the full verdict");
+}
+
+/* The core now opens the window on a full bond table too, and refuses a new
+ * Link itself. With max_links unset or equal to the table size, the outcome
+ * matches the max_links filter: a fifth Link reads "full", a bonded one
+ * re-pairs. */
+static void full_bond_table_refuses_new_and_repairs_bonded() {
+  for (int max : {0, SL2_MAX_DIALS}) {
+    Fixture f(false, {1, 2, 3, 4});
+    if (max) f.component.set_max_links(max);
+    uint8_t id_priv[64];
+    dial_identity(1, id_priv, f.component.core()->dial[0].bond.id_pub);
+    f.component.pair_start();
+    require(f.component.pairing(), "pairing window did not open on a full bond table");
+    const int sent = sends;
+    pair_request(f.component, 5);
+    require(std::strcmp(f.component.pair_result(), "full") == 0 && sends == sent &&
+            f.component.dial_count() == SL2_MAX_DIALS, "a fifth Link was not refused as full");
+    pair_request(f.component, 1);
+    require(std::strcmp(f.component.pair_result(), "confirming") == 0,
+            "a bonded Link could not re-pair on a full bond table");
+  }
 }
 
 /* At the cap, the bonded Link presenting its pinned identity re-pairs. */
@@ -330,6 +355,7 @@ int main() {
     {"pairing refused past max_links", pairing_refused_past_max_links},
     {"bonded Link re-pairs at max_links", bonded_link_repairs_at_max_links},
     {"foreign PAIR_REQ outside a window", foreign_pair_request_without_window_is_ignored},
+    {"full bond table: new refused, bonded re-pairs", full_bond_table_refuses_new_and_repairs_bonded},
     {"pairing opens below max_links", pairing_opens_below_max_links},
   };
   unsigned failed = 0;

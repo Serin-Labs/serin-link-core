@@ -296,7 +296,9 @@ The controller keeps a **bond table**, not a single bond: up to
 `SL2_MAX_DIALS 4` records `{dial_mac[6], lmk[16], dial_id_pub[32], flags}`
 (flags bit 0 = the epoch-echo ratchet, section 3b). The pairing
 window *adds* (or refreshes, same pinned key) without forgetting existing dials;
-a full table refuses new pairs until one is forgotten. All bonded dials get the
+a full table still opens the window, so a bonded dial can refresh, but refuses
+a new dial (`full`, kept when the window times out) until one is forgotten.
+All bonded dials get the
 STATE stream (unicast per peer, same change/heartbeat policy); CMD is accepted
 from any bonded dial; the post-CMD STATE echo goes to **all** bonded dials so
 every head converges within one send. Per-dial forget via the controller UI
