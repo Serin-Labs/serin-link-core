@@ -53,6 +53,9 @@ declare -A MUST_REJECT_WITH=(
   [fail_room_sources_duplicate_name.yaml]='same label'
   [fail_room_sources_no_link_sensor.yaml]='requires `link_sensor:`'
   [fail_primary_select_removed.yaml]='room_temperature_source: sources'
+  # backtick-guarded / unit-pair phrases the config echo cannot contain
+  [fail_room_sources_unit.yaml]='must be °C or °F'
+  [fail_room_sources_no_unit.yaml]='declares no `unit_of_measurement:`'
 )
 
 fails=0

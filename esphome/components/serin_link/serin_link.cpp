@@ -825,10 +825,12 @@ static bool is_room_src_valid(uint8_t v) {
   return v == SL2_ROOMSRC_INTERNAL || v == SL2_ROOMSRC_BLE || v == SL2_ROOMSRC_LINK;
 }
 
-void SerinLinkComponent::add_room_source(const std::string &name, sensor::Sensor *s) {
+void SerinLinkComponent::add_room_source(const std::string &name, sensor::Sensor *s,
+                                         bool fahrenheit) {
   ext_source_t e;
   e.name = name;
   e.sensor = s;
+  e.fahrenheit = fahrenheit;
   e.id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, name.c_str());
   const int idx = static_cast<int>(ext_sources_.size());
   ext_sources_.push_back(e);
@@ -843,6 +845,9 @@ int SerinLinkComponent::ext_index_(uint64_t id) const {
 
 void SerinLinkComponent::ext_state_(int idx, float v) {
   if (idx < 0 || idx >= static_cast<int>(ext_sources_.size())) return;
+  /* Convert once, here, so the cache, the heartbeat and on_room_temperature:
+   * all carry °C. */
+  if (ext_sources_[idx].fahrenheit && !std::isnan(v)) v = (v - 32.0f) * 5.0f / 9.0f;
   /* NaN is "no reading", not a reading: it never fires and leaves last_ms
    * alone, but it does replace the cached value, so neither loop()'s
    * heartbeat nor a re-selection re-sends a reading the source withdrew. */
@@ -2000,7 +2005,8 @@ void SerinLinkComponent::dump_config() {
       ESP_LOGCONFIG(TAG, "    per-slot sensor rows: %d (every Link's reading, "
                     "arbitration feeds only the pair above)", n_rows);
     for (const auto &e : ext_sources_)
-      ESP_LOGCONFIG(TAG, "    external room source: %s", e.name.c_str());
+      ESP_LOGCONFIG(TAG, "    external room source: %s%s", e.name.c_str(),
+                    e.fahrenheit ? " (°F, converted to °C)" : "");
   }
   int n_dials = sl2_link_dial_count(&link_);
   ESP_LOGCONFIG(TAG, "  bonded Serin Links: %d", n_dials);

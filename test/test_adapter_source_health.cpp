@@ -328,6 +328,29 @@ static void heartbeat_pauses_without_home_assistant() {
           "heartbeat did not resume after Home Assistant reconnected");
 }
 
+/* A °F source (unit checked at config time) converts once, on arrival, so the
+ * feed, the cached value and the heartbeat all carry °C. */
+static void fahrenheit_external_source_feeds_celsius() {
+  Fixture f;
+  esphome::sensor::Sensor external;
+  f.component.add_room_source("External", &external, true);
+  const uint64_t id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External");
+  f.select_id(id);
+  external.publish_state(72.5f);
+  require(f.room_temperature.emitted == std::vector<float>{22.5f}, "°F reading was not fed as °C");
+  f.run_loop(30000);
+  require(f.room_temperature.emitted == std::vector<float>{22.5f, 22.5f},
+          "heartbeat re-sent an unconverted reading");
+  f.select_id(link_id(1));
+  f.select_id(id);
+  require(f.room_temperature.emitted == std::vector<float>{22.5f, 22.5f, 22.5f},
+          "re-selection reused an unconverted reading");
+  external.publish_state(50.0f);
+  require(f.room_temperature.emitted.back() == 10.0f, "°F update was not converted");
+  external.publish_state(NAN);
+  selected(f, id, SL2_ROOMST_STALE);
+}
+
 static void heartbeat_fires_at_exactly_30_s() {
   Fixture f;
   esphome::sensor::Sensor external;
@@ -357,6 +380,7 @@ int main() {
     {"withdrawn external reading", withdrawn_external_reading_is_not_resent},
     {"heartbeat without Home Assistant", heartbeat_pauses_without_home_assistant},
     {"heartbeat 30 s boundary", heartbeat_fires_at_exactly_30_s},
+    {"Fahrenheit external source", fahrenheit_external_source_feeds_celsius},
   };
   unsigned failed = 0;
   for (const auto &test : tests) {

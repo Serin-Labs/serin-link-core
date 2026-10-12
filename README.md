@@ -172,6 +172,7 @@ sensor:
     id: ha_room_temp
     name: "Home Assistant"
     entity_id: sensor.living_room_temperature
+    unit_of_measurement: "°C"         # the HA entity's unit: °C or °F
 
 serin_link:
   link_sensor:
@@ -181,6 +182,11 @@ serin_link:
     sources:
       - sensor: ha_room_temp          # label defaults to the sensor's name
 ```
+
+Each source sensor must declare `unit_of_measurement:` as `°C` or `°F`, and
+config validation rejects any other unit or a missing one. A `homeassistant`
+sensor does not inherit its entity's unit, so set it to match the entity.
+A `°F` source is converted to °C as each reading arrives.
 
 `on_room_temperature:` receives the selected source's reading in °C, and `0`
 when `Heat pump` is chosen — cn105's own "use the built-in sensor" value, so

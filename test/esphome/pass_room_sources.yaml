@@ -1,6 +1,8 @@
 # room_temperature_source: sources: — external readings (any ESPHome sensor)
 # offered in the same controller-owned dropdown/catalog as the Serin Links.
-# One inherits its label from the sensor's name; one overrides it.
+# One inherits its label from the sensor's name; one overrides it. Units: one
+# declares °C, one °F (converted on arrival), and the nested dht sensor
+# inherits its platform's °C default from a declaration below the top level.
 esphome:
   name: t-room-sources
 
@@ -25,9 +27,18 @@ sensor:
   - platform: template
     id: ha_room_temp
     name: "Home Assistant"
+    unit_of_measurement: "°C"
   - platform: template
     id: hall_temp
     name: "Hallway Template"
+    unit_of_measurement: "°F"
+  - platform: dht
+    pin: GPIO4
+    temperature:
+      id: dht_temp
+      name: "DHT Temperature"
+    humidity:
+      name: "DHT Humidity"
 
 serin_link:
   id: serin
@@ -40,3 +51,5 @@ serin_link:
       - sensor: ha_room_temp
       - sensor: hall_temp
         name: "Hallway"
+      - sensor: dht_temp
+        name: "Bedroom"

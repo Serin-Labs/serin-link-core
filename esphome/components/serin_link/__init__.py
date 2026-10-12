@@ -14,7 +14,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome import automation
-from esphome.core import HexInt
+from esphome.core import CORE, HexInt
 from esphome.components import (
     binary_sensor,
     button,
@@ -32,6 +32,7 @@ from esphome.const import (
     CONF_NAME,
     CONF_TEMPERATURE,
     CONF_TRIGGER_ID,
+    CONF_UNIT_OF_MEASUREMENT,
     DEVICE_CLASS_CONNECTIVITY,
     DEVICE_CLASS_DURATION,
     DEVICE_CLASS_HUMIDITY,
@@ -107,6 +108,11 @@ MAX_ROOM_SOURCES = 7
 HEAT_PUMP_LABEL = "Heat pump"
 # Must match SL2_ROOM_SOURCE_NAME_LEN - 1 in sl2_proto.h.
 ROOM_SOURCE_NAME_MAX = 23
+UNIT_FAHRENHEIT = "°F"
+# CORE.data key: ids of `sources:` sensors whose readings are °F. Found in
+# FINAL_VALIDATE_SCHEMA (the only phase that can see a sensor declared
+# elsewhere) and read back by to_code.
+KEY_FAHRENHEIT_SOURCES = "serin_link_fahrenheit_sources"
 
 
 CONF_DIAGNOSTICS = "diagnostics"
@@ -827,10 +833,51 @@ def _room_sources_labels_unique(config):
     return config
 
 
+def _room_sources_units(config):
+    """A source's value reaches on_room_temperature: as °C, so its unit must
+    be known: °C as is, °F converted on arrival, anything else rejected. A
+    missing unit is rejected too — a homeassistant sensor does not inherit
+    its entity's unit, so silence here is how a °F reading got fed as °C.
+    The declaration is found by id, so a sensor nested inside another
+    platform (with that platform's default unit) works the same way.
+    Recomputed on every validation, so an id from an earlier pass in the
+    same process cannot linger (serin_link is single-instance)."""
+    fahrenheit = CORE.data[KEY_FAHRENHEIT_SOURCES] = set()
+    rts = config.get(CONF_ROOM_TEMPERATURE_SOURCE)
+    if not rts or not rts.get(CONF_SOURCES):
+        return config
+    full = fv.full_config.get()
+    for src, label in zip(rts[CONF_SOURCES], room_source_labels(rts)):
+        sid = src[CONF_SENSOR]
+        decl = full.get_config_for_path(full.get_path_for_id(sid)[:-1])
+        unit = decl.get(CONF_UNIT_OF_MEASUREMENT)
+        if unit == UNIT_CELSIUS:
+            continue
+        if unit == UNIT_FAHRENHEIT:
+            fahrenheit.add(str(sid))
+            continue
+        if unit is None:
+            raise cv.Invalid(
+                f"room source `{label}` (sensor `{sid}`) declares no "
+                f"`unit_of_measurement:` — set it to \"°C\" or \"°F\" to "
+                f"match the reading. A homeassistant sensor does not inherit "
+                f"its entity's unit, and a °F reading taken as °C would tell "
+                f"the heat pump the room is far too hot."
+            )
+        raise cv.Invalid(
+            f"room source `{label}` (sensor `{sid}`) reports `{unit}`, but a "
+            f"room temperature source must be °C or °F (°F is converted) — "
+            f"set the sensor's `unit_of_measurement:` to the unit its value "
+            f"is actually in."
+        )
+    return config
+
+
 def _final_validate(config):
     _no_builtin_espnow(config)
     _ota_creds_need_a_psk(config)
     _room_sources_labels_unique(config)
+    _room_sources_units(config)
     return config
 
 
@@ -1026,9 +1073,10 @@ async def to_code(config):
         sel = await select.new_select(rts, options=room_source_options(config))
         await cg.register_parented(sel, var)
         cg.add(var.set_room_source_select(sel))
+        fahrenheit = CORE.data.get(KEY_FAHRENHEIT_SOURCES, set())
         for src, label in zip(rts.get(CONF_SOURCES) or [], room_source_labels(rts)):
             sens = await cg.get_variable(src[CONF_SENSOR])
-            cg.add(var.add_room_source(label, sens))
+            cg.add(var.add_room_source(label, sens, str(src[CONF_SENSOR]) in fahrenheit))
     if CONF_DIAGNOSTICS in config:
         diag = config[CONF_DIAGNOSTICS]
         if CONF_CONNECTED in diag:

@@ -103,8 +103,10 @@ class SerinLinkComponent : public Component {
   /* room_temperature_source: sources: — an external reading (any ESPHome
    * sensor) offered as a selectable room source. Registered in YAML order;
    * the position is the dropdown index (after Heat pump) and the catalog
-   * position on the dial. The id is a hash of the label (sl2_proto.h). */
-  void add_room_source(const std::string &name, sensor::Sensor *s);
+   * position on the dial. The id is a hash of the label (sl2_proto.h).
+   * fahrenheit: the sensor's schema-checked unit is °F; its readings are
+   * converted to °C as they arrive. */
+  void add_room_source(const std::string &name, sensor::Sensor *s, bool fahrenheit = false);
   void room_source_select_control(size_t index);
   bool room_catalog_page(uint16_t cursor, struct sl2_room_source_entry *entries,
                          uint8_t cap, uint8_t *count, uint16_t *next,
@@ -288,8 +290,9 @@ class SerinLinkComponent : public Component {
     std::string name;
     sensor::Sensor *sensor;
     uint64_t id;
-    float last{NAN};       /* latest value; NaN once the sensor withdraws it */
+    float last{NAN};       /* latest value in °C; NaN once the sensor withdraws it */
     uint32_t last_ms{0};   /* millis() of the last non-NaN value; 0 = never */
+    bool fahrenheit{false};  /* sensor reports °F (unit checked in __init__.py) */
   };
   std::vector<ext_source_t> ext_sources_;
   /* Third projection of selected_source_id_ (with has_primary_dial_ and
