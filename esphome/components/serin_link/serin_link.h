@@ -237,6 +237,11 @@ class SerinLinkComponent : public Component {
   /* wire setpoints clamp to the entity's visual range (not every platform
    * clamps in its own control()) */
   float clamp_setpoint_(float c);
+  /* the entity's visual step is 0.5 °C: Mitsubishi's grid, °F via ftab 1 */
+  bool half_degree_grid_() const;
+  /* wire setpoint -> the °C value to stage: snapped to a 0.5 °C grid when
+   * the entity has one, then clamped */
+  float setpoint_from_wire_(int16_t dc);
   /* Dial CMDs are staged, not applied inline: a burst of detent edits merges
    * into hold_ (latest wins) and one ClimateCall goes out after cmd_debounce_
    * of quiet. The same staged values overlay hvac_get_state until the entity

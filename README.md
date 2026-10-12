@@ -552,6 +552,11 @@ Notes:
 - Wire input is validated before it reaches the entity: setpoints clamp to
   the entity's visual range, out-of-range humidity is ignored, unknown
   modes/presets are no-ops.
+- An entity with a 0.5 °C visual step (Mitsubishi's grid) gets the
+  Mitsubishi °F table in CAPS (`ftab_id 1`), so 72 °F means 22.5 °C exactly
+  as on the unit's own remote. Incoming setpoints also snap to that grid
+  before they apply, so the Serin Link's echo never jumps when the entity
+  stores its own rounding. Any other step keeps linear °F.
 - Serin Link edits are debounced: a CMD burst (e.g. scrolling through setpoints)
   merges into one `ClimateCall`, applied after 300 ms of quiet (internal
   tuning, matched to the knob's detent rate). The STATE echoed to Serin Links

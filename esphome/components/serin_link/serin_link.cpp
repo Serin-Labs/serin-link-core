@@ -443,6 +443,21 @@ float SerinLinkComponent::clamp_setpoint_(float c) {
   return c;
 }
 
+bool SerinLinkComponent::half_degree_grid_() const {
+  return climate_ != nullptr &&
+         std::lround(climate_->get_traits().get_visual_target_temperature_step() * 10.0f) == 5;
+}
+
+/* Off-grid values (a linear-°F dial, any rounding upstream) snap before they
+ * are staged, so the overlay holds what the entity will confirm. Otherwise
+ * the entity stores its own rounding (cn105 truncates to the grid), the
+ * overlay never confirms, and the dial's echo jumps when it expires. */
+float SerinLinkComponent::setpoint_from_wire_(int16_t dc) {
+  float c = sl2_dc_to_c(dc);
+  if (half_degree_grid_()) c = std::round(c * 2.0f) / 2.0f;
+  return clamp_setpoint_(c);
+}
+
 bool SerinLinkComponent::hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd) {
   if (mask & SL2_CM_UNITS) {
     use_f_ = cmd->use_f != 0;
@@ -474,14 +489,14 @@ bool SerinLinkComponent::hvac_apply(uint16_t mask, const struct sl2_cmd_pkt *cmd
     stage_(SL2_CM_MODE); any = true;
   }
   if (mask & SL2_CM_TEMP) {
-    hold_.set_dc = sl2_c_to_dc(clamp_setpoint_(sl2_dc_to_c(cmd->set_dc)));
+    hold_.set_dc = sl2_c_to_dc(setpoint_from_wire_(cmd->set_dc));
     stage_(SL2_CM_TEMP); any = true;
   }
   if (mask & SL2_CM_TEMP_BAND) {
     hold_.set_low_dc = cmd->set_low_dc != SL2_DC_NA
-        ? sl2_c_to_dc(clamp_setpoint_(sl2_dc_to_c(cmd->set_low_dc))) : SL2_DC_NA;
+        ? sl2_c_to_dc(setpoint_from_wire_(cmd->set_low_dc)) : SL2_DC_NA;
     hold_.set_high_dc = cmd->set_high_dc != SL2_DC_NA
-        ? sl2_c_to_dc(clamp_setpoint_(sl2_dc_to_c(cmd->set_high_dc))) : SL2_DC_NA;
+        ? sl2_c_to_dc(setpoint_from_wire_(cmd->set_high_dc)) : SL2_DC_NA;
     stage_(SL2_CM_TEMP_BAND); any = true;
   }
   if ((mask & SL2_CM_FAN) && !fan_detents_.empty()) {
@@ -692,7 +707,10 @@ bool SerinLinkComponent::hvac_get_caps(struct sl2_caps_pkt *out) {
   float step = traits.get_visual_target_temperature_step();
   int step_dc = static_cast<int>(std::lround(step * 10.0f));
   out->set_step_dc = static_cast<uint8_t>(step_dc < 5 ? 5 : step_dc);
-  out->ftab_id = 0;                          /* linear °F display */
+  /* A 0.5 °C grid is Mitsubishi's, whose °F scale is the non-linear ftab 1
+   * table (sl2_proto.h): linear °F lands between grid points (72 °F = 22.2,
+   * stored as 22.0, shown as 71 °F on the unit). Any other step: linear. */
+  out->ftab_id = half_degree_grid_() ? 1 : 0;
   if (traits.has_feature_flags(climate::CLIMATE_SUPPORTS_TWO_POINT_TARGET_TEMPERATURE))
     out->band_min_gap_dc = 5;
   if (traits.has_feature_flags(climate::CLIMATE_SUPPORTS_TARGET_HUMIDITY)) {

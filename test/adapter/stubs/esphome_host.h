@@ -201,21 +201,23 @@ struct ClimateTraits {
   bool supports_fan_mode(ClimateFanMode mode) const {
     return std::find(fan_modes.begin(), fan_modes.end(), mode) != fan_modes.end();
   }
+  unsigned feature_flags{0};
+  float visual_step{0.5f};
   bool supports_mode(ClimateMode) const { return true; }
   bool supports_preset(ClimatePreset) const { return true; }
-  bool has_feature_flags(ClimateFeature) const { return false; }
+  bool has_feature_flags(ClimateFeature f) const { return (feature_flags & f) != 0; }
   float get_visual_min_temperature() const { return 16; }
   float get_visual_max_temperature() const { return 30; }
-  float get_visual_target_temperature_step() const { return 0.5f; }
+  float get_visual_target_temperature_step() const { return visual_step; }
 };
 class Climate;
 class ClimateCall {
  public:
   explicit ClimateCall(Climate *parent) : parent_(parent) {}
   void set_mode(ClimateMode) {}
-  void set_target_temperature(float) {}
-  void set_target_temperature_low(float) {}
-  void set_target_temperature_high(float) {}
+  void set_target_temperature(float t) { target_ = t; }
+  void set_target_temperature_low(float t) { low_ = t; }
+  void set_target_temperature_high(float t) { high_ = t; }
   void set_target_humidity(float) {}
   void set_fan_mode(ClimateFanMode mode) { fan_mode_ = mode; }
   void set_preset(ClimatePreset) {}
@@ -223,6 +225,7 @@ class ClimateCall {
  private:
   Climate *parent_;
   std::optional<ClimateFanMode> fan_mode_;
+  std::optional<float> target_, low_, high_;
 };
 class Climate {
  public:
@@ -240,6 +243,10 @@ class Climate {
   std::string get_name() const { return "host climate"; }
 };
 inline void ClimateCall::perform() {
+  // Setpoints are stored as sent: no ESPHome-side snapping to the step.
+  if (target_) parent_->target_temperature = *target_;
+  if (low_) parent_->target_temperature_low = *low_;
+  if (high_) parent_->target_temperature_high = *high_;
   if (!fan_mode_) return;
   // ESPHome ClimateCall::validate_ drops fan modes absent from the traits.
   // A test must observe accepted state, not merely a captured set_fan_mode().
