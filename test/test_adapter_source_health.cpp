@@ -267,6 +267,28 @@ static void withdrawn_external_reading_is_not_resent() {
           "re-selection or heartbeat re-sent a withdrawn external reading");
 }
 
+/* An ESPHome homeassistant sensor goes silent, not NaN, when the API link
+ * drops, so the heartbeat must pause or the climate's timeout never trips. */
+static void heartbeat_pauses_without_home_assistant() {
+  Fixture f;
+  esphome::sensor::Sensor external;
+  f.component.add_room_source("External", &external);
+  const uint64_t id = sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External");
+  f.select_id(id);
+  external.publish_state(21.0f);
+  f.run_loop(35000);
+  require(f.room_temperature.emitted == std::vector<float>{21.0f, 21.0f},
+          "connected heartbeat did not re-send");
+  api_connected = false;
+  f.run_loop(35000);
+  require(f.room_temperature.emitted.size() == 2,
+          "heartbeat kept re-sending with no Home Assistant connection");
+  api_connected = true;
+  f.run_loop(35000);
+  require(f.room_temperature.emitted == std::vector<float>{21.0f, 21.0f, 21.0f},
+          "heartbeat did not resume after Home Assistant reconnected");
+}
+
 int main() {
   const struct { const char *name; void (*run)(); } tests[] = {
     {"never-seen selected dial", never_seen_selected_dial_is_unavailable},
@@ -281,6 +303,7 @@ int main() {
     {"quiet external source heartbeat", quiet_external_source_is_resent},
     {"stale external re-selection", reselected_stale_source_is_not_resent},
     {"withdrawn external reading", withdrawn_external_reading_is_not_resent},
+    {"heartbeat without Home Assistant", heartbeat_pauses_without_home_assistant},
   };
   unsigned failed = 0;
   for (const auto &test : tests) {

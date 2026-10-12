@@ -25,10 +25,12 @@ inline std::map<uint32_t, std::vector<uint8_t>> preferences;
 void reset_radio();
 inline std::vector<std::string> logs;
 inline bool wifi_connected = false;
+inline bool api_connected = true;   // a native API client (Home Assistant) is connected
 inline void reset() {
   reset_radio();
   logs.clear();
   wifi_connected = false;
+  api_connected = true;
   now_ms = 1000;
   fail_storage = false;
   nvs.clear();
@@ -250,6 +252,13 @@ struct IPAddress {
   bool is_set() const { return false; }
   void str_to(char *out) const { out[0] = '\0'; }
 };
+}
+namespace api {
+class APIServer {
+ public: bool is_connected() const { return adapter_host::api_connected; }
+};
+inline APIServer host_api_server;
+inline APIServer *global_api_server = &host_api_server;
 }
 namespace wifi {
 constexpr size_t SSID_BUFFER_SIZE = 33;

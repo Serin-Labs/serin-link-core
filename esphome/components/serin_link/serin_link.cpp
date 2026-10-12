@@ -4,6 +4,10 @@
 #include "esphome/components/network/util.h"
 #include "esphome/components/wifi/wifi_component.h"
 #include "esphome/core/version.h"
+#include "esphome/core/defines.h"
+#ifdef USE_API
+#include "esphome/components/api/api_server.h"
+#endif
 
 #include <cctype>
 #include <cinttypes>
@@ -30,6 +34,17 @@ static SerinLinkComponent *g_self = nullptr;
  * heartbeat and the external-source heartbeat in loop(): a steady room must
  * not let the climate's remote-temperature timeout expire. */
 static const uint32_t ROOM_TEMP_HEARTBEAT_MS = 30000;
+
+/* A homeassistant sensor goes silent, not NaN, when the API link drops, so a
+ * quiet reading is only trustworthy while a client is connected. A node
+ * without the api component has no such link to lose. */
+static bool api_client_connected() {
+#ifdef USE_API
+  return api::global_api_server != nullptr && api::global_api_server->is_connected();
+#else
+  return true;
+#endif
+}
 
 /* bytes -> "AA:BB:CC:DD:EE:FF". publish_dial_() had the only copy; the
  * diagnostics rows and the dump_config bond table need the same format. */
@@ -1777,11 +1792,13 @@ void SerinLinkComponent::loop() {
    * set_remote_temperature call, so a steady room would trip the timeout and
    * flap back on the next change. Re-send the selected source's reading
    * until it publishes NaN: gated on the reading, not the 90 s freshness
-   * window, because a quiet sensor cannot be judged by publish age. Ahead of
-   * the transport gate: an external source needs no radio. */
+   * window, because a quiet sensor cannot be judged by publish age. Paused
+   * while no API client is connected, so the timeout still trips when Home
+   * Assistant is gone. Ahead of the transport gate: an external source needs
+   * no radio. */
   if (selected_ext_ >= 0 && ext_fire_ms_ != 0 &&
       !std::isnan(ext_sources_[selected_ext_].last) &&
-      now - ext_fire_ms_ >= ROOM_TEMP_HEARTBEAT_MS) {
+      now - ext_fire_ms_ >= ROOM_TEMP_HEARTBEAT_MS && api_client_connected()) {
     fire_room_temperature_(ext_sources_[selected_ext_].last);
     ext_fire_ms_ = now;
   }
