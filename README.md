@@ -27,6 +27,10 @@ an independent open-source CN105/HomeKit firmware.
 
 ## ESPHome quickstart
 
+Requires ESPHome 2026.3.0 or newer. The CN105 package
+([`packages/cn105.yaml`](esphome/packages/cn105.yaml)) enforces this floor with
+`esphome: min_version:`.
+
 ```yaml
 esp32:
   board: esp32-s3-devkitc-1

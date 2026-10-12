@@ -17,6 +17,11 @@
 # `serin_link: link_devices: [...]` in your device YAML (see
 # example_cn105.yaml) — a package cannot know your device ids.
 
+esphome:
+  # The oldest ESPHome this package and serin_link support; older releases
+  # stop here with a clear message instead of a compile error.
+  min_version: "2026.3.0"
+
 substitutions:
   zone_name: "Heat Pump"
   max_links: "1"
