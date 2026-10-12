@@ -568,8 +568,8 @@ _BASE_SCHEMA = cv.Schema(
         # cn105 give its sensor blocks ids and bind them here.
         cv.Optional(CONF_OUTSIDE_TEMP_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_COMPRESSOR_HZ_SENSOR): cv.use_id(sensor.Sensor),
-        # stage/sub-mode are text on cn105; strings map to wire codes via the
-        # Mitsubishi value tables in sl2_info.h (wire spec §9, COMPRESSOR TLV)
+        # stage/sub-mode are text on cn105; strings map back to the raw CN105
+        # codes (wire spec §9, COMPRESSOR codes)
         cv.Optional(CONF_STAGE_SENSOR): cv.use_id(text_sensor.TextSensor),
         cv.Optional(CONF_SUB_MODE_SENSOR): cv.use_id(text_sensor.TextSensor),
         cv.Optional(CONF_AUTO_SUB_MODE_SENSOR): cv.use_id(text_sensor.TextSensor),

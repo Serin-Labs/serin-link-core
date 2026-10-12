@@ -771,8 +771,12 @@ size_t SerinLinkComponent::fill_info_tlvs(uint8_t *buf, size_t cap) {
     uint8_t stage = 0, sub = 0, autosub = 0;
     if (stage_sensor_ != nullptr && stage_sensor_->has_state())
       stage = sl2_info_stage_code(stage_sensor_->state.c_str());
-    if (sub_mode_sensor_ != nullptr && sub_mode_sensor_->has_state())
-      sub = sl2_info_sub_mode_code(sub_mode_sensor_->state.c_str());
+    if (sub_mode_sensor_ != nullptr && sub_mode_sensor_->has_state()) {
+      /* indexed by sl2_info_sub_mode_code(): NORMAL, DEFROST, PREHEAT, STANDBY */
+      static const uint8_t CN105_SUB[] = {CN105_SUB_NORMAL, CN105_SUB_DEFROST,
+                                          CN105_SUB_PREHEAT, CN105_SUB_STANDBY};
+      sub = CN105_SUB[sl2_info_sub_mode_code(sub_mode_sensor_->state.c_str())];
+    }
     if (auto_sub_mode_sensor_ != nullptr && auto_sub_mode_sensor_->has_state())
       autosub = sl2_info_auto_sub_code(auto_sub_mode_sensor_->state.c_str());
     sl2_info_put_compressor(buf, cap, &off, hz, stage, sub, autosub);

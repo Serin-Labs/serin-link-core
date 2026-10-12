@@ -25,6 +25,16 @@
 namespace esphome {
 namespace serin_link {
 
+/* COMPRESSOR TLV vendor_sub byte (wire spec §9): the raw CN105 sub-mode codes
+ * the reference controller forwards (CN105_SUB_* in mitsubishi-cn105-homekit
+ * cn105_protocol.h), which is what a Serin Link decodes. They are bit codes,
+ * not the table positions sl2_info_sub_mode_code() returns. Stage and
+ * auto-sub need no table: their CN105 codes equal those positions. */
+static constexpr uint8_t CN105_SUB_NORMAL = 0x00;
+static constexpr uint8_t CN105_SUB_DEFROST = 0x02;
+static constexpr uint8_t CN105_SUB_PREHEAT = 0x04;
+static constexpr uint8_t CN105_SUB_STANDBY = 0x08;
+
 /* ESPHome adapter around the platform-free sl2_link core.
  *
  * Bind any `climate` entity (climate_id:) and the component derives the CAPS
