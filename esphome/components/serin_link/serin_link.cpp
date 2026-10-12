@@ -36,11 +36,14 @@ static SerinLinkComponent *g_self = nullptr;
 static const uint32_t ROOM_TEMP_HEARTBEAT_MS = 30000;
 
 /* A homeassistant sensor goes silent, not NaN, when the API link drops, so a
- * quiet reading is only trustworthy while a client is connected. A node
- * without the api component has no such link to lose. */
+ * quiet reading is only trustworthy while Home Assistant is connected. Only a
+ * state-subscribed client receives those states: a bare is_connected() also
+ * counts an `esphome logs` session or a client mid-handshake. A node without
+ * the api component has no such link to lose. */
 static bool api_client_connected() {
 #ifdef USE_API
-  return api::global_api_server != nullptr && api::global_api_server->is_connected();
+  return api::global_api_server != nullptr &&
+         api::global_api_server->is_connected_with_state_subscription();
 #else
   return true;
 #endif

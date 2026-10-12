@@ -283,10 +283,26 @@ static void heartbeat_pauses_without_home_assistant() {
   f.run_loop(35000);
   require(f.room_temperature.emitted.size() == 2,
           "heartbeat kept re-sending with no Home Assistant connection");
+  api_log_client = true; // an `esphome logs` session receives no sensor states
+  f.run_loop(35000);
+  require(f.room_temperature.emitted.size() == 2,
+          "a log-only API client kept the heartbeat alive with Home Assistant down");
   api_connected = true;
   f.run_loop(35000);
   require(f.room_temperature.emitted == std::vector<float>{21.0f, 21.0f, 21.0f},
           "heartbeat did not resume after Home Assistant reconnected");
+}
+
+static void heartbeat_fires_at_exactly_30_s() {
+  Fixture f;
+  esphome::sensor::Sensor external;
+  f.component.add_room_source("External", &external);
+  f.select_id(sl2_room_source_name_id(SL2_ROOM_SOURCE_NS_EXTERNAL, "External"));
+  external.publish_state(21.0f);
+  f.run_loop(29999);
+  require(f.room_temperature.emitted.size() == 1, "heartbeat fired before 30 s");
+  f.run_loop(1);
+  require(f.room_temperature.emitted == std::vector<float>{21.0f, 21.0f}, "heartbeat missed the 30 s mark");
 }
 
 int main() {
@@ -304,6 +320,7 @@ int main() {
     {"stale external re-selection", reselected_stale_source_is_not_resent},
     {"withdrawn external reading", withdrawn_external_reading_is_not_resent},
     {"heartbeat without Home Assistant", heartbeat_pauses_without_home_assistant},
+    {"heartbeat 30 s boundary", heartbeat_fires_at_exactly_30_s},
   };
   unsigned failed = 0;
   for (const auto &test : tests) {
