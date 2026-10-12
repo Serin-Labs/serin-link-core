@@ -285,6 +285,46 @@ The same table is printed at boot with no configuration at all:
 [C][serin_link:...]     [1] 10:51:DB:8E:F1:84  DOWN  last seen 412 s model 'Serin Link' fw '1.4.0'  caps_seq 7  cert 0
 ```
 
+### ESPHome transport recovery
+
+The adapter checks ESP-NOW initialization, PMK setup, receive-callback
+registration, Wi-Fi power-save enforcement, and saved-peer installation before
+reporting startup complete. Failed setup gets five total attempts, with retry
+intervals of 1, 2, 4, and 8 seconds. Exhausted retries resume on a subsequent
+Wi-Fi STA start or connection event. Failures remain visible in the logs.
+
+Every five seconds, the adapter audits driver state and the bonded peers. It
+restores a missing peer or incorrect interface, channel, encryption setting,
+or LMK using the existing bond. Wi-Fi start/connect events also refresh the
+receive callback. Repairs use the same retry limit, preserve the protocol
+session and saved bonds, and leave correct peers alone. Recovery waits while
+pairing is active so it cannot overwrite a candidate key. A failed candidate
+installation immediately restores the original peer and closes pairing as
+`cancelled`; a failed broadcast-peer installation leaves pairing `idle`.
+
+A silent Link alone never triggers a transport reset. The adapter does not
+call `esp_now_deinit()`, change the Wi-Fi channel, erase bonds, or restart the
+controller. All encrypted peers use channel 0, following the station's channel.
+These checks can repair detectable software state faults; they cannot identify
+or fix every radio/driver stall. MAC acknowledgements alone do not prove that
+an encrypted packet reached the application. See
+[Espressif's ESP-NOW documentation](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32c6/api-reference/network/esp_now.html).
+
+For a reconnect investigation, enable `DEBUG` logging for `serin_link`. The log
+records Wi-Fi lifecycle events and disconnect reasons, each repair attempt,
+and (at most every 30 seconds while a bonded Link is offline) its probe age,
+driver-peer lookup result, whether the peer configuration matches the bond,
+received frame count, queue drops, send failures, and current channel. A probe
+age of `-1` means no probe has arrived since startup. Keys and Wi-Fi credentials
+are never included in these diagnostics. An exhausted retry budget deliberately
+waits for another Wi-Fi start/connect event; it does not keep resetting the radio.
+
+After deploying an updated component, test a router disconnect/reconnect while
+leaving the Link powered on. Capture these logs through the event and check
+that fresh Link data returns without re-pairing. Host fault injection verifies
+the recovery paths, but cannot establish the cause of a particular hardware
+outage or substitute for this device test.
+
 ### Screen on/off from Home Assistant
 
 `screen:` adds one switch — the *presence gate* for every paired Serin Link's
@@ -558,6 +598,7 @@ is the reference non-ESPHome adopter.
 
 ```
 test/run.sh
+RUN_TSAN=1 test/run.sh  # also check the two-task RX queue with ThreadSanitizer
 ```
 
 Plain gcc, no hardware. Covers: wire layout offsets, tolerant short/long
@@ -566,7 +607,11 @@ codec, and the full core FSM against a fake port with deterministic toy crypto
 — pair/reboot/persist, pin-mismatch refusal, bad-signature drop, bond-table
 limit, re-key timeout, STATE cadence (first-live/change/heartbeat/pull/offline),
 CMD apply + echo-to-all-Links, CAPS/INFO pulls, credential relay, forget, and
-stranger/broadcast rejection. CI runs the suite plus an ESPHome compile on
+stranger/broadcast rejection. The real ESPHome adapter also runs against host
+platform stubs with failed setup, missing/misconfigured peers, driver loss,
+Wi-Fi lifecycle events, bounded retries, pairing deferral, and silent Links.
+The RX queue tests cover overflow, index rollover, and concurrent full-frame
+integrity. ThreadSanitizer requires a supported host runtime. CI runs the suite plus an ESPHome compile on
 every push.
 
 Real-curve crypto interop happens on hardware (libsodium on the Serin Link,

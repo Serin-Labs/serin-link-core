@@ -17,6 +17,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <esp_event.h>
 
 #include "sl2_link.h"
 #include "sl2_rxq.h"
@@ -394,7 +395,32 @@ class SerinLinkComponent : public Component {
   uint16_t overlay_mask_{0};             /* still masking STATE (confirm/timeout clears) */
   uint32_t overlay_since_ms_{0};
   uint32_t cmd_debounce_ms_{300};
-  uint32_t last_ps_check_ms_{0};
+  bool setup_transport_();
+  void try_start_(uint32_t now);
+  static bool port_send_(void *ctx, const uint8_t mac[6], const void *buf, size_t len);
+  static void on_wifi_event_(void *ctx, esp_event_base_t base, int32_t event, void *data);
+  void process_wifi_events_();
+  const char *transport_fault_();
+  bool repair_transport_();
+  void maintain_transport_(uint32_t now);
+  void log_transport_(uint32_t now);
+  esp_event_handler_instance_t wifi_handler_{nullptr};
+  bool wifi_was_connected_{false};
+  /* IDF event task writes these; loop() consumes them with atomic accesses. */
+  uint32_t wifi_events_{0};
+  uint32_t wifi_disconnect_reason_{0};
+  uint32_t wifi_disconnects_{0};
+  bool transport_initialized_{false};
+  bool transport_configured_{false};
+  bool transport_pending_{false};
+  bool refresh_recv_{false};
+  uint8_t transport_attempts_{0};
+  uint32_t last_transport_attempt_ms_{0};
+  uint32_t last_transport_check_ms_{0};
+  uint32_t last_transport_diag_ms_{0};
+  uint32_t rx_frames_{0};
+  uint32_t tx_failures_{0};
+  int last_send_error_{0};
   bool started_{false};
 };
 

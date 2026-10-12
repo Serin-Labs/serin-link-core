@@ -26,6 +26,7 @@ static struct {
     bool fail_bond_writes;
     int bond_write_attempts;
     int storage_errors;
+    int fail_peer_adds;
 } F;
 
 static void f_reset(void) { memset(&F, 0, sizeof F); memset(F.own, 0xC0, 6); }
@@ -47,6 +48,7 @@ static fpeer_t *f_find_peer(const uint8_t mac[6]) {
 }
 static bool f_peer_add(void *c, const uint8_t mac[6], const uint8_t lmk[16], bool enc) {
     (void)c;
+    if (F.fail_peer_adds) { --F.fail_peer_adds; return false; }
     fpeer_t *p = f_find_peer(mac);
     if (!p) {
         for (int i = 0; i < 8 && !p; i++) if (!F.peers[i].present) p = &F.peers[i];
@@ -762,6 +764,52 @@ static void test_confirm_timeout_restores_old_lmk(void) {
     fpeer_t *p = f_find_peer(d.mac);
     assert(p && memcmp(p->lmk, old_lmk, 16) == 0);
     printf("confirm timeout restore ok\n");
+}
+
+/* A failed replacement must roll back the radio as well as the saved bond. */
+static void test_candidate_install_failure(void) {
+    for (int existing = 1; existing >= 0; --existing) {
+        sl2_link_t l;
+        fresh(&l);
+        fdial_t d, keep;
+        dial_make(&d, 0xD3);
+        dial_make(&keep, 0xD4);
+        if (existing) pair_dial(&l, &d);
+        pair_dial(&l, &keep);
+        uint8_t old_lmk[16];
+        memcpy(old_lmk, d.lmk, sizeof old_lmk);
+        fkv_t saved[8];
+        memcpy(saved, F.kv, sizeof saved);
+        fpeer_t keep_peer = *f_find_peer(keep.mac);
+        t_xkp(NULL, d.eph_priv, d.eph_pub);
+        sl2_link_pair_start(&l, 60000);
+        struct sl2_pair_req_pkt req;
+        dial_req(&d, &req);
+        F.fail_peer_adds = 1;
+        sl2_link_on_recv(&l, d.mac, BCAST, (const uint8_t *)&req, sizeof req);
+        fpeer_t *peer = f_find_peer(d.mac);
+        assert(existing ? (peer && memcmp(peer->lmk, old_lmk, 16) == 0) : !peer);
+        assert(!sl2_link_pairing(&l) && !f_find_peer(BCAST));
+        assert(memcmp(saved, F.kv, sizeof saved) == 0);
+        assert(memcmp(&keep_peer, f_find_peer(keep.mac), sizeof keep_peer) == 0);
+        const uint8_t zero[32] = {0};
+        assert(memcmp(l.cand_lmk, zero, sizeof l.cand_lmk) == 0);
+        assert(memcmp(l.eph_priv, zero, sizeof l.eph_priv) == 0);
+        /* A later explicit attempt still works with the original identity. */
+        pair_dial(&l, &d);
+    }
+    printf("candidate install failure rollback ok\n");
+}
+
+static void test_pair_broadcast_install_failure(void) {
+    sl2_link_t l;
+    fresh(&l);
+    F.fail_peer_adds = 1;
+    sl2_link_pair_start(&l, 60000);
+    assert(!sl2_link_pairing(&l));
+    assert(!f_find_peer(BCAST));
+    assert(strcmp(sl2_link_pair_result(&l), "idle") == 0);
+    printf("pair broadcast install failure ok\n");
 }
 
 static void test_bcast_peer_released(void) {
@@ -2531,9 +2579,13 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[1], "forget-storage") == 0) test_forget_storage_failure();
         else if (strcmp(argv[1], "forget-all-storage") == 0) test_forget_all_storage_failure();
         else if (strcmp(argv[1], "epoch-storage") == 0) test_epoch_storage_failure();
+        else if (strcmp(argv[1], "candidate-install") == 0) test_candidate_install_failure();
+        else if (strcmp(argv[1], "broadcast-install") == 0) test_pair_broadcast_install_failure();
         else return 2;
         return 0;
     }
+    test_candidate_install_failure();
+    test_pair_broadcast_install_failure();
     test_pair_storage_failure();
     test_repair_storage_failure();
     test_forget_storage_failure();

@@ -42,8 +42,14 @@ static void on_espnow_recv(const esp_now_recv_info_t *info,
   sl2_rxq_push(&g_self->rxq_, info->src_addr, info->des_addr, data, len);
 }
 
-static bool p_send(void *, const uint8_t mac[6], const void *buf, size_t len) {
-  return esp_now_send(mac, static_cast<const uint8_t *>(buf), len) == ESP_OK;
+bool SerinLinkComponent::port_send_(void *ctx, const uint8_t mac[6], const void *buf, size_t len) {
+  auto *self = static_cast<SerinLinkComponent *>(ctx);
+  esp_err_t err = esp_now_send(mac, static_cast<const uint8_t *>(buf), len);
+  if (err != ESP_OK) {
+    ++self->tx_failures_;
+    self->last_send_error_ = err;
+  }
+  return err == ESP_OK;
 }
 
 static bool p_peer_add(void *, const uint8_t mac[6], const uint8_t lmk[16],
@@ -1398,6 +1404,7 @@ void SerinLinkComponent::setup() {
    * straight from esp_fill_random (the hardware RNG, seeded by Wi-Fi/BT). */
   sl2_rxq_init(&rxq_);
   g_self = this;
+  wifi_was_connected_ = wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
 
   use_f_pref_ = global_preferences->make_preference<bool>(0x53324C55 /* 'S2LU' */);
   use_f_pref_.load(&use_f_);
@@ -1444,29 +1451,9 @@ void SerinLinkComponent::setup() {
     room_source_id_pref_.save(&selected_source_id_);
   }
 
-  esp_err_t err = esp_now_init();
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "esp_now_init: %d", static_cast<int>(err));
-    this->mark_failed();
-    return;
-  }
-  /* ESP-NOW RX REQUIRES the radio awake: with modem sleep the STA radio is
-   * off between AP DTIMs, so unicast from a non-AP peer is never even ACKed
-   * (dial saw sent=120 acked=0). Enforce PS off here regardless of the wifi
-   * component's setting. */
-  wifi_ps_type_t ps = WIFI_PS_NONE;
-  esp_wifi_get_ps(&ps);
-  if (ps != WIFI_PS_NONE) {
-    ESP_LOGW(TAG, "wifi power save was %d — forcing NONE for ESP-NOW RX",
-             static_cast<int>(ps));
-    esp_wifi_set_ps(WIFI_PS_NONE);
-  }
-  esp_now_set_pmk(reinterpret_cast<const uint8_t *>(SL2_ESPNOW_PMK));
-  esp_now_register_recv_cb(on_espnow_recv);
-
   port_ = sl2_port_t{};
   port_.ctx = this;
-  port_.send = p_send;
+  port_.send = port_send_;
   port_.peer_add = p_peer_add;
   port_.peer_del = p_peer_del;
   port_.own_mac = p_own_mac;
@@ -1504,12 +1491,57 @@ void SerinLinkComponent::setup() {
   hvac_.room_source_set = t_room_source_set;
 
   sl2_link_init(&link_, &port_, &crypto_, &hvac_);
-  started_ = sl2_link_start(&link_);
-  if (!started_) {
-    ESP_LOGE(TAG, "sl2_link_start failed");
-    this->mark_failed();
+  try_start_(millis());
+}
+
+/* A failed radio setup remains retryable. Never mark_failed(): ESPHome would
+ * stop calling loop(), preventing recovery after Wi-Fi finishes starting. */
+static bool transport_ok(const char *operation, esp_err_t err) {
+  if (err == ESP_OK) return true;
+  ESP_LOGW(TAG, "%s failed: %s (%d)", operation, esp_err_to_name(err), static_cast<int>(err));
+  return false;
+}
+
+bool SerinLinkComponent::setup_transport_() {
+  if (wifi_handler_ == nullptr &&
+      !transport_ok("Wi-Fi event registration", esp_event_handler_instance_register(
+          WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event_, this, &wifi_handler_))) return false;
+  if (transport_initialized_) {
+    esp_now_peer_num_t count;
+    esp_err_t err = esp_now_get_peer_num(&count);
+    if (err == ESP_ERR_ESPNOW_NOT_INIT) transport_initialized_ = false;
+    else if (!transport_ok("esp_now_get_peer_num", err)) return false;
+  }
+  if (!transport_initialized_) {
+    if (!transport_ok("esp_now_init", esp_now_init())) return false;
+    transport_initialized_ = true;
+  }
+  /* ESPHome can reapply its modem-sleep setting when the STA restarts. */
+  wifi_ps_type_t ps;
+  if (!transport_ok("esp_wifi_get_ps", esp_wifi_get_ps(&ps))) return false;
+  if (ps != WIFI_PS_NONE &&
+      !transport_ok("esp_wifi_set_ps(NONE)", esp_wifi_set_ps(WIFI_PS_NONE))) return false;
+  if (!transport_ok("esp_now_set_pmk",
+                    esp_now_set_pmk(reinterpret_cast<const uint8_t *>(SL2_ESPNOW_PMK)))) return false;
+  if (!transport_ok("esp_now_register_recv_cb", esp_now_register_recv_cb(on_espnow_recv))) return false;
+  transport_configured_ = true;
+  refresh_recv_ = false;
+  return true;
+}
+
+void SerinLinkComponent::try_start_(uint32_t now) {
+  last_transport_attempt_ms_ = now;
+  ++transport_attempts_;
+  if (!setup_transport_() || !sl2_link_start(&link_)) {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "ESP-NOW startup attempt %u/5 failed%s", transport_attempts_,
+             transport_attempts_ == 5 ? "; retries exhausted" : "");
     return;
   }
+  started_ = true;
+  transport_attempts_ = 0;
+  last_transport_check_ms_ = now;
+  this->status_clear_warning();
   room_source_reconcile_(false);
 
   if (climate_ != nullptr) rebuild_fan_detents_();
@@ -1543,22 +1575,194 @@ void SerinLinkComponent::setup() {
            climate_ ? "bound to climate entity" : "spike (canned device)");
 }
 
-void SerinLinkComponent::loop() {
-  if (!started_) return;
-  /* ESPHome's wifi component applies ITS power-save setting when the STA
-   * starts — after our setup() ran. A sleeping radio never ACKs (let alone
-   * receives) the dial's unicast, so re-assert PS off whenever it creeps
-   * back (observed: setup saw NONE, radio slept anyway; sent=172 acked=0). */
-  uint32_t now = millis();
-  if (now - last_ps_check_ms_ > 5000) {
-    last_ps_check_ms_ = now;
-    wifi_ps_type_t ps = WIFI_PS_NONE;
-    if (esp_wifi_get_ps(&ps) == ESP_OK && ps != WIFI_PS_NONE) {
-      ESP_LOGW(TAG, "wifi power save crept back to %d — forcing NONE",
-               static_cast<int>(ps));
-      esp_wifi_set_ps(WIFI_PS_NONE);
+/* Event callbacks only latch evidence. Driver mutations and protocol state
+ * always stay in the ESPHome loop, including recovery after a STA restart. */
+static constexpr uint32_t WIFI_STARTED = 1u, WIFI_STOPPED = 2u;
+static constexpr uint32_t WIFI_CONNECTED = 4u, WIFI_DISCONNECTED = 8u;
+
+void SerinLinkComponent::on_wifi_event_(void *ctx, esp_event_base_t, int32_t event, void *data) {
+  auto *self = static_cast<SerinLinkComponent *>(ctx);
+  uint32_t bit;
+  switch (event) {
+    case WIFI_EVENT_STA_START: bit = WIFI_STARTED; break;
+    case WIFI_EVENT_STA_STOP: bit = WIFI_STOPPED; break;
+    case WIFI_EVENT_STA_CONNECTED: bit = WIFI_CONNECTED; break;
+    case WIFI_EVENT_STA_DISCONNECTED:
+      bit = WIFI_DISCONNECTED;
+      if (data != nullptr)
+        __atomic_store_n(&self->wifi_disconnect_reason_,
+                         static_cast<wifi_event_sta_disconnected_t *>(data)->reason, __ATOMIC_RELAXED);
+      __atomic_fetch_add(&self->wifi_disconnects_, 1, __ATOMIC_RELAXED);
+      break;
+    default: return;
+  }
+  __atomic_fetch_or(&self->wifi_events_, bit, __ATOMIC_RELEASE);
+}
+
+void SerinLinkComponent::process_wifi_events_() {
+  /* If event registration itself exhausted the startup budget, there is no
+   * callback to rearm it. Observe an actual Wi-Fi connection edge as a
+   * fallback; a steady connection must not cause endless retry bursts. */
+  if (wifi_handler_ == nullptr) {
+    bool connected = wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
+    if (connected && !wifi_was_connected_ && transport_attempts_ >= 5) {
+      transport_attempts_ = 0;
+      ESP_LOGI(TAG, "Wi-Fi connected; retrying ESP-NOW setup without event handler");
+    }
+    wifi_was_connected_ = connected;
+  }
+  uint32_t events = __atomic_exchange_n(&wifi_events_, 0, __ATOMIC_ACQUIRE);
+  if (events == 0) return;
+  ESP_LOGI(TAG, "Wi-Fi STA events: start=%d stop=%d connected=%d disconnected=%d; channel=%u",
+           !!(events & WIFI_STARTED), !!(events & WIFI_STOPPED),
+           !!(events & WIFI_CONNECTED), !!(events & WIFI_DISCONNECTED), p_channel(nullptr));
+  if (events & WIFI_DISCONNECTED)
+    ESP_LOGI(TAG, "Wi-Fi disconnect reason=%" PRIu32 " count=%" PRIu32,
+             __atomic_load_n(&wifi_disconnect_reason_, __ATOMIC_RELAXED),
+             __atomic_load_n(&wifi_disconnects_, __ATOMIC_RELAXED));
+  if (events & (WIFI_STARTED | WIFI_CONNECTED)) {
+    /* Reassert the receiver once per lifecycle change. Do not assume the
+     * driver erased its peers, and do not restart the protocol core. */
+    refresh_recv_ = true;
+    if (transport_attempts_ >= 5) transport_attempts_ = 0;
+  }
+}
+
+static bool peer_matches(const esp_now_peer_info_t &peer, const sl2_dial_bond_t &bond) {
+  return peer.ifidx == WIFI_IF_STA && peer.channel == 0 && peer.encrypt &&
+         std::memcmp(peer.lmk, bond.lmk, sizeof bond.lmk) == 0;
+}
+
+/* Read-only driver audit. Silence is not evidence of a broken transport.
+ * A version query cannot detect deinit; get_peer_num explicitly can. */
+const char *SerinLinkComponent::transport_fault_() {
+  esp_now_peer_num_t count;
+  esp_err_t err = esp_now_get_peer_num(&count);
+  if (err == ESP_ERR_ESPNOW_NOT_INIT) {
+    transport_initialized_ = transport_configured_ = false;
+    return "driver not initialized";
+  }
+  if (err != ESP_OK) return "driver query failed";
+  if (!transport_configured_) return "setup incomplete";
+  wifi_ps_type_t ps;
+  if (esp_wifi_get_ps(&ps) != ESP_OK) return "power-save query failed";
+  if (ps != WIFI_PS_NONE) return "Wi-Fi power save enabled";
+  for (int i = 0; i < link_.n_dials; ++i) {
+    esp_now_peer_info_t peer{};
+    err = esp_now_get_peer(link_.dial[i].bond.mac, &peer);
+    if (err != ESP_OK) return "bonded peer lookup failed";
+    if (!peer_matches(peer, link_.dial[i].bond)) return "bonded peer configuration changed";
+  }
+  return refresh_recv_ ? "receive callback refresh after Wi-Fi event" : nullptr;
+}
+
+bool SerinLinkComponent::repair_transport_() {
+  /* A failed previous attempt may have coincided with a driver shutdown. */
+  esp_now_peer_num_t count;
+  esp_err_t err = esp_now_get_peer_num(&count);
+  if (err == ESP_ERR_ESPNOW_NOT_INIT) transport_initialized_ = transport_configured_ = false;
+  else if (!transport_ok("esp_now_get_peer_num", err)) return false;
+  if (!transport_configured_ && !setup_transport_()) return false;
+  wifi_ps_type_t ps;
+  if (!transport_ok("esp_wifi_get_ps", esp_wifi_get_ps(&ps))) return false;
+  if (ps != WIFI_PS_NONE &&
+      !transport_ok("esp_wifi_set_ps(NONE)", esp_wifi_set_ps(WIFI_PS_NONE))) return false;
+  if (refresh_recv_) {
+    if (!transport_ok("esp_now_register_recv_cb", esp_now_register_recv_cb(on_espnow_recv))) return false;
+    refresh_recv_ = false;
+  }
+  bool ok = true;
+  for (int i = 0; i < link_.n_dials; ++i) {
+    const auto &bond = link_.dial[i].bond;
+    esp_now_peer_info_t peer{};
+    err = esp_now_get_peer(bond.mac, &peer);
+    if (err == ESP_OK && peer_matches(peer, bond)) continue;
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_NOT_FOUND) {
+      transport_ok("esp_now_get_peer", err);
+      ok = false;
+      continue;
+    }
+    char mac[18];
+    sl2_fmt_mac(bond.mac, mac);
+    ESP_LOGW(TAG, "restoring ESP-NOW peer %s (%s)", mac,
+             err == ESP_ERR_ESPNOW_NOT_FOUND ? "missing" : "configuration mismatch");
+    if (!p_peer_add(this, bond.mac, bond.lmk, true)) ok = false;
+  }
+  return ok;
+}
+
+void SerinLinkComponent::maintain_transport_(uint32_t now) {
+  /* A candidate deliberately uses a different LMK until confirmation. Wait
+   * for pairing to finish/timeout before auditing or restoring bonded keys. */
+  if (sl2_link_pairing(&link_)) return;
+  bool check_due = now - last_transport_check_ms_ >= 5000;
+  if (check_due || (!transport_pending_ && refresh_recv_)) {
+    last_transport_check_ms_ = now;
+    const char *fault = transport_fault_();
+    if (fault == nullptr) {
+      if (transport_pending_) {
+        transport_pending_ = false;
+        transport_attempts_ = 0;
+        this->status_clear_warning();
+      }
+      return;
+    }
+    if (!transport_pending_) {
+      transport_pending_ = true;
+      transport_attempts_ = 0;
+      ESP_LOGD(TAG, "ESP-NOW transport check: %s", fault);
     }
   }
+  if (!transport_pending_ || transport_attempts_ >= 5) return;
+  if (transport_attempts_ != 0 &&
+      now - last_transport_attempt_ms_ < (1000u << (transport_attempts_ - 1))) return;
+  last_transport_attempt_ms_ = now;
+  ++transport_attempts_;
+  if (repair_transport_()) {
+    ESP_LOGI(TAG, "ESP-NOW transport ready after attempt %u/5; awaiting Link traffic", transport_attempts_);
+    transport_pending_ = false;
+    transport_attempts_ = 0;
+    this->status_clear_warning();
+  } else {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "ESP-NOW repair attempt %u/5 failed%s", transport_attempts_,
+             transport_attempts_ == 5 ? "; waiting for a new Wi-Fi start/connect event" : "");
+  }
+}
+
+void SerinLinkComponent::log_transport_(uint32_t now) {
+  if (now - last_transport_diag_ms_ < 30000) return;
+  last_transport_diag_ms_ = now;
+  bool offline = false;
+  for (int i = 0; i < link_.n_dials; ++i) {
+    sl2_dial_view_t view;
+    if (!sl2_link_dial_view(&link_, i, &view) || view.live) continue;
+    offline = true;
+    esp_now_peer_info_t peer{};
+    esp_err_t err = esp_now_get_peer(view.mac, &peer);
+    char mac[18];
+    sl2_fmt_mac(view.mac, mac);
+    ESP_LOGD(TAG, "Link %s offline: probe_age_ms=%" PRId32 " driver_peer=%s configured=%d",
+             mac, view.last_seen_ms, esp_err_to_name(err),
+             err == ESP_OK && peer_matches(peer, link_.dial[i].bond));
+  }
+  if (offline)
+    ESP_LOGD(TAG, "ESP-NOW diagnostics: channel=%u wifi=%d rx_frames=%" PRIu32
+             " rx_dropped=%" PRIu32 " tx_failures=%" PRIu32 " last_send_error=%s repair_attempts=%u",
+             p_channel(nullptr), network::is_connected(), rx_frames_, sl2_rxq_dropped(&rxq_),
+             tx_failures_, esp_err_to_name(last_send_error_), transport_attempts_);
+}
+
+void SerinLinkComponent::loop() {
+  uint32_t now = millis();
+  process_wifi_events_();
+  if (!started_) {
+    if (transport_attempts_ < 5 && (transport_attempts_ == 0 ||
+        now - last_transport_attempt_ms_ >= (1000u << (transport_attempts_ - 1))))
+      try_start_(now);
+    if (!started_) return;
+  }
+  maintain_transport_(now);
   /* Dial room sensor: 1 Hz stale edge. Frame-driven publishing lives in
    * room_sensor_feed(); this is the one publish path that fires on the
    * ABSENCE of frames, so it cannot live there. */
@@ -1588,12 +1792,14 @@ void SerinLinkComponent::loop() {
   }
   sl2_rxq_frame_t f;
   while (sl2_rxq_pop(&rxq_, &f)) {
+    ++rx_frames_;
     ESP_LOGV(TAG, "rx type=%u len=%u from %02X:%02X:%02X:%02X:%02X:%02X",
              f.len >= 1 ? f.data[0] : 0, f.len,
              f.src[0], f.src[1], f.src[2], f.src[3], f.src[4], f.src[5]);
     sl2_link_on_recv(&link_, f.src, f.dst, f.data, f.len);
   }
   sl2_link_loop(&link_);
+  log_transport_(now);
 }
 
 /* Diagnostics are POLLED state, unlike everything else this component
@@ -1761,7 +1967,7 @@ void SerinLinkComponent::dump_config() {
                   static_cast<unsigned>(v.caps_seq),
                   static_cast<unsigned>(v.cert_state));
   }
-  ESP_LOGCONFIG(TAG, "  rxq dropped: %u", static_cast<unsigned>(rxq_.dropped));
+  ESP_LOGCONFIG(TAG, "  rxq dropped: %u", static_cast<unsigned>(sl2_rxq_dropped(&rxq_)));
 }
 
 }  // namespace serin_link
