@@ -244,10 +244,11 @@ static int16_t c_to_dc_or(float c, int16_t fallback) {
 }
 
 /* Canonical detent order for discrete fan modes (spec: dial sends canonical
- * detent percents; the ordering here defines what "higher" means). */
+ * detent percents; the ordering here defines what "higher" means). MEDIUM
+ * sits below MIDDLE: cn105 maps them to Mitsubishi speeds 2 and 3. */
 static const climate::ClimateFanMode FAN_ORDER[] = {
     climate::CLIMATE_FAN_QUIET,  climate::CLIMATE_FAN_LOW,
-    climate::CLIMATE_FAN_MIDDLE, climate::CLIMATE_FAN_MEDIUM,
+    climate::CLIMATE_FAN_MEDIUM, climate::CLIMATE_FAN_MIDDLE,
     climate::CLIMATE_FAN_FOCUS,  climate::CLIMATE_FAN_DIFFUSE,
     climate::CLIMATE_FAN_HIGH,
 };
