@@ -1,8 +1,8 @@
-# A homeassistant sensor does not inherit its entity's unit, so a `sources:`
-# sensor with no unit_of_measurement could be a °F reading taken as °C.
-# Make the config say which.
+# A `sources:` sensor with no unit_of_measurement (the v0.1.5 README/example
+# shape) still validates and is taken as °C, but a homeassistant sensor does
+# not inherit its entity's unit, so validation warns and names the sensor.
 esphome:
-  name: t-room-sources-unit
+  name: t-room-sources-no-unit
 
 esp32:
   board: esp32-s3-devkitc-1

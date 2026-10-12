@@ -10,6 +10,8 @@ mutually exclusive with ESPHome's built-in `espnow:` component, which neither
 implements ESP-NOW link-layer encryption nor shares the recv callback.
 """
 
+import logging
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
@@ -44,6 +46,8 @@ from esphome.const import (
     UNIT_PERCENT,
     UNIT_SECOND,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@Serin-Labs"]
 DEPENDENCIES = ["wifi", "esp32"]
@@ -836,8 +840,9 @@ def _room_sources_labels_unique(config):
 def _room_sources_units(config):
     """A source's value reaches on_room_temperature: as °C, so its unit must
     be known: °C as is, °F converted on arrival, anything else rejected. A
-    missing unit is rejected too — a homeassistant sensor does not inherit
-    its entity's unit, so silence here is how a °F reading got fed as °C.
+    missing unit is taken as °C, which keeps v0.1.5 configs valid, with a
+    warning naming the sensor: a homeassistant sensor does not inherit its
+    entity's unit, so silence here is how a °F reading gets fed as °C.
     The declaration is found by id, so a sensor nested inside another
     platform (with that platform's default unit) works the same way.
     Recomputed on every validation, so an id from an earlier pass in the
@@ -857,13 +862,16 @@ def _room_sources_units(config):
             fahrenheit.add(str(sid))
             continue
         if unit is None:
-            raise cv.Invalid(
-                f"room source `{label}` (sensor `{sid}`) declares no "
-                f"`unit_of_measurement:` — set it to \"°C\" or \"°F\" to "
-                f"match the reading. A homeassistant sensor does not inherit "
-                f"its entity's unit, and a °F reading taken as °C would tell "
-                f"the heat pump the room is far too hot."
+            _LOGGER.warning(
+                "serin_link: room source `%s` (sensor `%s`) declares no "
+                "`unit_of_measurement:` — treating its readings as °C. A "
+                "homeassistant sensor does not inherit its entity's unit; if "
+                "the entity reports °F, set `unit_of_measurement: \"°F\"` so "
+                "the reading is converted instead of fed to the heat pump as °C.",
+                label,
+                sid,
             )
+            continue
         raise cv.Invalid(
             f"room source `{label}` (sensor `{sid}`) reports `{unit}`, but a "
             f"room temperature source must be °C or °F (°F is converted) — "

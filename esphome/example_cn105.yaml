@@ -119,8 +119,8 @@ sensor:
     id: ha_room_temp
     name: "Home Assistant"
     entity_id: sensor.living_room_temperature
-    # Required for a source: the HA entity's unit, which this sensor does not
-    # inherit. "°F" readings are converted to °C.
+    # The HA entity's unit, which this sensor does not inherit. "°F" readings
+    # are converted to °C; leaving it out means °C, with a validation warning.
     unit_of_measurement: "°C"
 
 serin_link:

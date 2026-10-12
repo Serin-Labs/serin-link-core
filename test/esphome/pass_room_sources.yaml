@@ -3,6 +3,7 @@
 # One inherits its label from the sensor's name; one overrides it. Units: one
 # declares °C, one °F (converted on arrival), and the nested dht sensor
 # inherits its platform's °C default from a declaration below the top level.
+# (No unit at all: pass_room_sources_no_unit.yaml.)
 esphome:
   name: t-room-sources
 
