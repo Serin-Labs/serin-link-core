@@ -4,7 +4,7 @@ The controller-side reference implementation of **Serin Link** — the
 encrypted ESP-NOW protocol a [Serin Link](https://github.com/Serin-Labs) (a
 wall-mount rotary thermostat head) uses to pair with and control heat-pump /
 HVAC controllers. Any ESP32 firmware that embeds this core becomes a zone a
-Serin Link can control: the it builds its whole UI from the capabilities the
+Serin Link can control: the Link builds its whole UI from the capabilities the
 controller declares, so nothing about it is vendor-specific.
 
 The repo ships two things:
@@ -38,7 +38,7 @@ esp32:
     type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
 
 external_components:
-  - source: github://Serin-Labs/serin-link-core@v0.1.5
+  - source: github://Serin-Labs/serin-link-core@v0.1.6
     components: [serin_link]
 
 climate:
@@ -167,7 +167,7 @@ own readings.
 
 To offer a reading that lives outside the controller — a Home Assistant
 temperature, for example — bind the sensor as a source. The component
-subscribes to it, lists it on the dial, and feeds it through
+subscribes to it, lists it on the Serin Link, and feeds it through
 `on_room_temperature:` while it is selected. Its health follows the sensor
 state rather than publish age, because Home Assistant publishes only on
 change: it reads OK while it holds a reading and Home Assistant is connected,
@@ -213,8 +213,9 @@ connected, the component re-sends it every 30 s even when it does not change,
 so that timeout trips only when the source is actually gone: its sensor reports
 unknown, or Home Assistant disconnects.
 
-`link_sensor: primary_select:` has been removed; `room_temperature_source:`
-replaces it.
+`link_sensor: primary_select:` and `primary_link:` have been removed;
+`room_temperature_source:` replaces both. `stale_after:` is gone too: freshness
+follows the Serin Link's fixed 20 s report cadence, so delete the key.
 
 (The dropdown's length is fixed at build time — ESPHome sets a select's
 options once and Home Assistant caches them — which is why it follows
@@ -278,7 +279,7 @@ list if the names don't suit (the row count must then agree with
 ```
 
 The key's presence is the opt-in, so an existing config grows no entities on
-upgrade. Arbitration is untouched: the single `temperature:` /` humidity:`
+upgrade. Arbitration is untouched: the single `temperature:` / `humidity:`
 pair and `on_room_temperature:` still follow the primary alone — these rows
 only make the other rooms *visible*, they never feed the heat pump.
 
@@ -301,14 +302,16 @@ where you'd hand-write `links:` rows if the generated names don't suit:
     bonded_count:    { name: "Bonded Serin Links" }
     pairing_status:  { name: "Pairing" }       # idle/listening/confirming/paired/
                                                # timeout/cancelled/full/pin-mismatch/storage-error
+    pairing_seconds: { name: "Pairing Time Left" }  # 1 Hz countdown, 0 when closed
     # links: [...]   # custom-named per-slot rows; the row count must then
                      # agree with max_links (it IS the same statement twice)
 ```
 
 Every child is optional and the block creates no entities you don't ask for.
-`pairing_status` is worth having even alone: pressing pair on a full bond
-table sets it to `full` and opens no window, which is otherwise
-indistinguishable from success.
+`pairing_status` is worth having even alone: on a full bond table, Pair still
+opens a window so a bonded Link can re-pair, and a new Link's request sets it
+to `full`, which it keeps when the window times out. Without this row, the
+refusal shows up only in the logs.
 
 **A `links:` row is a bond slot, not a Serin Link.** Forgetting a Serin Link *compacts*
 the table, so the Serin Link in slot 1 moves into slot 0 and "Serin Link 1 …" starts
@@ -337,8 +340,11 @@ restores a missing peer or incorrect interface, channel, encryption setting,
 or LMK using the existing bond. Wi-Fi start/connect events also refresh the
 receive callback. A Wi-Fi connect event also forces power save off at once,
 because ESPHome re-applies its own `power_save_mode` when the station restarts
-and modem sleep drops ESP-NOW frames. Keep `power_save_mode: NONE` in the
-`wifi:` block anyway, as the examples do, so the radio stays awake from boot.
+and modem sleep drops ESP-NOW frames. While connected, the adapter checks
+again once per second, because ESPHome can restore modem sleep between audits,
+even while pairing defers them. Keep `power_save_mode: NONE` in the `wifi:`
+block anyway, as the CN105 and bench configs do, so the radio stays awake from
+boot.
 Repairs use the same retry limit, preserve the protocol session and saved
 bonds, and leave correct peers alone. Recovery waits while pairing is active
 so it cannot overwrite a candidate key. A failed candidate
@@ -511,12 +517,16 @@ include/serin_link/   canonical headers (dependency-free C)
   sl2_port.h          platform port: send/peers/clock/kv (≤250B MTU, 6B addr)
   sl2_bond.h          multi-dial bond-table codec (pure, host-tested)
   sl2_rxq.h           SPSC frame ring: radio callback -> loop context
+  sl2_info.h          INFO TLV builders and Mitsubishi value tables
+  sl2_pair_auth.h     v5 pairing key confirmation
+  sl2_dial_cert.h     Serin device-certificate codec (DIAL_INFO tail)
   sl2_link.h          controller-role core API
 src/sl2_link.c        the core: pairing+TOFU pinning, fan-out, pulls, liveness
 docs/                 wire specification
-test/run.sh           host test suite (plain gcc, no hardware)
+test/run.sh           host test suite (plain gcc and g++, no hardware)
 esphome/              ESPHome component + example YAML
 tools/sync_esphome.sh re-vendor the core into esphome/components/serin_link/
+tools/sync_vendor.sh  vendor the core flat into another adopter's tree
 ```
 
 ## ESPHome component details
@@ -553,6 +563,8 @@ Notes:
   temperature has none (NaN) — which catches never-connected devices on any
   platform; mid-run link loss still needs the binding where the platform
   exposes a signal.
+- `zone_name:` sets the zone name declared to Serin Links in CAPS. Unset, it
+  falls back to the climate entity's name, then the device's friendly name.
 - Wire input is validated before it reaches the entity: setpoints clamp to
   the entity's visual range, out-of-range humidity is ignored, unknown
   modes/presets are no-ops.
@@ -583,8 +595,9 @@ Notes:
   `energy_sensor`) — each group sets its CAPS feature bit and INFO TLV; Wi-Fi,
   firmware, and system info are always served. Any platform's entities
   work; `example_cn105.yaml` shows the cn105 set.
-- Compile-verified against ESPHome 2026.7.4 / IDF 5.5.5. The supported floor
-  is ESPHome 2026.3.0 (see the quickstart).
+- Compile-verified against ESPHome 2026.7.4 / IDF 5.5.5; CI pins 2026.6.5 (see
+  [Tests](#tests)). The supported floor is ESPHome 2026.3.0 (see the
+  quickstart).
 
 ### Letting the Serin Link update itself
 
@@ -654,7 +667,7 @@ test/run.sh
 RUN_TSAN=1 test/run.sh  # also check the two-task RX queue with ThreadSanitizer
 ```
 
-Plain gcc, no hardware. Covers: wire layout offsets, tolerant short/long
+Plain gcc and g++, no hardware. Covers: wire layout offsets, tolerant short/long
 decode, TLV codec, the Mitsubishi °F table, pairing transcripts, bond-blob
 codec, and the full core FSM against a fake port with deterministic toy crypto
 — pair/reboot/persist, pin-mismatch refusal, bad-signature drop, bond-table
@@ -663,9 +676,14 @@ CMD apply + echo-to-all-Links, CAPS/INFO pulls, credential relay, forget, and
 stranger/broadcast rejection. The real ESPHome adapter also runs against host
 platform stubs with failed setup, missing/misconfigured peers, driver loss,
 Wi-Fi lifecycle events, bounded retries, pairing deferral, and silent Links.
-The RX queue tests cover overflow, index rollover, and concurrent full-frame
-integrity. ThreadSanitizer requires a supported host runtime. CI runs the suite plus an ESPHome compile on
-every push.
+Adapter tests also cover climate telemetry and setpoints, fan detents,
+external-source health, room-source reconciliation, and `screen:` / `night:`
+restore at boot. The RX queue tests cover overflow, index rollover, and
+concurrent full-frame integrity. ThreadSanitizer requires a supported host
+runtime.
+
+CI runs the suite, a vendored-copy drift check, the ESPHome schema tests, and a
+compile of `example_spike.yaml` against ESPHome 2026.6.5 on every push.
 
 Real-curve crypto interop happens on hardware (libsodium on the Serin Link,
 vendored Monocypher on the ESPHome side); the toy
