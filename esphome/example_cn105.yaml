@@ -37,8 +37,8 @@ external_components:
   - source:
       type: local
       path: ../esphome/components
-      # off-repo: github://Serin-Labs/serin-link-core@v0.1.3-beta.9 (first
-      # tag with the multi-link keys)
+      # Outside this checkout, replace the source mapping with:
+      # source: github://Serin-Labs/serin-link-core@v0.1.6
     components: [serin_link]
 
 wifi:
@@ -171,9 +171,9 @@ serin_link:
     connected:       # "any bonded Serin Link alive", default name
     pairing_status:
       name: "Pairing"
-  # The Serin Link's own SHT4x, published to Home Assistant and offered to the
-  # heat pump as a room-temperature source. Adding this block is what makes the
-  # Serin Link transmit at all, and what puts the source cycle in its Settings.
+  # Publish the Link's SHT4x readings to Home Assistant and make the Link
+  # available as a room-temperature source. This block enables sensor
+  # reporting and the Settings > Room Sensor selection on the Link.
   link_sensor:
     temperature:
       name: "Serin Link Temperature"
@@ -208,3 +208,25 @@ button:
     name: "Forget All Serin Links"
     on_press:
       - serin_link.forget_all_links:
+
+binary_sensor:
+  # Physical pairing button for use when the network is unavailable.
+  # Hold for 2-10 seconds, then release to open the pairing window.
+  # Shorter and longer presses are ignored. GPIO41 is the AtomS3 Lite's
+  # front button; adjust the pin for your board.
+  - platform: gpio
+    id: pair_btn          # no name: -> internal, no Home Assistant entity
+    pin:
+      number: GPIO41
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_off: 10ms
+    on_click:
+      min_length: 2s
+      max_length: 10s
+      then:
+        - serin_link.pair_start:
+            window: 60s

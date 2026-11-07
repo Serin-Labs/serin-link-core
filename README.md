@@ -1,50 +1,52 @@
 # serin-link-core
 
-The controller-side reference implementation of **Serin Link** — the
-encrypted ESP-NOW protocol a [Serin Link](https://github.com/Serin-Labs) (a
-wall-mount rotary thermostat head) uses to pair with and control heat-pump /
-HVAC controllers. Any ESP32 firmware that embeds this core becomes a zone a
-Serin Link can control: the Link builds its whole UI from the capabilities the
-controller declares, so nothing about it is vendor-specific.
+**Serin Link** is an encrypted ESP-NOW protocol connecting the
+[Serin Link](https://github.com/Serin-Labs) rotary control to heat pump and HVAC
+controllers. This repository provides:
 
-The repo ships two things:
+- **`libserinlink`** — a portable, dependency-free C controller library for signed pairing,
+  persistent bonds, state distribution, and capability reporting.
+- **An ESPHome component (`serin_link`)** that connects the core to an ESPHome
+  `climate` entity, including Mitsubishi CN105, `thermostat`, `midea`, `daikin`,
+  and `gree` platforms.
 
-- **`libserinlink`** — a dependency-free C library implementing the
-  controller role (signed pairing with trust-on-first-use key pinning,
-  multi-Link bond table, state fan-out, capability descriptors), portable to
-  any platform through a small port/crypto interface.
-- **An ESPHome component (`serin_link`)** that binds the core to *any* ESPHome
-  `climate` entity — Mitsubishi CN105, generic `thermostat`, midea, daikin,
-  gree, … — turning the device into a Serin Link zone with a few lines of YAML.
+The Link displays the capabilities declared by its controller. New pairing
+requires [wire protocol v5](docs/serin-link-wire-spec.md) on both peers.
 
-The wire protocol is specified in
-[`docs/serin-link-wire-spec.md`](docs/serin-link-wire-spec.md) (current wire
-version: 5, `SL2_PROTO_VERSION`). Pairing requires v5 on both peers. Earlier
-releases were hardware-verified against ESPHome (CN105
-and generic climate platforms) and
-[mitsubishi-cn105-homekit](https://github.com/akifbayram/mitsubishi-cn105-homekit),
-an independent open-source CN105/HomeKit firmware.
+## Contents
+
+- [ESPHome quickstart](#esphome-quickstart)
+- [The Serin Link's own temperature sensor](#the-serin-links-own-temperature-sensor)
+- [More than one Serin Link](#more-than-one-serin-link)
+- [Screen on/off from Home Assistant](#screen-onoff-from-home-assistant)
+- [Night brightness](#night-brightness)
+- [Pairing and forgetting from automations](#pairing-and-forgetting-from-automations)
+- [Trust model](#trust-model)
+- [ESPHome component details](#esphome-component-details)
+- [Adapting any controller firmware](#adapting-any-controller-firmware)
+- [Tests](#tests)
+- [License](#license)
 
 ## ESPHome quickstart
 
-Requires ESPHome 2026.3.0 or newer. The CN105 package
-([`packages/cn105.yaml`](esphome/packages/cn105.yaml)) enforces this floor with
-`esphome: min_version:`.
+Requires ESPHome 2026.3.0 or newer with ESP-IDF. Merge this fragment into an
+existing node, retaining its name, Wi-Fi settings, and climate configuration.
+Use `api:` for Home Assistant access or `web_server:` for the web interface.
 
 ```yaml
 esp32:
   board: esp32-s3-devkitc-1
   framework:
-    type: esp-idf   # required: raw nvs_*, esp_now encrypted peers
+    type: esp-idf   # required by serin_link
 
 external_components:
   - source: github://Serin-Labs/serin-link-core@v0.1.6
     components: [serin_link]
 
 climate:
-  - platform: thermostat   # any climate platform works
+  - platform: thermostat   # use your existing climate platform
     id: hvac
-    # ...
+    # Retain the platform's required settings and actions.
 
 serin_link:
   id: serin
@@ -52,47 +54,42 @@ serin_link:
   pair_button:     # a component-owned "Pair Serin Link" button, default 60 s
 ```
 
-Put the Serin Link in pairing mode, press **Pair Serin Link** (Home Assistant or the
-ESPHome web UI) within the 60 s window, done. The Serin Link pulls the zone's
-capabilities and renders only what the entity actually supports: its mode ring
-shows the entity's modes, the setpoint clamps to the entity's visual range,
-fan detents follow its discrete fan modes. Auto is offered only when the
-climate supports `CLIMATE_FAN_AUTO`; `CLIMATE_FAN_ON` alone does not imply
-Auto. A climate with only On and no discrete fan speeds has no fan control
-on the Serin Link.
+Press **Pair Serin Link**, then start pairing on the Link within 60 seconds.
+For access without the network, configure a
+[physical pairing button](#pairing-and-forgetting-from-automations).
+
+Controls follow the climate entity's modes, visual temperature range, and
+discrete fan speeds. Fan Auto requires `CLIMATE_FAN_AUTO`; `CLIMATE_FAN_ON`
+alone provides no fan control.
 
 Complete examples in [`esphome/`](esphome/):
 
-- [`example_package.yaml`](esphome/example_package.yaml) — the short form: a
-  complete two-Link CN105 controller in ~40 lines, everything zone-shaped
-  pulled in from [`packages/cn105.yaml`](esphome/packages/cn105.yaml).
-  Start here.
-- [`example_cn105.yaml`](esphome/example_cn105.yaml) — the same config
-  spelled out: Mitsubishi heat pump via
+- [`example_package.yaml`](esphome/example_package.yaml) — recommended CN105
+  configuration for two Links, using [`packages/cn105.yaml`](esphome/packages/cn105.yaml).
+- [`example_cn105.yaml`](esphome/example_cn105.yaml) — expanded configuration using
   [echavet/MitsubishiCN105ESPHome](https://github.com/echavet/MitsubishiCN105ESPHome),
   including vane-axis bindings, device-link health, and per-Link sub-devices.
 - [`example_generic.yaml`](esphome/example_generic.yaml) — the core
-  `thermostat` platform (any climate entity works the same way).
-- [`example_spike.yaml`](esphome/example_spike.yaml) — minimal coexistence
-  config (no climate entity; canned state) for radio/pairing bring-up.
+  `thermostat` platform with the Link's temperature as its control input.
+- [`example_spike.yaml`](esphome/example_spike.yaml) — simulated state for radio
+  and pairing tests without a climate entity.
 - [`bench_band.yaml`](esphome/bench_band.yaml) /
   [`bench_dryrun.yaml`](esphome/bench_dryrun.yaml) /
-  [`bench_cn105.yaml`](esphome/bench_cn105.yaml) — hardware-free bench
-  configs exercising dual-setpoint (HEAT_COOL band) zones, the CN105
-  surface without a heat pump attached, and a field-shaped CN105 config
-  (remote HA temp sensor, diagnostics) with `serin_link` added.
+  [`bench_cn105.yaml`](esphome/bench_cn105.yaml) — test configurations for
+  dual-setpoint (HEAT_COOL) zones, simulated CN105 controls, and a CN105
+  controller with a Home Assistant temperature sensor and diagnostics.
+
+Outside this checkout, replace local component and package references with
+the examples' `v0.1.6` URLs. Use the same release for both.
 
 ### The Serin Link's own temperature sensor
 
-A Serin Link has a built-in temperature/humidity sensor. Add a
-`link_sensor:` block and it becomes two Home Assistant entities, and the Serin Link
-offers itself to the heat pump as a room-temperature source (Settings →
-System on the Serin Link cycles Internal / Link — plus Sensor if you've also bound
-a `battery_sensor:`):
+`link_sensor:` publishes the Link's temperature and humidity to Home Assistant
+and enables selection under **Settings → Room Sensor**:
 
 ```yaml
 serin_link:
-  id: serin        # not `link` — that collides with libc link()
+  id: serin
   climate_id: hvac
   link_sensor:
     temperature:
@@ -101,18 +98,26 @@ serin_link:
       name: "Serin Link Humidity"
 ```
 
-The block is the opt-in: without it the Serin Link never transmits its reading and
-its Settings never grow the source cycle, so an existing config is unaffected
-by upgrading.
+To supply the selected reading to the heat pump, use `on_room_temperature:`.
+It receives `x` in °C, or `0` when `Heat pump` is selected. CN105 uses `0` to
+restore its internal sensor; other climate platforms must implement their
+own handling of this reset value.
 
-The reading reaches Home Assistant either way. What it does to the *heat pump*
-is up to your climate platform, because ESPHome's `Climate` has no generic
-external-temperature input. `on_room_temperature:` is the hook: it fires with
-`x` (°C) only for a fresh, non-NaN reading from the arbitrated primary Link
-*while the Serin Link is the selected room source* — cycling back to Internal
-on it stops the feed, so the typical body is one unguarded line:
+For CN105, set a finite `remote_temperature_timeout` so lost readings trigger
+fallback to the internal sensor. The
+[upstream default is `never`](https://github.com/echavet/MitsubishiCN105ESPHome/blob/4b63f3b4fab5ec55e8c8b3e917440a6e829fe04a/components/cn105/climate.py#L547).
+Merge these settings into the existing configuration:
 
 ```yaml
+climate:
+  - platform: cn105
+    id: hvac
+    name: "Heat Pump"
+    remote_temperature_timeout: 3min
+    # Retain the existing UART and other climate settings.
+
+serin_link:
+  climate_id: hvac
   link_sensor:
     temperature:
       name: "Serin Link Temperature"
@@ -120,61 +125,44 @@ on it stops the feed, so the typical body is one unguarded line:
       - lambda: 'id(hvac).set_remote_temperature(x);'
 ```
 
-Alternatively `example_generic.yaml` points the `thermostat` platform's
-`sensor:` straight at the Serin Link's reading — simpler, but with no
-`remote_temperature_timeout` equivalent: a stale Serin Link leaves it with no
-control temperature at all, rather than falling back.
+In [`example_generic.yaml`](esphome/example_generic.yaml), the thermostat reads
+the Link sensor directly and has no fallback sensor. An unknown reading requests
+OFF, subject to the configured five-minute minimum heating run time.
 
 ### More than one Serin Link
 
-A controller bonds up to four Serin Links. State the count **once**:
+A controller supports up to four bonded Serin Links. Set the installation's
+limit with `max_links:`:
 
 ```yaml
 serin_link:
   max_links: 2
 ```
 
-That single number generates the four per-slot diagnostics entities (MAC /
-Connected / Last Seen / Firmware) for each slot and sizes the room-temperature
-source dropdown below — no other part of the config repeats it. It also caps
-pairing. With `max_links` Links bonded, Pair still opens so a bonded Link can
-re-pair, but a new Link is refused and the pairing status reads `full`. No
-Link can bond without a row in Home Assistant. Forget a Link or raise
-`max_links:` to add another. Everything that follows describes what the
-multi-Link machinery does underneath.
+`max_links:` generates MAC, Connected, Last Seen, and Firmware entities for
+each slot and limits new bonds. At capacity, existing Links may pair again;
+new bonds are refused with status `full`. Remove a bond or increase the limit to add one.
 
-All bonded Links get the STATE stream, and a command from any of them is
-accepted. A Link selected as the room-temperature source is pinned to that
-specific device. Choose it from the Link's Room Sensor picker, or add a
-controller-owned Home Assistant dropdown:
+All bonded Links receive state updates and can issue commands. Select the
+room-temperature source from the Link's Room Sensor menu or add a Home
+Assistant selector:
 
 ```yaml
   room_temperature_source:
     name: "Room Temperature Source"
 ```
 
-The same confirmed selection is shown in Home Assistant and on every paired
-Serin Link. Options are `Heat pump` (the unit's own sensor), any external
-sources you declare, and one `Serin Link N` entry per `max_links:` slot. A
-Serin Link entry always means that specific Link; there is no automatic
-"last reporting" mode. The selection is stored on the controller.
+The selection is shared by Home Assistant and all paired Links. Options are
+`Heat pump`, configured external sources, and bonded Links. Home Assistant
+reserves one Link entry per `max_links:` slot; selecting an empty slot has no
+effect.
 
-Changing the selected Link clears the previous Link's cached health and
-readings. The arbitrated Home Assistant temperature and humidity become
-unknown until the newly selected Link supplies a fresh reading, including
-when you switch back to a previously selected Link. Per-Link rows keep their
-own readings.
+Changing the selected Link clears the shared temperature and humidity until
+that Link reports a fresh reading, even when returning to a previous selection.
+Per-Link entities retain their own readings.
 
-To offer a reading that lives outside the controller — a Home Assistant
-temperature, for example — bind the sensor as a source. The component
-subscribes to it, lists it on the Serin Link, and feeds it through
-`on_room_temperature:` while it is selected. Its health follows the sensor
-state rather than publish age, because Home Assistant publishes only on
-change: it reads OK while it holds a reading and Home Assistant is connected,
-and stale once the sensor reports unknown or Home Assistant disconnects.
-A source fed by a local sensor rather than Home Assistant follows the same
-rule, so its status reads stale whenever Home Assistant is disconnected.
-No guard lambdas are needed anywhere:
+Add external temperature sensors under `room_temperature_source.sources`.
+This fragment adds a Home Assistant source to the CN105 configuration above:
 
 ```yaml
 sensor:
@@ -193,82 +181,52 @@ serin_link:
       - sensor: ha_room_temp          # label defaults to the sensor's name
 ```
 
-Declare each source sensor's `unit_of_measurement:` as `°C` or `°F`. A `°F`
-source is converted to °C as each reading arrives, and config validation
-rejects any other unit. A sensor with no unit is taken as °C, and validation
-prints a warning naming it. A `homeassistant` sensor does not inherit its
-entity's unit, so set the unit to match the entity.
+Set `unit_of_measurement:` to match the source: `°C` or `°F`. Fahrenheit is
+converted to Celsius. An omitted unit is treated as Celsius with a warning;
+other units are rejected. Home Assistant sensors do not inherit their entity's
+unit. `battery_sensor:` is battery telemetry, not a temperature source.
 
-`on_room_temperature:` receives the selected source's reading in °C, and `0`
-when `Heat pump` is chosen — cn105's own "use the built-in sensor" value, so
-the switch is immediate.
+External source health depends on a valid reading and, when the ESPHome API is
+enabled, a Home Assistant connection. This connection requirement also applies
+to locally attached external sensors. An unchanged reading remains valid;
+selected valid readings are resent every 30 seconds to prevent a timeout.
 
-Selecting an external source reuses its cached reading only while that source
-reads OK. A stale or never-seen source stays selected and waits for a
-fresh reading. The selection emits no temperature or reset value, and the
-previous source stops feeding the callback. The climate's configured remote
-temperature timeout governs fallback; selecting a stale source does not renew
-that timeout. While the selected source holds a reading and Home Assistant is
-connected, the component re-sends it every 30 s even when it does not change,
-so that timeout trips only when the source is actually gone: its sensor reports
-unknown, or Home Assistant disconnects.
+A valid cached reading is used when an external source is selected. Otherwise,
+the source waits for a fresh reading without issuing a temperature or reset
+value. The previous source stops feeding the callback, and the climate's
+remote-temperature timeout controls fallback.
 
-`link_sensor: primary_select:` and `primary_link:` have been removed;
-`room_temperature_source:` replaces both. `stale_after:` is gone too: freshness
-follows the Serin Link's fixed 20 s report cadence, so delete the key.
+Link selections are stored by MAC address, while entity names use bond slots.
+Removing a bond compacts the table:
 
-(The dropdown's length is fixed at build time — ESPHome sets a select's
-options once and Home Assistant caches them — which is why it follows
-`max_links:` rather than growing as Links pair.)
+- Removing an earlier Link changes the selected Link's slot label, but keeps
+  the same device selected.
+- Removing the selected Link immediately selects `Heat pump` and sends `0`
+  through `on_room_temperature:`, whether or not a Home Assistant selector exists.
 
-The dropdown numbers bond *slots*, but the choice is **persisted as a MAC**.
-That distinction is the whole point: forgetting a Serin Link compacts the bond
-table, so a stored slot would quietly re-point the pin at a different room. Two
-consequences you can watch for:
+**Forget All** also cancels pairing. Removing one Link cancels only that Link's
+pending handshake. A failed removal preserves the bonds and pairing state.
 
-- Forget an *earlier* Link and the pinned one shifts down a slot. The pin holds
-  — the dropdown just relabels itself from "Serin Link 2" to "Serin Link 1".
-- Successfully forget the *pinned* Link and the source reverts to `Heat pump`,
-  emitting `0` through `on_room_temperature:` immediately. This also works
-  without a Home Assistant dropdown. A failed forget keeps the bond and source
-  selection and logs an error. An offline pinned Link keeps its pin.
-
-Successful **Forget All** also closes any pairing window or in-progress
-handshake. Forgetting a specific Link cancels a pending handshake with that
-Link, including a candidate that has not yet saved a bond. Unrelated bonds
-and pairing attempts remain intact. If saving a bond removal fails, both the
-existing bonds and pairing state are preserved.
-
-Selecting an empty slot is ignored, logged, and the dropdown snaps back to
-what is actually in force.
-
-A selected Link that stops reporting becomes stale after 90 s and remains
-selected until you choose another source or forget it. The component does not
-substitute a different room's reading. Re-pairing the same physical Link
-preserves its source identity; replacing it with another Link requires a new
-source selection.
+Link readings normally arrive every 20 seconds and become stale after 90
+seconds of silence. An offline Link remains selected; the controller does not
+substitute another room's reading.
 
 ### One temperature per Serin Link
 
-Pinning fixes *which room feeds the heat pump*; it also means the non-primary
-Link's reading goes nowhere. If you want both rooms in Home Assistant at once,
-add `links:` to `link_sensor:` — per-slot temperature/humidity rows, one per
-bond slot, that show **every** bonded Link's reading, non-primary included:
+To display every Link's readings in Home Assistant, add `links:` under
+`link_sensor:`:
 
 ```yaml
   room_temperature_source:
   link_sensor:
-    temperature:                 # the arbitrated pair: the primary's reading,
-      name: "Serin Link Temperature"   # the one on_room_temperature feeds from
-    links:                       # per-slot rows: one temperature + one
-                                 # humidity per bond slot, every Link visible
+    temperature:                 # shared entity for the selected Link
+      name: "Serin Link Temperature"
+    links:                       # temperature and humidity for each slot
 ```
 
-Bare `links:` generates the rows from `max_links:` — with `link_devices:`
-they group under each slot's sub-device as short "Temperature" / "Humidity",
-otherwise they land flat as "Serin Link 1 Temperature", …. Hand-write the
-list if the names don't suit (the row count must then agree with
-`max_links:`, and any child can be omitted):
+A bare `links:` key generates temperature and humidity entities for each
+`max_links:` slot. Use `link_devices:` to group them under separate devices,
+or declare custom names with one row per slot:
 
 ```yaml
   link_sensor:
@@ -278,112 +236,41 @@ list if the names don't suit (the row count must then agree with
       - temperature: { name: "Office Temperature" }
 ```
 
-The key's presence is the opt-in, so an existing config grows no entities on
-upgrade. Arbitration is untouched: the single `temperature:` / `humidity:`
-pair and `on_room_temperature:` still follow the primary alone — these rows
-only make the other rooms *visible*, they never feed the heat pump.
-
-The usual slot caveats apply: a row is a bond slot, so a forget-compaction
-re-homes it to the next Link (the row publishes unknown until the new
-occupant reports — no reading is ever shown under the wrong Link), and a Link
-silent past ~90 s (three missed reports) takes its row to unknown the same
-way the arbitrated pair does.
+Either sensor may be omitted from a custom row. These entities do not affect
+the selected control source. They become unknown after 90 seconds without a
+reading, or when a slot changes occupants, until the new occupant reports.
 
 ### Seeing the bond table
 
-`max_links:` already generates the per-slot entities ("Serin Link 1 MAC",
-"Serin Link 1 Connected", …). `diagnostics:` adds the table-wide ones, and is
-where you'd hand-write `links:` rows if the generated names don't suit:
+Use `diagnostics:` for controller-wide status and optional custom slot names:
 
 ```yaml
   diagnostics:
-    connected:       # "any bonded Serin Link alive" (default name), the
-                     # binary_sensor a dashboard card wants
+    connected:       # ON when any bonded Serin Link is communicating
     bonded_count:    { name: "Bonded Serin Links" }
     pairing_status:  { name: "Pairing" }       # idle/listening/confirming/paired/
                                                # timeout/cancelled/full/pin-mismatch/storage-error
     pairing_seconds: { name: "Pairing Time Left" }  # 1 Hz countdown, 0 when closed
-    # links: [...]   # custom-named per-slot rows; the row count must then
-                     # agree with max_links (it IS the same statement twice)
+    # links: [...]   # optional custom rows; count must match max_links
 ```
 
-Every child is optional and the block creates no entities you don't ask for.
-`pairing_status` is worth having even alone: on a full bond table, Pair still
-opens a window so a bonded Link can re-pair, and a new Link's request sets it
-to `full`, which it keeps when the window times out. Without this row, the
-refusal shows up only in the logs.
-
-**A `links:` row is a bond slot, not a Serin Link.** Forgetting a Serin Link *compacts*
-the table, so the Serin Link in slot 1 moves into slot 0 and "Serin Link 1 …" starts
-describing it. Declaring `mac_address:` on every row is what makes that
-visible rather than silent. Rows beyond the number of bonded Serin Links publish
-empty/off/unknown.
-
-The same table is printed at boot with no configuration at all:
-
-```
-[C][serin_link:...]   bonded Serin Links: 2
-[C][serin_link:...]     [0] 10:51:DB:8E:EB:38  live  last seen 3 s   model 'Serin Link' fw '1.4.2'  caps_seq 7  cert 2
-[C][serin_link:...]     [1] 10:51:DB:8E:F1:84  DOWN  last seen 412 s model 'Serin Link' fw '1.4.0'  caps_seq 7  cert 0
-```
+All entries are optional. Include `mac_address:` on custom rows to identify
+the current slot occupant. Unoccupied rows show empty strings, OFF, or unknown.
+The bond table is also logged at startup. Pairing status `full` remains visible
+after the window expires; without the status entity, it appears only in logs.
 
 ### ESPHome transport recovery
 
-The adapter checks ESP-NOW initialization, PMK setup, receive-callback
-registration, Wi-Fi power-save enforcement, and saved-peer installation before
-reporting startup complete. Failed setup gets five total attempts, with retry
-intervals of 1, 2, 4, and 8 seconds. Exhausted retries resume on a subsequent
-Wi-Fi STA start or connection event. Failures remain visible in the logs.
-
-Every five seconds, the adapter audits driver state and the bonded peers. It
-restores a missing peer or incorrect interface, channel, encryption setting,
-or LMK using the existing bond. Wi-Fi start/connect events also refresh the
-receive callback. A Wi-Fi connect event also forces power save off at once,
-because ESPHome re-applies its own `power_save_mode` when the station restarts
-and modem sleep drops ESP-NOW frames. While connected, the adapter checks
-again once per second, because ESPHome can restore modem sleep between audits,
-even while pairing defers them. Keep `power_save_mode: NONE` in the `wifi:`
-block anyway, as the CN105 and bench configs do, so the radio stays awake from
-boot.
-Repairs use the same retry limit, preserve the protocol session and saved
-bonds, and leave correct peers alone. Recovery waits while pairing is active
-so it cannot overwrite a candidate key. A failed candidate
-installation immediately restores the original peer and closes pairing as
-`cancelled`; a failed broadcast-peer installation leaves pairing `idle`.
-
-A silent Link alone never triggers a transport reset. The adapter does not
-call `esp_now_deinit()`, change the Wi-Fi channel, erase bonds, or restart the
-controller. All encrypted peers use channel 0, following the station's channel.
-These checks can repair detectable software state faults; they cannot identify
-or fix every radio/driver stall. MAC acknowledgements alone do not prove that
-an encrypted packet reached the application. See
-[Espressif's ESP-NOW documentation](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32c6/api-reference/network/esp_now.html).
-
-For a reconnect investigation, enable `DEBUG` logging for `serin_link`. The log
-records Wi-Fi lifecycle events and disconnect reasons, each repair attempt,
-and (at most every 30 seconds while a bonded Link is offline) its probe age,
-driver-peer lookup result, whether the peer configuration matches the bond,
-received frame count, queue drops, send failures, and current channel. A probe
-age of `-1` means no probe has arrived since startup. Keys and Wi-Fi credentials
-are never included in these diagnostics. An exhausted retry budget deliberately
-waits for another Wi-Fi start/connect event; it does not keep resetting the radio.
-
-After deploying an updated component, test a router disconnect/reconnect while
-leaving the Link powered on. Capture these logs through the event and check
-that fresh Link data returns without re-pairing. Host fault injection verifies
-the recovery paths, but cannot establish the cause of a particular hardware
-outage or substitute for this device test.
+Set `power_save_mode: NONE` under `wifi:` to keep the radio awake from startup.
+For connection problems, enable `DEBUG` logging for `serin_link` and follow the
+[transport recovery guide](docs/esphome-transport-recovery.md).
 
 ### Screen on/off from Home Assistant
 
-`screen:` adds one switch — the *presence gate* for every paired Serin Link's
-display. ON (the restored default) means someone is in the room: the Link
-runs its normal idle ladder but never goes darker than the glance face. OFF
-means the room is empty: the display sleeps within ~30 s of the last input
-(immediately if already idle), and a touch still wakes it — the gate re-sleeps
-it, never locks it. Flipping OFF→ON while a Link is dark wakes it straight
-into the glance face. Wire it to a motion sensor and the room's Serin Link
-lights when someone walks in and goes fully dark when the room empties:
+`screen:` controls all paired displays. ON keeps the glance display visible
+and wakes a sleeping Link. OFF allows sleep after about 30 seconds without
+input, or immediately if already idle; touch still wakes the display. The
+switch restores its saved state and defaults to ON:
 
 ```yaml
 serin_link:
@@ -391,37 +278,37 @@ serin_link:
   climate_id: hvac
   max_links: 1
   screen:          # "Serin Link Screen" switch (default name)
-  # Sun-down gate: cap every Link's wake brightness after dark.
-  # Drive from HA:  automation on sun.sun below_horizon -> switch.turn_on
-  #                 both edge-triggered, so a controller reboot loses the
-  #                 gate (switch restores OFF) until next sunset/sunrise —
-  #                 also trigger on Home Assistant start / device-available
-  #                 and set the switch from the CURRENT sun.sun state, not
-  #                 just the transition.
-  # HA-less:        sun: + on_elevation (-6°, both directions) -> this switch
-  #                 same reboot gap without HA to re-assert it — add an
-  #                 on_boot (or interval: 5min) block that publishes
-  #                 elevation < -6° to the switch alongside on_elevation.
-  night:
-
-automation:        # in Home Assistant
-  # motion on  -> switch.turn_on  (screen visible)
-  # motion clear for 5 min -> switch.turn_off (screen dark)
 ```
 
-With `max_links:` set, each bond slot also grows a generated "Screen"
-binary_sensor reporting that Link's *actual* panel state (a touch-wake shows
-up in HA within a second or two — itself a usable presence signal). Links
-report only when the switch is configured; on firmware too old to know the
-feature, the switch is simply ignored and the status sensor stays off.
+A Home Assistant motion automation can turn this switch ON when occupied and
+OFF after a delay. Configure that automation in Home Assistant, separately
+from the ESPHome YAML.
+
+With `max_links:` set, each diagnostics row includes a "Screen" binary sensor
+for the actual display state. Older firmware without this feature ignores
+the switch and leaves the status sensor off.
+
+### Night brightness
+
+`night:` adds a switch that limits display brightness on every paired Link
+while the switch is ON:
+
+```yaml
+serin_link:
+  night:           # "Serin Link Night" switch (default name)
+```
+
+It restores the saved state, defaulting to OFF. In Home Assistant, an
+automation can follow `sun.sun` being `below_horizon`. In ESPHome, use
+[`sun:` triggers](https://esphome.io/components/sun/#triggers): `on_sunset` turns
+the switch ON and `on_sunrise` turns it OFF. Set `elevation: -6°` for civil
+twilight. Reconcile with the current sun position after startup or reconnection
+to account for missed transitions; ESPHome needs synchronized time first.
 
 ### Grouping each Serin Link as its own device
 
-By default the generated entities land flat on the controller's device, so
-`Serin Link 2 Last Seen` sits in a list next to the heat pump's own sensors.
-Declare one ESPHome sub-device per slot and hand them to `link_devices:` —
-each slot's entities then group under their own device, with short names
-("MAC" under "Serin Link 1"):
+Generated entities belong to the controller's Home Assistant device by
+default. Use `link_devices:` to group each slot under a separate sub-device:
 
 ```yaml
 esphome:
@@ -437,22 +324,33 @@ serin_link:
   link_devices: [link1, link2]   # one per slot, in slot order
 ```
 
-(Hand-written `links:` rows take per-entity `device_id:` instead —
-`link_devices:` only applies to the generated ones.)
-
-Home Assistant then shows a *Serin Link 1* device with `Connected`, `MAC`,
-`Last Seen` and `Firmware` under it. Entity names can drop their prefix,
-because the device already carries it.
-
-Remember that a row is a bond slot: sub-device "Serin Link 1" is whichever
-Link currently occupies slot 0, not a fixed unit. The `MAC` entity is what
-tells you which one that is.
+For explicitly declared `links:` rows, set `device_id:` on each entity.
+`link_devices:` applies only to generated rows.
 
 ### Pairing and forgetting from automations
 
-Pairing has a first-class button — `pair_button:` in the quickstart above
-(`window:` sets the pairing window it opens, default 60 s). The actions remain
-for everything else:
+`pair_button:` provides the network-accessible button; `window:` defaults to
+60 seconds. For a physical button, use the example below and select your
+board's pin. Hold for 2–10 seconds, then release:
+
+```yaml
+binary_sensor:
+  - platform: gpio
+    id: pair_btn          # unnamed sensors are internal to ESPHome
+    pin:
+      number: GPIO41      # AtomS3 Lite front button; adjust for your board
+      inverted: true
+      mode: { input: true, pullup: true }
+    filters:
+      - delayed_off: 10ms
+    on_click:
+      min_length: 2s
+      max_length: 10s
+      then:
+        - serin_link.pair_start: { window: 60s }
+```
+
+Shorter and longer presses are ignored. To remove a bond:
 
 ```yaml
 button:
@@ -466,144 +364,56 @@ Actions: `serin_link.pair_start` (`window:`, default 60 s, templatable),
 `serin_link.pair_cancel`, `serin_link.forget_link`, and
 `serin_link.forget_all_links`. `forget_link` takes **exactly one** of `slot:`
 (a bond-table position, templatable) or `mac_address:` (one specific Serin Link,
-resolved at compile time) — declaring both, or neither, is a config error.
-
-For anything the schema doesn't expose (a Serin Link's model, `caps_seq`, or
-cert state), `id(serin).dial_view(i, &v)` hands a lambda the raw snapshot.
-
-### A note on "dial"
-
-Everything you type or see — YAML keys, entity names, log lines — says **Serin
-Link**. The C core and the wire spec keep the older *dial* vocabulary
-(`sl2_dial_view_t`, `SL2_MAX_DIALS`, `DIAL_SENSOR`, `sl2_link_forget_dial`),
-and so do the C++ identifiers that mirror them, because that vocabulary is
-shared with the Serin Link firmware and both CN105 controller repos. If you
-reach into a lambda you will meet it there; nowhere else.
-
-`link_mac:` was called `dial_mac:` up to v0.1.3-beta.4; the alias was removed
-in v0.1.3-beta.11 (the schema says so if you still use it). With per-slot
-`links:` rows, `link_mac:` itself is rarely worth declaring — each room's
-reading is visible directly, and with a primary pinned the value just echoes
-the dropdown.
+resolved at compile time).
 
 ## Trust model
 
-Honest summary — the spec's §3 has the full story:
+- Each peer has a **per-unit Ed25519 identity**. Signed pairing records the
+  peer's key at the first bond (TOFU); a different key is refused until that
+  bond is removed. Pairing requires a user-opened window, but no certificate
+  authority or manufacturer certificate.
+- Bonded traffic uses **LMK-encrypted unicast**, with a per-bond key derived
+  through X25519 and HKDF-SHA256. Pairing requests and responses are plaintext
+  broadcasts; key confirmation is encrypted.
+- The ESP-NOW PMK is a public constant used inside the radio driver, not a
+  trust anchor.
+- Wi-Fi credential sharing requires `link_ota_credentials:` to be enabled.
 
-- Both ends generate a **per-unit Ed25519 identity** on first boot. Pairing
-  packets are signed, and each side **pins** the other's identity key at first
-  bond (TOFU). A different key showing up later is refused until the user
-  explicitly forgets the bond.
-- All bonded traffic is **LMK-encrypted unicast** (per-bond key from an
-  X25519 ephemeral exchange, HKDF-SHA256). Pairing is the only plaintext.
-- `esp_now_set_pmk()` gets a **documented public constant** — it is not a
-  secret and not a trust anchor (it never leaves the radio driver).
-- Accepted risk, stated plainly: first contact during the button-gated pairing
-  window is trust-on-first-use, the same posture as Zigbee permit-join. There
-  is no CA and no "genuine device" gating — any firmware may implement this
-  protocol.
-- `link_ota_credentials:` (default **off**) is the one setting that sends a
-  secret *outward*: it relays the node's Wi-Fi SSID and PSK to a bonded Serin
-  Link, encrypted, on request, so the Link can fetch its own firmware. Off
-  unless a config asks for it.
-
-## Layout
-
-```
-include/serin_link/   canonical headers (dependency-free C)
-  sl2_proto.h         wire format: packets, enums, TLVs, ftab, transcripts
-  sl2_crypto.h        crypto hooks (Ed25519/X25519) — bind libsodium/Monocypher
-  sl2_sha256.h        SHA-256/HMAC/HKDF pinned in-tree (portable KDF)
-  sl2_port.h          platform port: send/peers/clock/kv (≤250B MTU, 6B addr)
-  sl2_bond.h          multi-dial bond-table codec (pure, host-tested)
-  sl2_rxq.h           SPSC frame ring: radio callback -> loop context
-  sl2_info.h          INFO TLV builders and Mitsubishi value tables
-  sl2_pair_auth.h     v5 pairing key confirmation
-  sl2_dial_cert.h     Serin device-certificate codec (DIAL_INFO tail)
-  sl2_link.h          controller-role core API
-src/sl2_link.c        the core: pairing+TOFU pinning, fan-out, pulls, liveness
-docs/                 wire specification
-test/run.sh           host test suite (plain gcc and g++, no hardware)
-esphome/              ESPHome component + example YAML
-tools/sync_esphome.sh re-vendor the core into esphome/components/serin_link/
-tools/sync_vendor.sh  vendor the core flat into another adopter's tree
-```
+See §3 of the [wire specification](docs/serin-link-wire-spec.md) for details.
 
 ## ESPHome component details
 
-Two modes:
-
-- **`climate_id:` bound** — CAPS derive from the entity's `ClimateTraits`
-  (modes, presets, discrete fan modes → detents, visual temp range/step,
-  two-point target, target humidity), STATE from the entity's published state,
-  its commands route through a `ClimateCall`. Generic entities have no
-  positional vanes, so no vane axes are declared (the Serin Link hides those pages) —
-  unless the platform exposes vanes as select entities: bind them with
-  `vane_v_select:` / `vane_h_select:` (option order = wire positions;
-  "auto"/"swing" options map to the wire codes) and the Serin Link gets both axes.
-  A capability fingerprint (NVS) bumps `caps_seq` whenever the declared
-  content changes across a reboot/reflash, so bonded Serin Links re-pull
-  automatically. °C/°F display preference persists via ESPHome preferences.
-- **Without `climate_id`** — canned capabilities and a wiggling room
-  temperature: a coexistence smoke test for radio bring-up.
-
-Notes:
-
-- `esp-idf` framework required. Do **not** add an `espnow:` block — ESPHome's
-  built-in component has no link-layer encryption and owns the recv callback;
-  `serin_link`'s config validation rejects it.
-- `hvac_link:` (optional lambda returning `bool`) binds the platform's
-  device-link health to the Serin Link's offline face. A climate entity exists
-  whether or not the device behind it answers, so without this a dead UART
-  would read as "Connected" with a frozen temperature. CN105:
-  `hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'`. Platforms
-  that expose the signal as an entity can bind `hvac_link_sensor: <id>` (a
-  `binary_sensor`) instead — one or the other, never both. Unset, a
-  fallback heuristic reports link-down while an entity that claims a room
-  temperature has none (NaN) — which catches never-connected devices on any
-  platform; mid-run link loss still needs the binding where the platform
-  exposes a signal.
-- `zone_name:` sets the zone name declared to Serin Links in CAPS. Unset, it
-  falls back to the climate entity's name, then the device's friendly name.
-- Wire input is validated before it reaches the entity: setpoints clamp to
-  the entity's visual range, out-of-range humidity is ignored, unknown
-  modes/presets are no-ops.
-- `fahrenheit_table:` (`auto`, `linear` or `mitsubishi`) picks the °F scale a
-  Serin Link uses in °F mode. The default `auto` declares the Mitsubishi table
-  (`ftab_id 1`) when the entity has a 0.5 °C visual step and a visual range
-  inside 16..31 °C, so 72 °F means 22.5 °C as on the unit's own remote.
-  Incoming setpoints then snap to that 0.5 °C grid before they apply, so the
-  echo never jumps when the entity stores its own rounding. Any other entity
-  gets linear °F, and `linear` or `mitsubishi` overrides the choice. A cn105
-  climate with `fahrenheit_compatibility: true` keeps its setpoints in
-  linear-°F space, so it must use `fahrenheit_table: linear`.
-- Serin Link edits are debounced: a CMD burst (e.g. scrolling through setpoints)
-  merges into one `ClimateCall`, applied after 300 ms of quiet (internal
-  tuning, matched to the knob's detent rate). The STATE echoed to Serin Links
-  reflects the commanded values from the first CMD on — an optimistic
-  overlay masks each field until the entity publishes it back (or a 10 s
-  safety timeout lets the truth through), so async platforms like CN105
-  can't snap the Serin Link back with a stale echo mid-adjustment.
-- The component vendors flattened copies of the core (ESPHome compiles all
-  sources in a component dir). Never edit those copies directly: edit the
-  canonical files (`include/serin_link/`, `src/`), re-run
-  `tools/sync_esphome.sh`, and commit both — CI fails on drift.
-- Telemetry for the Serin Link's info pages binds through optional sensor keys
-  (`outside_temp_sensor`, `compressor_hz_sensor`, `stage_sensor`,
-  `sub_mode_sensor`, `auto_sub_mode_sensor`, `battery_sensor` (also drives
-  the low-battery flag: 10%, +5% clear hysteresis), `runtime_sensor`, `power_sensor`,
-  `energy_sensor`) — each group sets its CAPS feature bit and INFO TLV; Wi-Fi,
-  firmware, and system info are always served. Any platform's entities
-  work; `example_cn105.yaml` shows the cn105 set.
-- Compile-verified against ESPHome 2026.7.4 / IDF 5.5.5; CI pins 2026.6.5 (see
-  [Tests](#tests)). The supported floor is ESPHome 2026.3.0 (see the
-  quickstart).
+- Do not add ESPHome's built-in `espnow:` component. It cannot share the radio
+  callback with `serin_link` and lacks link-layer encryption.
+- `vane_v_select:` and `vane_h_select:` bind positional vanes to select
+  entities. Option order defines positions; "auto" and "swing" are recognized
+  separately. Unbound axes are omitted from the Link's controls.
+- `hvac_link:` accepts a Boolean lambda for device connection health. For CN105,
+  use `hvac_link: !lambda 'return id(hvac).isHeatpumpConnected();'`.
+  Alternatively, bind a binary sensor with `hvac_link_sensor:`; the two are
+  mutually exclusive. Without either, an unavailable room temperature reports
+  the device offline, but a retained reading can conceal a lost connection.
+- `zone_name:` defaults to the climate entity's name, then the device's
+  friendly name.
+- `fahrenheit_table:` accepts `auto` (default), `linear`, or `mitsubishi`.
+  Auto selects the Mitsubishi scale when the visual step is 0.5 °C and the
+  range is within 16–31 °C; otherwise it uses linear conversion. On the
+  Mitsubishi scale, 72 °F represents 22.5 °C and setpoints use a 0.5 °C grid.
+  CN105 compatibility modes such as `fahrenheit_compatibility: standard`
+  require `fahrenheit_table: linear`. See the
+  [CN105 modes](https://github.com/echavet/MitsubishiCN105ESPHome/blob/4b63f3b4fab5ec55e8c8b3e917440a6e829fe04a/components/cn105/climate.py#L162).
+  The °C/°F display preference persists across restarts.
+- Commands are combined after 300 ms without further input. Requested values
+  appear immediately and remain until confirmed or a 10-second timeout expires.
+- Optional telemetry bindings are `outside_temp_sensor`, `compressor_hz_sensor`,
+  `stage_sensor`, `sub_mode_sensor`, `auto_sub_mode_sensor`, `battery_sensor`,
+  `runtime_sensor`, `power_sensor`, and `energy_sensor`. Battery readings set
+  the low-battery flag at 10% and clear it at 15%. Wi-Fi, firmware, and system
+  information are always provided. See the [CN105 example](esphome/example_cn105.yaml).
 
 ### Letting the Serin Link update itself
 
-A Serin Link installs its own firmware: Settings → About → Details → Update.
-It has no Wi-Fi credentials of its own, so it asks the controller it is
-bonded to. Opt in and the Link grows that update path:
+Enable **Settings → About → Details → Update** on supported Links:
 
 ```yaml
 serin_link:
@@ -612,53 +422,53 @@ serin_link:
   link_ota_credentials: true   # default false
 ```
 
-The node answers with the network it is configured for. The Link pauses
-its ESP-NOW link, joins, fetches Serin's firmware manifest over HTTPS,
-asks the user to confirm the version, then downloads, decrypts, and
-hash-verifies the image before switching boot partitions — the node supplies
-a network and nothing else, and never touches the firmware or its trust
-chain.
+This setting shares the controller's Wi-Fi SSID and PSK with a bonded Link
+on request over encrypted unicast. It is disabled by default. The Link keeps
+received credentials in RAM, clears them after use, and downloads and verifies
+its own firmware after the user confirms the version.
 
-Bonded Links pick this up on their own: the capability fingerprint bumps
-`caps_seq` when you reflash the node, every Link re-pulls, and the update
-path appears. No re-pairing, and no firmware update needed on the Link to
-enable Link firmware updates.
-
-What you are agreeing to, plainly:
-
-- **The Wi-Fi PSK goes to the Link.** Only to a Link that completed signed
-  pairing and is in the bond table, only over LMK-encrypted unicast, only
-  when it asks. It is held in RAM at both ends and zeroized after the join —
-  never written to flash on the Link. This is the same posture as the Serin
-  Controller firmware, made explicit here because on an ESPHome node it is
-  your network and your decision.
-- **WPA-Enterprise is rejected at config time.** An `eap:` network has no PSK
-  to relay, so combining it with `link_ota_credentials:` is refused rather
-  than shipping an update button that always fails.
-- **The Link needs internet.** It resolves and fetches over HTTPS and needs
-  NTP for certificate validation; on an IoT VLAN with no route out the check
-  fails at "Update check failed".
-- **The Link drops off the link while it updates.** Its `connected` and
-  per-slot diagnostics rows go down for the download and reboot, then
-  recover — bonds are persistent, so nothing needs re-pairing.
+- The network must allow DNS, HTTPS, and NTP. WPA-Enterprise (`eap:`) networks
+  are rejected because the relay requires an SSID and PSK.
+- ESP-NOW communication pauses during the update and restart. Saved bonds
+  remain valid; pairing again is not required.
 
 ## Adapting any controller firmware
 
-Implement two structs, call three functions:
+Provide three interfaces:
+
+| Interface | Responsibilities |
+| --- | --- |
+| `sl2_port_t` | Datagram transport, peer configuration, clock, and persistent key-value storage. |
+| `sl2_crypto_t` | Secure random generation, Ed25519 signatures, and X25519 key exchange. |
+| `sl2_hvac_iface_t` | Device state, command application, capabilities, and optional telemetry. |
+
+The crypto interface can use libsodium or Monocypher. SHA-256, HMAC, and HKDF
+are included in the core. Initialize the link after Wi-Fi and the radio are
+ready, and check the startup result. For example, in a startup function that
+returns `bool`:
 
 ```c
 sl2_link_init(&link, &port, &crypto, &hvac);
-sl2_link_start(&link);          /* after Wi-Fi/radio is up */
-/* every loop: drain your radio's rx into sl2_link_on_recv(), then */
+if (!sl2_link_start(&link)) {
+    /* Report the failure and arrange a retry before processing packets. */
+    return false;
+}
+```
+
+After successful startup, drain the receive queue into `sl2_link_on_recv()`
+and call the loop function regularly:
+
+```c
 sl2_link_loop(&link);
 ```
 
-`sl2_port_t` is the platform (send/peers/clock/key-value store),
-`sl2_hvac_iface_t` is your device (semantic state/apply/caps). The core owns
-everything else: pairing, crypto policy, bond storage, scheduling, fan-out.
-See the spec's §12 and the ESPHome component as a worked example.
-[mitsubishi-cn105-homekit](https://github.com/akifbayram/mitsubishi-cn105-homekit)
-is the reference non-ESPHome adopter.
+`sl2_link_on_recv()` and `sl2_link_loop()` must execute in the same context.
+Use the queue in `sl2_rxq.h` when radio callbacks run in a separate task.
+Keep the interface structures available for the lifetime of the link.
+
+See §12 of the [wire specification](docs/serin-link-wire-spec.md) for the full
+contract. Reference adapters are the ESPHome component and
+[mitsubishi-cn105-homekit](https://github.com/akifbayram/mitsubishi-cn105-homekit).
 
 ## Tests
 
@@ -667,27 +477,15 @@ test/run.sh
 RUN_TSAN=1 test/run.sh  # also check the two-task RX queue with ThreadSanitizer
 ```
 
-Plain gcc and g++, no hardware. Covers: wire layout offsets, tolerant short/long
-decode, TLV codec, the Mitsubishi °F table, pairing transcripts, bond-blob
-codec, and the full core FSM against a fake port with deterministic toy crypto
-— pair/reboot/persist, pin-mismatch refusal, bad-signature drop, bond-table
-limit, re-key timeout, STATE cadence (first-live/change/heartbeat/pull/offline),
-CMD apply + echo-to-all-Links, CAPS/INFO pulls, credential relay, forget, and
-stranger/broadcast rejection. The real ESPHome adapter also runs against host
-platform stubs with failed setup, missing/misconfigured peers, driver loss,
-Wi-Fi lifecycle events, bounded retries, pairing deferral, and silent Links.
-Adapter tests also cover climate telemetry and setpoints, fan detents,
-external-source health, room-source reconciliation, and `screen:` / `night:`
-restore at boot. The RX queue tests cover overflow, index rollover, and
-concurrent full-frame integrity. ThreadSanitizer requires a supported host
-runtime.
+The host suite requires gcc and g++. It covers protocol handling, pairing,
+persistence, climate controls, source selection, transport recovery, and
+receive-queue concurrency. It also checks Monocypher Ed25519/X25519 and
+in-tree HKDF against standard test vectors. ThreadSanitizer requires a
+supported host runtime; radio interoperability still needs hardware testing.
 
-CI runs the suite, a vendored-copy drift check, the ESPHome schema tests, and a
-compile of `example_spike.yaml` against ESPHome 2026.6.5 on every push.
-
-Real-curve crypto interop happens on hardware (libsodium on the Serin Link,
-vendored Monocypher on the ESPHome side); the toy
-crypto pins FSM logic only.
+CI runs the host suite, source synchronization and schema checks, and compiles
+`example_spike.yaml` with ESPHome 2026.6.5.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development instructions.
 
 ## License
 

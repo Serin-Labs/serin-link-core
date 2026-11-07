@@ -1,11 +1,11 @@
-# A complete two-Serin-Link CN105 controller via the packaged recipe — this
-# file is the whole device config. Everything zone-shaped (UART, climate
-# entity, serin_link binding, pairing button, diagnostics, room-sensor feed)
-# lives in packages/cn105.yaml; override any of it by redeclaring the key here.
+# A complete CN105 controller configuration for two Serin Links.
+# packages/cn105.yaml supplies the UART, climate entity, serin_link binding,
+# pairing button, diagnostics, and room-temperature callback. Override
+# package settings by declaring the corresponding keys in this file.
 #
 # Off-repo, replace the local includes with:
 #   packages:
-#     serin_cn105: github://Serin-Labs/serin-link-core/esphome/packages/cn105.yaml@v0.1.3-beta.9
+#     serin_cn105: github://Serin-Labs/serin-link-core/esphome/packages/cn105.yaml@v0.1.6
 
 substitutions:
   zone_name: "Living Room"
@@ -25,17 +25,17 @@ external_components:
   - source:
       type: local
       path: ../esphome/components
-      # off-repo: github://Serin-Labs/serin-link-core@v0.1.3-beta.9 (first
-      # tag with the multi-link keys)
+      # Outside this checkout, replace the source mapping with:
+      # source: github://Serin-Labs/serin-link-core@v0.1.6
     components: [serin_link]
 
 packages:
   serin_cn105: !include packages/cn105.yaml
 
 serin_link:
-  # Let a bonded Serin Link fetch its own firmware — relays this node's Wi-Fi
-  # credentials to it on request. See README, "Letting the Serin Link update
-  # itself", for what that hands to whom.
+  # Optional: relay this node's Wi-Fi credentials to a bonded Link on request
+  # so it can download firmware. See README, "Letting the Serin Link update
+  # itself", for the credential-sharing behavior.
   # link_ota_credentials: true
 
 wifi:
@@ -46,3 +46,25 @@ logger:
 api:
 ota:
   - platform: esphome
+
+binary_sensor:
+  # Physical pairing button for use when the network is unavailable.
+  # Hold for 2-10 seconds, then release to open the pairing window.
+  # Shorter and longer presses are ignored. GPIO41 is the AtomS3 Lite's
+  # front button; adjust the pin for your board.
+  - platform: gpio
+    id: pair_btn          # no name: -> internal, no Home Assistant entity
+    pin:
+      number: GPIO41
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_off: 10ms
+    on_click:
+      min_length: 2s
+      max_length: 10s
+      then:
+        - serin_link.pair_start:
+            window: ${pair_window}

@@ -145,12 +145,17 @@ binary_sensor:
         pullup: true
     filters:
       - delayed_off: 10ms
-    # Physical pairing button: opens the 60 s pairing window without needing
-    # HA/web (the template button below requires Wi-Fi to be reachable).
-    on_press:
+    # Hold for 2-10 seconds, then release to open the 60-second pairing
+    # window. Shorter and longer presses are ignored. This physical button
+    # remains available when Home Assistant or the web interface cannot
+    # be reached.
+    on_click:
+      min_length: 2s
+      max_length: 10s
       then:
-        - logger.log: Button pressed — opening Serin pairing window
-        - lambda: 'id(serin).pair_start(60000);'
+        - logger.log: Pair button held — opening Serin pairing window
+        - serin_link.pair_start:
+            window: 60s
   - platform: template
     name: "Serin Link Connected"
     lambda: 'return id(serin).any_dial_live();'

@@ -19,9 +19,8 @@ external_components:
   - source:
       type: local
       path: ../esphome/components
-      # no published tag has the telemetry keys below yet (v0.1.2 predates
-      # them); TODO(release): once one ships, point this at
-      # github://Serin-Labs/serin-link-core@vX.Y.Z instead.
+      # Outside this checkout, replace the source mapping with:
+      # source: github://Serin-Labs/serin-link-core@v0.1.6
     components: [serin_link]
 
 wifi:
@@ -75,14 +74,13 @@ serin_link:
   #                           # has one (see example_cn105.yaml); unset, a NaN
   #                           # room temp on an entity that claims one reports
   #                           # the link down (never-heard-from-device)
-  # The Serin Link's own sensor — climate.sensor: above already points straight at
-  # dial_temp, no automation needed on this platform. Two ways this differs
-  # from cn105's recipe, both worth knowing before you deploy it:
-  #   - `thermostat` has exactly one sensor input, no internal thermistor
-  #     behind it, so there's nothing for the Serin Link's Internal/Link cycle to
-  #     switch between here — the Serin Link just IS the control sensor.
-  #   - No remote_temperature_timeout equivalent: if the Serin Link goes stale,
-  #     the entity's temperature goes unknown rather than falling back.
+  # The thermostat uses dial_temp directly as its control sensor. It has no
+  # internal thermistor or remote-temperature timeout to provide a fallback.
+  # Choosing Heat pump in the Link's Room Sensor menu does not change this
+  # direct sensor binding. If the Link's reading becomes unknown, the
+  # thermostat requests OFF, subject to the minimum run times configured
+  # above. An active heater may therefore continue until its five-minute
+  # minimum run time has elapsed.
   link_sensor:
     temperature:
       id: dial_temp
